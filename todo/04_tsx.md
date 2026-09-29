@@ -1,0 +1,36 @@
+# 阶段 4：tsx / React
+
+## 前提（硬依赖）
+
+阶段 1（Program 链接）必须先完成——tsx 多文件不进来，一切免谈。
+
+## 现状
+
+`sa react` 只吃 `.sax`（产出 `app.wasm + airlock.js + index.html`），不认识 tsx。
+目标端已有 state 槽 + `@onMount/@onUpdate/@onUnmount`，这是 hooks 落点的基础。
+
+## 任务
+
+### 路一：tsx → SAX 资源（先行）
+
+1. [ ] tsgo 解析 tsx（JSX 节点现成），新 emitter 把 JSX 脱糖成 `.sax` 组件源。
+2. [ ] 语义子集：props/state 初始化、条件渲染、列表渲染；其余（spread props、复杂 children 透传）逐个关或拒。
+3. [ ] 复用整条 `sa react build`（airlock、事件桥、lifecycle）。
+4. [ ] 交付：counter 级组件 `sa react build` 跑通（含 Chromium verifier，若有）。
+
+### 路二：hooks / DOM（子集推进）
+
+5. [ ] `useState` → SAX state slot。
+6. [ ] 挂载期 `useEffect` → `@onMount`；其余 hooks（deps/cleanup）gate 拒绝。
+7. [ ] DOM 投影表（`createElement/appendChild/setAttribute` → airlock extern），相当于给浏览器环境再做一套投影。
+8. [ ] JSX → 直接 SA 调用（`createElement` 内联），绕过 `.sax` 中间态（可选优化，不阻塞）。
+
+## 交付数字
+
+- 路一：无 hooks 组件端到端跑通。
+- 路二：`useState` + 挂载 `useEffect` demo 通过；超子集用例明确拒绝。
+
+## 风险
+
+- 调度语义（重渲染时机、effect 时序）是深坑，严格限制子集，不做“看起来能跑”的半吊子。
+- 路二工作量不小于当初的 std 投影表，单独排期。
