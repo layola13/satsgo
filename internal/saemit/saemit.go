@@ -72,7 +72,16 @@ func Lower(fileName, sourceText string) Result {
 		Path:     tspath.ToPath(abs, "/", true),
 	}
 	sf := parser.ParseSourceFile(opts, sourceText, core.ScriptKindTS)
-	e := &emitter{file: fileName, src: sourceText, lines: lineOffsets(sourceText)}
+	tcx := newTypeCtx(map[string]string{fileName: sourceText})
+	if tcx != nil {
+		defer tcx.close()
+		// Lower the checker's own SourceFile so node identity matches
+		// GetTypeAtLocation (positions are identical: same text).
+		if psf := tcx.prog.GetSourceFile(abs); psf != nil {
+			sf = psf
+		}
+	}
+	e := &emitter{file: fileName, src: sourceText, lines: lineOffsets(sourceText), tcx: tcx}
 	e.lowerSourceFile(sf)
 	return Result{
 		SAI:         e.finish(),
@@ -330,6 +339,9 @@ type emitter struct {
 	// linkExports maps every linked top-level function name to its file
 	// (for the "import it first" diagnostic).
 	linkExports map[string]string
+	// tcx is the shared binder/checker context (nil-safe: syntax-only
+	// fallback preserves exact legacy behavior).
+	tcx *typeCtx
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -993,6 +1005,18 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	if annot != nil && annot.Kind == ast.KindTypeReference {
 		if l, ok := e.layouts[annot.AsTypeReferenceNode().TypeName.Text()]; ok {
 			e.varLayouts[name] = l
+		}
+	}
+	// Union constituents contribute the first known struct layout
+	// (`Box | null` still reads .v through the Box layout under a guard).
+	if annot != nil && (annot.Kind == ast.KindUnionType || annot.Kind == ast.KindIntersectionType) {
+		for _, m := range annot.AsUnionTypeNode().Types.Nodes {
+			if m.Kind == ast.KindTypeReference {
+				if l, ok := e.layouts[m.AsTypeReferenceNode().TypeName.Text()]; ok {
+					e.varLayouts[name] = l
+					break
+				}
+			}
 		}
 	}
 	// object literals self-report their layout via matchLayout.
@@ -1926,6 +1950,13 @@ func (e *emitter) lowerIncDec(operand *ast.Node, up, postfix bool, pos *ast.Node
 
 func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	call := n.AsCallExpression()
+	// `f?.()` with a statically nullable callee guards null (checker-
+	// driven; the subset has no nullable function values otherwise, so
+	// non-nullable callees keep the direct shape).
+	if call.QuestionDotToken != nil && e.tcx != nil &&
+		call.Expression.Kind == ast.KindIdentifier && e.tcx.nullable(call.Expression) {
+		return e.lowerGuardedCall(n)
+	}
 	args := []string{}
 	argTypes := []saType{}
 	for _, a := range call.Arguments.Nodes {
@@ -2139,6 +2170,74 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	}
 	e.refuse(n, "call target is not in the SA-lowerable subset (functions are not first-class values)")
 	return "0", tUnknown
+}
+
+// lowerGuardedCall emits the null-guarded direct call join for `f?.()`:
+// null callee yields 0, otherwise the call runs (identifier callees only;
+// member optionals route through the method/property guards).
+func (e *emitter) lowerGuardedCall(n *ast.Node) (string, saType) {
+	call := n.AsCallExpression()
+	fname := call.Expression.Text()
+	base := fname
+	slot := e.freshTmp()
+	e.emit("%s = alloc 8", slot)
+	e.ownTemp(slot)
+	endL := e.freshLabel("call_end")
+	nullL := e.freshLabel("call_null")
+	okL := e.freshLabel("call_ok")
+	isnull := e.freshTmp()
+	e.emit("%s = eq %s, 0", isnull, base)
+	e.emit("br %s -> %s, %s", isnull, nullL, okL)
+	e.emitRaw("%s:", nullL)
+	e.emit("store %s + 0, 0 as ptr", slot)
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", okL)
+	// Re-parse as a direct call: build a detached direct-call lowering by
+	// reusing the same argument nodes through the standard path. The
+	// callee is an identifier, so re-lowering is pure.
+	args := []string{}
+	for _, a := range call.Arguments.Nodes {
+		v, _ := e.lowerExpr(a)
+		args = append(args, v)
+	}
+	v := e.lowerDirectCallee(fname, args, n)
+	e.emit("store %s + 0, %s as ptr", slot, v)
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", endL)
+	dest := e.freshTmp()
+	e.emit("%s = load %s + 0 as i32", dest, slot)
+	e.releaseIfOwnedTemp(slot)
+	return dest, tI32
+}
+
+// lowerDirectCallee lowers a same-scope identifier call without optional
+// handling (shared by the guarded-call ok arm).
+func (e *emitter) lowerDirectCallee(fname string, args []string, n *ast.Node) string {
+	if ai, ok := e.arrowAliases[fname]; ok {
+		full := append(append([]string{}, args...), ai.captures...)
+		if ai.ret == tVoid {
+			e.emit("call @%s(%s)", ai.fn, strings.Join(full, ", "))
+			return "0"
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, ai.fn, strings.Join(full, ", "))
+		e.ownTemp(t)
+		return t
+	}
+	if q, ok := e.importEnv[fname]; ok {
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, q, strings.Join(args, ", "))
+		e.ownTemp(t)
+		return t
+	}
+	if _, ok := e.funcSigs[fname]; ok {
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, e.fnRef(fname), strings.Join(args, ", "))
+		e.ownTemp(t)
+		return t
+	}
+	e.refuse(n, "call to unknown function %s (declare it before use)", fname)
+	return "0"
 }
 
 // lowerMethodCall dispatches property calls. It returns ok=false when the
@@ -4964,6 +5063,62 @@ func (e *emitter) lowerConsoleLog(args []string) string {
 }
 
 func (e *emitter) lowerPropertyAccess(n *ast.Node) (string, saType) {
+	pa := n.AsPropertyAccessExpression()
+	// `a?.b` with a statically nullable base guards null (checker-driven;
+	// non-nullable receivers keep the direct shape, and syntax-only
+	// lowering preserves the legacy downgrade).
+	if pa.QuestionDotToken != nil && e.tcx != nil && e.tcx.nullable(pa.Expression) {
+		if !isPureBase(pa.Expression) {
+			e.refuse(n, "?. on an effectful base is not lowerable (bind it first)")
+			return "0", tUnknown
+		}
+		return e.lowerGuardedProperty(n)
+	}
+	return e.lowerPropertyAccessInner(n)
+}
+
+// isPureBase reports side-effect-free member bases (safe to lower twice
+// across a guard join).
+func isPureBase(n *ast.Node) bool {
+	switch n.Kind {
+	case ast.KindIdentifier, ast.KindThisKeyword:
+		return true
+	case ast.KindPropertyAccessExpression:
+		pa := n.AsPropertyAccessExpression()
+		return pa.QuestionDotToken == nil && isPureBase(pa.Expression)
+	}
+	return false
+}
+
+// lowerGuardedProperty emits the null-guarded member join: null base yields
+// 0, otherwise the direct member shape runs (mirrors lowerCheckedIndex).
+func (e *emitter) lowerGuardedProperty(n *ast.Node) (string, saType) {
+	pa := n.AsPropertyAccessExpression()
+	base, _ := e.lowerExpr(pa.Expression)
+	slot := e.freshTmp()
+	e.emit("%s = alloc 8", slot)
+	e.ownTemp(slot)
+	endL := e.freshLabel("prop_end")
+	nullL := e.freshLabel("prop_null")
+	loadL := e.freshLabel("prop_ok")
+	isnull := e.freshTmp()
+	e.emit("%s = eq %s, 0", isnull, base)
+	e.emit("br %s -> %s, %s", isnull, nullL, loadL)
+	e.emitRaw("%s:", nullL)
+	e.emit("store %s + 0, 0 as ptr", slot)
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", loadL)
+	v, t := e.lowerPropertyAccessInner(n)
+	e.emit("store %s + 0, %s as ptr", slot, v)
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", endL)
+	dest := e.freshTmp()
+	e.emit("%s = load %s + 0 as i32", dest, slot)
+	e.releaseIfOwnedTemp(slot)
+	return dest, t
+}
+
+func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 	pa := n.AsPropertyAccessExpression()
 	// Enum.Member folds to its ordinal as a value.
 	if pa.Expression.Kind == ast.KindIdentifier {

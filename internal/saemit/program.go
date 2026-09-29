@@ -53,7 +53,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("entry %s not in file set", entry))
 		return res
 	}
-	// Parse every file.
+	// Parse every file (fallback trees; the checker's trees win when the
+	// type context builds so node identity matches type queries).
 	parsed := map[string]*ast.SourceFile{}
 	var parseErrs []string
 	for p, text := range files {
@@ -248,6 +249,23 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	// Lower in dependency order (leaves first; reachable is post-order).
 	order := append([]string{}, reachable...)
 	res.Files = order
+	// Shared binder/checker over the reachable set (nil-safe fallback).
+	tcx := newTypeCtx(func() map[string]string {
+		m := map[string]string{}
+		for _, p := range reachable {
+			m[p] = files[p]
+		}
+		return m
+	}())
+	if tcx != nil {
+		defer tcx.close()
+		// Prefer the checker's trees for node-identity type queries.
+		for _, p := range reachable {
+			if psf := tcx.prog.GetSourceFile("/" + strings.TrimPrefix(p, "/")); psf != nil {
+				parsed[p] = psf
+			}
+		}
+	}
 	// Every linked top-level name for the "import it first" diagnostic.
 	linkExports := map[string]string{}
 	for _, p := range reachable {
@@ -266,6 +284,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		e.prefix = prefixOf[p]
 		e.link = links[p]
 		e.linkExports = linkExports
+		e.tcx = tcx
 		e.layouts = sharedLayouts
 		e.classDefs = sharedClassDefs
 		e.enums = sharedEnums

@@ -28,3 +28,12 @@
   按包聚合 gate 报告）+ 内容 hash 增量缓存（`.tsgo-sa-cache.json`）。
 - 286 单文件扫测零回退（prefix "" 输出不变）。
 - 复用约束已扩展 node/deno/bun（见上）。
+
+### Phase 2：checker 接入（进行中，见 todo/02_checker.md）
+
+- ✅ `typeCtx`（`typecheck.go`）：NoLib 内存 Program + checker，单文件/Program 共享，
+  lower 改走 checker 的 SourceFile（节点身份对齐）；失败/异常一律回退语法 lowering。
+  spike 实测：建 Program+bind 约 400µs，可忽略。
+- ✅ `?.` 真守卫：checker 可空（union 含 null/undefined）→ null-join（`a?.b`/`f?.()`）；
+  非空保持直调；effectful 基座大声拒。联合注解（`Box|null`）贡献首个已知布局。
+- 286 单文件扫测零回退 + 形状全过；单测 2 项（可空守卫/非空直调）。

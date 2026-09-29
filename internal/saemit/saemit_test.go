@@ -138,6 +138,45 @@ function main(): i32 {
 	}
 }
 
+func TestLowerOptionalChainGuard(t *testing.T) {
+	src := `interface Box {
+  v: i32;
+}
+function get(b: Box | null): i32 {
+  const x = b?.v;
+  return x;
+}
+function main(): i32 {
+  return 1;
+}
+`
+	res := mustLower(t, "opt.ts", src)
+	// Checker-driven null guard: null base yields 0 via the join.
+	for _, want := range []string{"eq b, 0", "L_prop_null", "L_prop_ok", "load b + 0 as i32"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestLowerOptionalNonNullDirect(t *testing.T) {
+	src := `function plus(a: i32, b: i32): i32 {
+  return a + b;
+}
+function main(): i32 {
+  return plus?.(3, 4);
+}
+`
+	res := mustLower(t, "opt2.ts", src)
+	// Non-nullable callee keeps the direct call (no guard labels).
+	if strings.Contains(res.SAI, "L_call_null") {
+		t.Errorf("unexpected guard for non-nullable callee:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "call @plus(3, 4)") {
+		t.Errorf("missing direct call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
