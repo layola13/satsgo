@@ -55,6 +55,9 @@
   67 sa_std + 2 node 契约全过；单测 1 项。btree 符号一并补进 sa_std 名单。
 - ✅ node `os.*` 同形状扩展（homedir/tmpdir/hostname，零参 string out-param 通用路径）；
   node 契约 5/5 全过。
+- ✅ node `os.*` Batch2（release/type/endianness/machine/cpus，同 `(&out_ptr,&out_len)->u32`
+  形状，免发射器改动，纯投影表+契约+单测）；node 契约 12/12 全过（Go 1.27.1
+  `go test ./internal/saemit/` 全过；sci/sa_std 侧 31 缺失为基线预存，与本批无关）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

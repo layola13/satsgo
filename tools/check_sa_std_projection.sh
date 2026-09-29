@@ -73,6 +73,11 @@ node_symbols=(
   sa_node_plugin_os_homedir
   sa_node_plugin_os_tmpdir
   sa_node_plugin_os_hostname
+  sa_node_plugin_os_release
+  sa_node_plugin_os_type
+  sa_node_plugin_os_endianness
+  sa_node_plugin_os_machine
+  sa_node_plugin_os_cpus
   sa_node_plugin_process_cwd
   sa_node_plugin_crypto_random_uuid
 )

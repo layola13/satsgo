@@ -301,6 +301,19 @@ func TestLowerNodeOs(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
 	}
+	nodeOsBatch2 := "import { release, type, endianness, machine, cpus } from \"os\";\nfunction main(): i32 {\n  return release().length + type().length + endianness().length + machine().length + cpus().length;\n}\n"
+	res = mustLower(t, "n3b.ts", nodeOsBatch2)
+	for _, want := range []string{
+		"call @sa_node_plugin_os_release",
+		"call @sa_node_plugin_os_type",
+		"call @sa_node_plugin_os_endianness",
+		"call @sa_node_plugin_os_machine",
+		"call @sa_node_plugin_os_cpus",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 	nodeGlobals := "function main(): i32 {\n  const c = process.cwd();\n  const u = crypto.randomUUID();\n  return c.length + u.length;\n}\n"
 	res = mustLower(t, "n4.ts", nodeGlobals)
 	for _, want := range []string{

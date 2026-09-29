@@ -175,6 +175,17 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "os.hostname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_hostname", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	// Batch 2: same (&out_ptr,&out_len)->u32 shape, verified in node.sai.
+	{TS: "os.release", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_release", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.type", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_type", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.endianness", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_endianness", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.machine", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_machine", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.cpus", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_cpus", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	// process/crypto globals (Node exposes them without import; same shape).
 	{TS: "process.cwd", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_process_cwd", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
