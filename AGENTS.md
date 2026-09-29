@@ -94,6 +94,11 @@
 - ✅ `fs.readFile` buffer 协议：u64! 按 `{status:i32,payload:u64}` 取 +8 payload 后
   经 data/len 解包（直接当 slice 读长度错 4 vs 8）；write→read roundtrip 真机 8 对数。
   单测 1 项。286 零回退。
+- ✅ fs 真机验证（fixtures）：write/read/mkdir/remove 全部真实生效
+  （`b.txt` 7 字节落盘、`gone.txt` 删除、`newdir` 创建、read 长度对）；
+  `create`（`sa_fs_file_create`）裸调亦返回 1 且不建文件——stdlib 侧行为，
+  与参考一致，非 lowering 问题。net（live listener 无连接到达）归环境桶，
+  与参考 `upstream` 口径一致。单测 1 项。286 零回退。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 
