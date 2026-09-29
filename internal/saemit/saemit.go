@@ -1620,6 +1620,10 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		return "0", tI32
 	case ast.KindTypeOfExpression:
 		return e.lowerTypeof(n)
+	case ast.KindDeleteExpression:
+		// Static layouts cannot drop fields; Map/Set use .delete().
+		e.refuse(n, "delete operator is not lowerable (static layouts cannot drop fields; Maps/Sets use .delete())")
+		return "0", tUnknown
 	case ast.KindIdentifier:
 		// Handle aliases resolve to the underlying register (inlined
 		// method params never copy handles).
@@ -1823,6 +1827,32 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	if isCompoundAssign(op) {
 		e.lowerCompoundAssign(bin, op)
 		return "0", tI32
+	}
+	// `in` folds statically: layouts are fixed, so field presence is a
+	// compile-time 1/0 (unknown bases refuse loudly). The verdict
+	// materialises into a temp (br takes registers, not immediates).
+	if op == ast.KindInKeyword {
+		verdict := ""
+		if bin.Left.Kind == ast.KindStringLiteral {
+			if s, ok := stringLiteralText(bin.Left); ok {
+				if bin.Right.Kind == ast.KindIdentifier {
+					if l := e.layoutOfVar(bin.Right.Text()); l != nil {
+						if _, ok := l.offsets[s]; ok {
+							verdict = "1"
+						} else {
+							verdict = "0"
+						}
+					}
+				}
+			}
+		}
+		if verdict == "" {
+			e.refuse(n, "in operator needs a literal key and a known-layout object")
+			return "0", tUnknown
+		}
+		t := e.freshTmp()
+		e.emit("%s = %s", t, verdict)
+		return t, tBool
 	}
 	// `??` lowers as a nullish join-slot (mirrors sa_plugin_ts
 	// parseNullishCoalesce): the subset maps null/undefined to 0, so a

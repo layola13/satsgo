@@ -99,6 +99,8 @@
   `create`（`sa_fs_file_create`）裸调亦返回 1 且不建文件——stdlib 侧行为，
   与参考一致，非 lowering 问题。net（live listener 无连接到达）归环境桶，
   与参考 `upstream` 口径一致。单测 1 项。286 零回退。
+- ✅ `in` 静态折叠（布局固定→编译期 1/0，进寄存器）+ `delete` 大声拒
+  （静态布局不可删字段；Map/Set 用方法）。真机 1 对数；单测 1 项。286 零回退。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 

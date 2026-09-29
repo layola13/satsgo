@@ -381,6 +381,19 @@ func TestLowerFsReadUnwrap(t *testing.T) {
 	}
 }
 
+func TestLowerInDelete(t *testing.T) {
+	src := "interface Cfg {\n  path: string;\n  retries: i32;\n}\nfunction main(): i32 {\n  const c: Cfg = { path: `x`, retries: 2 };\n  let r: i32 = 0;\n  if (\"retries\" in c) { r = r + 1; }\n  if (\"nope\" in c) { r = r + 10; }\n  return r;\n}\n"
+	res := mustLower(t, "in.ts", src)
+	if strings.Count(res.SAI, "br ") != 2 {
+		t.Errorf("expected folded branches:\n%s", res.SAI)
+	}
+	del := "interface Cfg {\n  path: string;\n}\nfunction main(): i32 {\n  const c: Cfg = { path: `x` };\n  delete c.path;\n  return 0;\n}\n"
+	r := Lower("del.ts", del)
+	if !r.Refused {
+		t.Fatalf("expected delete refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
