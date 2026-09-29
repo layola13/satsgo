@@ -351,6 +351,20 @@ func TestLowerLengthFieldPriority(t *testing.T) {
 	}
 }
 
+func TestLowerTypeofStringEq(t *testing.T) {
+	src := "function fn(a: i32): i32 {\n  return a;\n}\nfunction main(): i32 {\n  const s: string = \"hi\";\n  let r: i32 = 0;\n  if (typeof fn == \"function\") { r = r + 1; }\n  if (typeof s == \"string\") { r = r + 2; }\n  if (s == \"hi\") { r = r + 4; }\n  if (s != \"yo\") { r = r + 8; }\n  return r;\n}\n"
+	res := mustLower(t, "te.ts", src)
+	// Content equality via indexOf (never bare address compare).
+	if !strings.Contains(res.SAI, "call @sa_string_index_of") {
+		t.Errorf("missing content equality:\n%s", res.SAI)
+	}
+	unk := "function main(): i32 {\n  if (typeof self == \"object\") { return 1; }\n  return 0;\n}\n"
+	r := Lower("te2.ts", unk)
+	if !r.Refused {
+		t.Fatalf("expected unknown-global refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

@@ -1618,6 +1618,8 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		// lowering through the operand).
 		_, _ = e.lowerExpr(n.AsVoidExpression().Expression)
 		return "0", tI32
+	case ast.KindTypeOfExpression:
+		return e.lowerTypeof(n)
 	case ast.KindIdentifier:
 		// Handle aliases resolve to the underlying register (inlined
 		// method params never copy handles).
@@ -1904,13 +1906,19 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	case ast.KindCaretToken:
 		e.emit("%s = xor %s, %s", t, l, r)
 	case ast.KindEqualsEqualsToken, ast.KindEqualsEqualsEqualsToken:
-		if floats {
+		if lt == tString && rt == tString {
+			// Content equality (address compare would lie): equal
+			// lengths plus a zero-offset indexOf hit.
+			e.emit("%s = %s", t, e.stringContentEq(l, r, false))
+		} else if floats {
 			e.emit("%s = fcmp_eq %s, %s", t, l, r)
 		} else {
 			e.emit("%s = eq %s, %s", t, l, r)
 		}
 	case ast.KindExclamationEqualsToken, ast.KindExclamationEqualsEqualsToken:
-		if floats {
+		if lt == tString && rt == tString {
+			e.emit("%s = %s", t, e.stringContentEq(l, r, true))
+		} else if floats {
 			e.emit("%s = fcmp_ne %s, %s", t, l, r)
 		} else {
 			e.emit("%s = ne %s, %s", t, l, r)
@@ -6320,6 +6328,85 @@ func (e *emitter) layoutOfVar(base string) *layout {
 // ---------------------------------------------------------------------------
 // Type declarations: recorded, no code emitted (static layout)
 // ---------------------------------------------------------------------------
+
+// stringContentEq compares string contents: equal lengths plus a
+// zero-offset indexOf hit (address compare would lie for distinct slices
+// with equal bytes). negate flips the verdict.
+func (e *emitter) stringContentEq(l, r string, negate bool) string {	e.needImport("sa_std/string.sai")
+	lp, ll := e.expandSlice(l)
+	rp, rl := e.expandSlice(r)
+	idx := e.freshTmp()
+	e.emit("%s = call @sa_string_index_of(%s, %s, %s, %s, 0)", idx, lp, ll, rp, rl)
+	e.ownTemp(idx)
+	at0 := e.freshTmp()
+	e.emit("%s = eq %s, 0", at0, idx)
+	samelen := e.freshTmp()
+	e.emit("%s = eq %s, %s", samelen, ll, rl)
+	both := e.freshTmp()
+	e.emit("%s = and %s, %s", both, at0, samelen)
+	e.releaseIfOwnedTemp(idx)
+	out := e.freshTmp()
+	if negate {
+		e.emit("%s = eq %s, 0", out, both)
+	} else {
+		e.emit("%s = add %s, 0", out, both)
+	}
+	return out
+}
+
+// lowerTypeof folds statically-known typeof queries to string slices
+// (JS operator semantics for the subset kinds; anything else refuses —
+// environment probes like `typeof self` name unbound globals).
+func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
+	op := n.AsTypeOfExpression().Expression
+	kind := ""
+	if op.Kind == ast.KindIdentifier {
+		name := op.Text()
+		switch {
+		case e.strVars[name]:
+			kind = "string"
+		case e.arrVars[name] || e.mapVars[name] || e.setVars[name]:
+			kind = "object"
+		case e.layoutOfVar(name) != nil:
+			kind = "object"
+		case e.f64Vars[name]:
+			kind = "number"
+		default:
+			if _, ok := e.arrowAliases[name]; ok {
+				kind = "function"
+			} else if _, ok := e.funcSigs[name]; ok {
+				kind = "function"
+			} else if _, ok := e.constVals[name]; ok && !e.constIsStr[name] {
+				kind = "number"
+			} else if e.lookupBinding(name) == nil {
+				e.refuse(n, "typeof unknown global %s is not lowerable", name)
+				return "0", tUnknown
+			} else {
+				e.refuse(n, "typeof %s is not statically known", name)
+				return "0", tUnknown
+			}
+		}
+	} else {
+		switch op.Kind {
+		case ast.KindNumericLiteral:
+			kind = "number"
+		case ast.KindStringLiteral, ast.KindNoSubstitutionTemplateLiteral:
+			kind = "string"
+		case ast.KindTrueKeyword, ast.KindFalseKeyword:
+			kind = "boolean"
+		case ast.KindNullKeyword, ast.KindUndefinedKeyword:
+			kind = "undefined"
+		case ast.KindArrowFunction, ast.KindFunctionExpression:
+			kind = "function"
+		case ast.KindArrayLiteralExpression, ast.KindObjectLiteralExpression:
+			kind = "object"
+		default:
+			e.refuse(n, "typeof on computed values is not lowerable (bind it first)")
+			return "0", tUnknown
+		}
+	}
+	return e.lowerStringLiteral(kind), tString
+}
 
 func (e *emitter) lowerTypeDecl(st *ast.Node) {
 	// Interfaces / aliases / enums: layout recorded, no code emitted.

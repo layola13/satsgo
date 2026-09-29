@@ -88,6 +88,9 @@
     `.length` 结构体同名字段优先；clone 恢复句柄性（Identifier 恒 tI32 坑）；
     Identifier 上报静态类型（修字符串变量被 sext 格式化）。
   - 复制：`copyRange` 目标偏移用 di（曾用循环变量 i，toSpliced 错 4）。
+- ✅ `typeof` 窄子集 + 字符串内容相等：已知静态 kind（字面量/string/array/布局/箭头/函数/
+  常量；未知全局/动态值大声拒）折叠为 slice；`==`/`!=` 双 string 走
+  `index_of==0 && 等长`（地址比曾静默错）。真机 63 对数；单测 1 项。286 零回退。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 
