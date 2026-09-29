@@ -365,6 +365,22 @@ func TestLowerTypeofStringEq(t *testing.T) {
 	}
 }
 
+func TestLowerFsReadUnwrap(t *testing.T) {
+	src := "import { readFile } from \"fs\";\nfunction main(): i32 {\n  const d: string = readFile(\"/tmp/x.txt\");\n  return d.length;\n}\n"
+	res := mustLower(t, "fs.ts", src)
+	// Buffer-handle protocol: payload at +8, then data/len unwrap.
+	out := res.SAI
+	for _, want := range []string{
+		"call @sa_fs_read_buffer_data",
+		"call @sa_fs_read_buffer_len",
+		"+ 8 as u64",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

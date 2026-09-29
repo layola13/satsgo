@@ -91,6 +91,9 @@
 - ✅ `typeof` 窄子集 + 字符串内容相等：已知静态 kind（字面量/string/array/布局/箭头/函数/
   常量；未知全局/动态值大声拒）折叠为 slice；`==`/`!=` 双 string 走
   `index_of==0 && 等长`（地址比曾静默错）。真机 63 对数；单测 1 项。286 零回退。
+- ✅ `fs.readFile` buffer 协议：u64! 按 `{status:i32,payload:u64}` 取 +8 payload 后
+  经 data/len 解包（直接当 slice 读长度错 4 vs 8）；write→read roundtrip 真机 8 对数。
+  单测 1 项。286 零回退。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 

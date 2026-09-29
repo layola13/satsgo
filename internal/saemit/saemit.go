@@ -2369,7 +2369,15 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		// Named std imports: readFile(...) with `import { readFile } from "fs"`.
 		if mod, ok := e.importedFrom[fname]; ok {
 			if proj, ok := projectionByTS(mod + "." + fname); ok {
-				return e.emitProjCall(proj, args, n)
+				v, t := e.emitProjCall(proj, args, n)
+				// fs.readFile returns a BUFFER handle (u64!): unwrap via
+				// read_buffer_data/len like from_char_code (a direct
+				// slice read yields a garbage length).
+				if proj.TS == "fs.readFile" && !e.refused {
+					e.needImport("sa_std/fs.sai")
+					return e.unwrapFsBuffer(v)
+				}
+				return v, t
 			}
 			e.refuse(n, "%s.%s is not a projected std surface (see StdProjectionTable)", mod, fname)
 			return "0", tUnknown
@@ -2534,6 +2542,30 @@ func (e *emitter) lowerDirectCallee(fname string, args []string, n *ast.Node) st
 	}
 	e.refuse(n, "call to unknown function %s (declare it before use)", fname)
 	return "0"
+}
+
+// unwrapFsBuffer wraps an fs buffer handle into a {ptr,len} slice: the
+// u64! call value is a {status:i32, payload:u64} struct in memory; the
+// payload at +8 is the buffer for data/len.
+func (e *emitter) unwrapFsBuffer(buf string) (string, saType) {
+	h := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", h, buf)
+	e.releaseIfOwnedTemp(buf)
+	bp := e.freshTmp()
+	e.emit("%s = call @sa_fs_read_buffer_data(%s)", bp, h)
+	e.ownTemp(bp)
+	bl := e.freshTmp()
+	e.emit("%s = call @sa_fs_read_buffer_len(%s)", bl, h)
+	e.ownTemp(bl)
+	out := e.freshTmp()
+	e.emit("%s = alloc 16", out)
+	e.emit("store %s + 0, %s as ptr", out, bp)
+	e.emit("store %s + 8, %s as u64", out, bl)
+	e.declareOwned(out)
+	e.releaseIfOwnedTemp(bp)
+	e.releaseIfOwnedTemp(bl)
+	e.releaseIfOwnedTemp(buf)
+	return out, tString
 }
 
 // lowerMethodCall dispatches property calls. It returns ok=false when the
