@@ -2619,8 +2619,8 @@ func (e *emitter) lowerSetMethod(recv, method string, args []string, types []saT
 // the call site; plain forms of sort/toSorted still lower directly).
 func isHigherOrderMethod(method string) bool {
 	switch method {
-	case "forEach", "map", "filter", "find", "findIndex", "some", "every",
-		"reduce", "reduceRight", "sort", "toSorted":
+	case "forEach", "map", "filter", "find", "findIndex", "findLast", "findLastIndex",
+		"some", "every", "reduce", "reduceRight", "sort", "toSorted":
 		return true
 	}
 	return false
@@ -2774,6 +2774,49 @@ func (e *emitter) lowerHigherOrder(recv, method string, args []string, argNodes 
 			e.emit("store %s + 0, %s as ptr", slot, i)
 		}
 		e.emit("jmp %s", endL)
+		e.emitRaw("%s:", nextL)
+		inext := e.freshTmp()
+		e.emit("%s = add %s, 1", inext, i)
+		e.emit("%s = %s", i, inext)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		out := e.freshTmp()
+		e.emit("%s = load %s + 0 as i32", out, slot)
+		e.releaseIfOwnedTemp(slot)
+		return out, tI32, true
+	case "findLast", "findLastIndex":
+		// Same scan without early exit: every hit overwrites the slot,
+		// so the last match wins (reference reverse-scan semantics).
+		slot := e.freshTmp()
+		e.emit("%s = alloc 8", slot)
+		e.ownTemp(slot)
+		init := "-1"
+		if method == "findLast" {
+			init = "0"
+		}
+		e.emit("store %s + 0, %s as ptr", slot, init)
+		i := e.freshTmp()
+		e.emit("%s = 0", i)
+		topL := e.freshLabel("fl_top")
+		bodyL := e.freshLabel("fl_body")
+		endL := e.freshLabel("fl_end")
+		hitL := e.freshLabel("fl_hit")
+		nextL := e.freshLabel("fl_next")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		v, _ := e.callbackValue(cb, []string{el, i}, true, pos)
+		e.emit("br %s -> %s, %s", v, hitL, nextL)
+		e.emitRaw("%s:", hitL)
+		if method == "findLast" {
+			e.emit("store %s + 0, %s as ptr", slot, el)
+		} else {
+			e.emit("store %s + 0, %s as ptr", slot, i)
+		}
+		e.emit("jmp %s", nextL)
 		e.emitRaw("%s:", nextL)
 		inext := e.freshTmp()
 		e.emit("%s = add %s, 1", inext, i)
@@ -4741,15 +4784,26 @@ func (e *emitter) lowerArrayConcat(recv, elem string, esz int, args []string, ty
 }
 
 // lowerArrayFrom lowers Array.from: object literals with length allocate
-// zero arrays; slices clone (mappers route to the higher-order path).
+// zero arrays; slices clone (mappers inline through the map path).
 func (e *emitter) lowerArrayFrom(args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	if len(args) < 1 {
 		return "", tUnknown, false
 	}
-	if len(args) > 1 && args[1] == "@callback:" {
-		e.refuse(pos, "Array.from with a mapper needs callback inlining (Phase 2)")
+	hasMapper := len(args) > 1 && args[1] == "@callback:"
+	base, _, _ := e.lowerArrayFromBase(args, argNodes, pos)
+	if e.refused {
 		return "0", tUnknown, true
 	}
+	if !hasMapper {
+		return base, tArray, true
+	}
+	// Mapper form: clone, then inline map over it (indices carry the
+	// length-shape for {length:} inputs, matching JS mapper protocol).
+	return e.lowerHigherOrder(base, "map", args, argNodes, pos)
+}
+
+// lowerArrayFromBase materializes the unmapped source array.
+func (e *emitter) lowerArrayFromBase(args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	if argNodes != nil && len(argNodes.Nodes) > 0 {
 		if argNodes.Nodes[0].Kind == ast.KindObjectLiteralExpression {
 			n := e.freshTmp()

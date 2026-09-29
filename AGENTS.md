@@ -46,3 +46,5 @@
   箭头精确元数；importEnv/跨文件同规则。286 零回退；单测 1 项。
 - ✅ `Math.sqrt/log10/random`（`@inline` 惯例 + 投影表）：整数二分 sqrt / 位数 log10 / 确定性 LCG；
   f64 追踪（字面量 + 拷贝传播）支撑 float-sqrt 大声拒。286 零回退；单测 1 项。
+- ✅ `findLast/findLastIndex`（无早退覆写 slot）+ `Array.from` mapper（clone 后走 map 内联，
+  `{length}` 按 JS mapper 协议传 index）。286 零回退；单测 1 项。

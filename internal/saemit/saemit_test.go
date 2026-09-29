@@ -260,6 +260,19 @@ func TestLowerMathExtra(t *testing.T) {
 	}
 }
 
+func TestLowerFindLastFrom(t *testing.T) {
+	fl := "function main(): i32 {\n  const a: number[] = [1, 2, 3, 2, 1];\n  return a.findLast((x) => x == 2) * 10 + a.findLastIndex((x) => x == 2);\n}\n"
+	res := mustLower(t, "fl.ts", fl)
+	if !strings.Contains(res.SAI, "L_fl_top") {
+		t.Errorf("missing findLast loop:\n%s", res.SAI)
+	}
+	afm := "function main(): i32 {\n  const a: number[] = [1, 2, 3];\n  const b = Array.from(a, (x) => x * 2);\n  return b[2];\n}\n"
+	res = mustLower(t, "afm.ts", afm)
+	if !strings.Contains(res.SAI, "L_mp_top") {
+		t.Errorf("missing inlined map loop:\n%s", res.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
