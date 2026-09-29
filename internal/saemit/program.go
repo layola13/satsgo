@@ -151,7 +151,10 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			prefixOf[p] = ""
 			continue
 		}
-		base := strings.TrimSuffix(p, ".ts")
+		base := p
+		base = strings.TrimSuffix(base, ".ts")
+		base = strings.TrimSuffix(base, ".js")
+		base = strings.TrimSuffix(base, ".d.ts")
 		var b strings.Builder
 		for _, r := range base {
 			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
@@ -169,8 +172,51 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		// defLocal is the local name of the default export ("" if none).
 		defLocal string
 	}
+	// dtsSig is one .d.ts signature override for an unannotated .js def.
+	type dtsSig struct {
+		ret   saType
+		arity int
+		defs  []bool
+	}
 	expOf := map[string]*fileExports{}
 	globalDefaults := map[string]map[string][]bool{}
+	// Pair co-located x.d.ts with x.js (signatures for unannotated bodies).
+	dtsFor := map[string]string{}
+	for p := range files {
+		if strings.HasSuffix(p, ".js") {
+			dts := strings.TrimSuffix(p, ".js") + ".d.ts"
+			if _, ok := files[dts]; ok {
+				dtsFor[p] = dts
+			}
+		}
+	}
+	dtsSigs := map[string]map[string]dtsSig{}
+	for js, dts := range dtsFor {
+		m := map[string]dtsSig{}
+		for _, st := range parsed[dts].AsSourceFile().Statements.Nodes {
+			if st.Kind != ast.KindFunctionDeclaration || st.Name() == nil ||
+				st.Name().Kind != ast.KindIdentifier {
+				continue
+			}
+			name := st.Name().Text()
+			ret := tI32
+			if fd := st.AsFunctionDeclaration(); fd.Type != nil {
+				ret = annotationType(fd.Type)
+				if ret == tUnknown {
+					ret = tI32
+				}
+			}
+			params := st.Parameters()
+			defs := make([]bool, len(params))
+			for i, pm := range params {
+				if pd := pm.AsParameterDeclaration(); pd.Initializer != nil || pd.QuestionToken != nil {
+					defs[i] = true
+				}
+			}
+			m[name] = dtsSig{ret: ret, arity: len(params), defs: defs}
+		}
+		dtsSigs[js] = m
+	}
 	sharedLayouts := map[string]*layout{}
 	sharedClassDefs := map[string]*classDef{}
 	sharedEnums := map[string]map[string]int64{}
@@ -287,6 +333,22 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	if res.Refused {
 		return res
 	}
+	// .d.ts overrides: unannotated .js bodies take signatures (ret,
+	// arity, optionals-as-defaults) from their co-located declarations.
+	for js, sigs := range dtsSigs {
+		for name, sg := range sigs {
+			if _, ok := globalRets[js][name]; ok {
+				globalRets[js][name] = sg.ret
+				globalArity[js][name] = sg.arity
+				globalDefaults[js][name] = sg.defs
+			}
+		}
+		if ex, ok := expOf[js]; ok {
+			for name, sg := range sigs {
+				ex.rets[name] = sg.ret
+			}
+		}
+	}
 	// Per-file link environments.
 	links := map[string]*fileLink{}
 	for _, p := range reachable {
@@ -341,6 +403,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		e.link = links[p]
 		e.linkExports = linkExports
 		e.tcx = tcx
+		// .d.ts return overrides for unannotated bodies in this file.
+		e.dtsRet = map[string]saType{}
+		for name, sg := range dtsSigs[p] {
+			e.dtsRet[name] = sg.ret
+		}
 		e.layouts = sharedLayouts
 		e.classDefs = sharedClassDefs
 		e.enums = sharedEnums

@@ -350,6 +350,9 @@ type emitter struct {
 	setVars map[string]bool
 	// f64Vars marks float-valued bindings (sqrt and friends refuse them).
 	f64Vars map[string]bool
+	// dtsRet overrides top-level unannotated bodies with co-located .d.ts
+	// return types (program mode; empty in single-file lowering).
+	dtsRet map[string]saType
 	// constVals folds top-level pure literals (name -> literal text plus a
 	// string flag); mathAliases maps top-level `var f = Math.g` to g.
 	// Reassignment drops the entry (then normal declaration applies).
@@ -480,6 +483,8 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 				if ret == tUnknown {
 					ret = tI32
 				}
+			} else if r, ok := e.dtsRet[st.Name().Text()]; ok {
+				ret = r
 			}
 			e.funcSigs[st.Name().Text()] = ret
 			params := st.Parameters()
@@ -636,11 +641,16 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	e.inFunc = true
 	// Missing annotation means void (mirrors the `-> T` rule: a
 	// value-returning function must declare it). The pre-scan agrees.
+	// Top-level unannotated bodies take co-located .d.ts returns.
 	e.retType = tVoid
 	if fd := fn.AsFunctionDeclaration(); fd.Type != nil {
 		e.retType = annotationType(fd.Type)
 		if e.retType == tUnknown {
 			e.retType = tI32
+		}
+	} else if !savedInFunc {
+		if r, ok := e.dtsRet[name]; ok {
+			e.retType = r
 		}
 	}
 	for _, p := range params {

@@ -27,8 +27,17 @@ checker 回退在真实 JS 上成立）。
 
 后续：
 
-4. [ ] program 口径重测（LowerProgram 跟随 import 图，拒绝按包聚合）。
-5. [ ] `.d.ts` 配对（签名来自 d.ts，体来自 js），再看通过率决定 B 通道继续还是收。
+4. [x] program 口径重测（LowerProgram 跟随 import 图，拒绝按包聚合）。
+   lodash-es `chunk` 子树：22 文件链接、0 未决，默认导入拒清零（含级联）。
+   剩余：无注解返回 29（结构性）、顶层 effectful 20、typeof 6、一阶值 5。
+   date-fns `addDays` 子树（esm）：4 文件链接，默认链无级联；剩余 `Date`/
+   `arguments`/`isNaN`/`instanceof`（无 SA 后端，诚实拒）+ 无注解 9
+   （其 d.ts 为空 re-export，配对无签名可用——印证 C 通道需真类型源）。
+5. [x] `.d.ts` 配对（签名来自 d.ts，体来自 js）：同目录 `x.d.ts`↔`x.js` 配对，
+   返回值/元数/可选即默认覆写 + `lowerFunction` 顶层回退；单测 1 项。
+   286 零回退。
+6. [ ] 收缩判定：program + 真 d.ts 源（如 date-fns typings 包）后再看通过率；
+   当前仍低于收缩线，不触发（见方法论警示）。
 
 **方法论警示（重要）**：以上是单文件口径，系统性低估：
 

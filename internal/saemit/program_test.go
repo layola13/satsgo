@@ -45,6 +45,21 @@ func TestLowerProgramUnresolvedDeps(t *testing.T) {
 	}
 }
 
+func TestLowerProgramDtsPairing(t *testing.T) {
+	files := map[string]string{
+		"main.ts":   "import { add } from \"./util.js\";\nfunction main(): i32 {\n  return add(20, 22);\n}\n",
+		"util.js":   "export function add(a, b) {\n  return a + b;\n}\n",
+		"util.d.ts": "export function add(a: i32, b: i32): i32;\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if !strings.Contains(res.SAI, "call @util__add(20, 22)") {
+		t.Errorf("missing paired call:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "@util__add(a: i32, b: i32) -> i32:") {
+		t.Errorf("missing paired signature:\n%s", res.SAI)
+	}
+}
+
 func TestLowerProgramCycleRefuses(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { a } from \"./b\";\nfunction main(): i32 { return a(); }\n",
