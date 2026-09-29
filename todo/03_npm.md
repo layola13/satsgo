@@ -17,7 +17,11 @@ npm 任意库直接转译不现实。分级通道：**A. SA 原生重写（首�
 
 4. [ ] `dependencies` 能对应 SA 包的生成 `require` 行（git ref + sha256 钉死）。
 5. [ ] 纯 TS 依赖进 vendor 转译通道；`node:` 内建走 StdProjectionTable。
-6. [ ] 转译失败的依赖在 `subset-report.txt` 按包聚合报错（不淹没在文件级 diagnostic 里）。
+6. [ ] **Node 内建优先投影到 `sa_plugin_node`**（`node.sai` + 408 符号清单），
+   其次 deno（`Deno.*`→`deno.sai`）、bun（`Bun.*`→`bun.sai`），最后才用 `sa_std` 模拟。
+   投影表加 Backend 维度；`@import` 指向插件 `.sai`；u32 状态码 + slot-alloc/load 形状
+   与现有 fallible-trio 一致；deno/bun 补投影前先索取 exported-symbols 清单。
+7. [ ] 转译失败的依赖在 `subset-report.txt` 按包聚合报错（不淹没在文件级 diagnostic 里）。
 7. [ ] 拉取/审计不管（`sa pkg` 的事），只生成声明。
 
 ### A 通道：SA 原生库（按实测数字立项）

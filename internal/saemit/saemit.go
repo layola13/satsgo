@@ -316,6 +316,20 @@ type emitter struct {
 	varClass     map[string]string
 	instFnFields map[string]map[string]*ast.Node
 	thisSelf     string
+	// Program linking (multi-file): prefix namespaces @-definitions of
+	// non-entry files; importEnv maps an imported local name to its
+	// qualified callee; nsImports maps `import * as ns` to the file key.
+	// Nil link preserves exact single-file behavior.
+	prefix        string
+	link          *fileLink
+	importEnv     map[string]string
+	importRet     map[string]saType
+	nsImports     map[string]string
+	localDefs     map[string]bool
+	importedNames map[string]bool
+	// linkExports maps every linked top-level function name to its file
+	// (for the "import it first" diagnostic).
+	linkExports map[string]string
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -371,6 +385,17 @@ func (e *emitter) emitRaw(format string, args ...any) {
 	fmt.Fprintf(&e.body, format+"\n", args...)
 }
 
+// fnDef renders a definition label with the file prefix (entry files use
+// no prefix, so `@main` is preserved; prefix "" is exactly single-file).
+func (e *emitter) fnDef(name string) string {
+	return e.prefix + name
+}
+
+// fnRef renders a same-file call target with the file prefix.
+func (e *emitter) fnRef(name string) string {
+	return e.prefix + name
+}
+
 func (e *emitter) finish() string {
 	// Out-of-line arrow bodies splice into file scope after the callers
 	// (SA-ASM resolves @labels file-wide, so order is irrelevant).
@@ -406,10 +431,17 @@ type inlineRetState struct {
 func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	stmts := sf.AsSourceFile().Statements.Nodes
 	// Pre-scan: register function signatures (forward calls resolve; void
-	// callees known before first use), interfaces and enums.
-	e.funcSigs = map[string]saType{}
-	e.funcParams = map[string]int{}
-	e.funcHasRest = map[string]bool{}
+	// callees known before first use), interfaces and enums. Program links
+	// pre-seed cross-file signatures, so only create when absent.
+	if e.funcSigs == nil {
+		e.funcSigs = map[string]saType{}
+	}
+	if e.funcParams == nil {
+		e.funcParams = map[string]int{}
+	}
+	if e.funcHasRest == nil {
+		e.funcHasRest = map[string]bool{}
+	}
 	for _, st := range stmts {
 		if st.Kind == ast.KindFunctionDeclaration && st.Name() != nil &&
 			st.Name().Kind == ast.KindIdentifier {
@@ -600,7 +632,7 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	if e.retType != tVoid {
 		ret = fmt.Sprintf(" -> %s", e.retType)
 	}
-	e.emitRaw("@%s(%s)%s:", name, strings.Join(sig, ", "), ret)
+	e.emitRaw("@%s(%s)%s:", e.fnDef(name), strings.Join(sig, ", "), ret)
 	e.terminated = false
 	body := fn.BodyData().Body
 	if body == nil {
@@ -721,10 +753,11 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 		}
 	}
 	sortStrings(captures)
-	gen := name
+	gen := e.fnDef(name)
 	if !topLevel {
 		e.arrowSeq++
-		gen = fmt.Sprintf("__arrow_%d", e.arrowSeq)
+		// Locals carry the file prefix so linked files never collide.
+		gen = fmt.Sprintf("%s__arrow_%d", e.prefix, e.arrowSeq)
 	}
 	if e.funcSigs == nil {
 		e.funcSigs = map[string]saType{}
@@ -2030,7 +2063,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		// out-of-line callee with captured outer variables appended.
 		if ai, ok := e.arrowAliases[fname]; ok {
 			for _, a := range args {
-				if strings.HasPrefix(a, "@spread:") {
+				if strings.HasPrefix(a, "@callback:") {
 					e.refuse(n, "spread arguments to arrow callees are not lowerable")
 					return "0", tUnknown
 				}
@@ -2045,7 +2078,30 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			e.ownTemp(t)
 			return t, ai.ret
 		}
+		// Cross-file import: `import { add } from "./util"` resolves to
+		// the qualified callee (link-time import environment).
+		if q, ok := e.importEnv[fname]; ok {
+			ret := e.importRet[fname]
+			args, argTypes = e.resolveSpreadCall(q, args, argTypes, n)
+			if e.refused {
+				return "0", tUnknown
+			}
+			if ret == tVoid {
+				e.emit("call @%s(%s)", q, strings.Join(args, ", "))
+				return "0", tVoid
+			}
+			t := e.freshTmp()
+			e.emit("%s = call @%s(%s)", t, q, strings.Join(args, ", "))
+			e.ownTemp(t)
+			return t, ret
+		}
 		if ret, ok := e.funcSigs[fname]; ok {
+			// Defined in another linked file but not imported: ES
+			// semantics require an explicit import (loud, not silent).
+			if e.link != nil && !e.localDefs[fname] {
+				e.refuse(n, "%s is defined in another file; import it first", fname)
+				return "0", tUnknown
+			}
 			for _, a := range args {
 				if strings.HasPrefix(a, "@callback:") {
 					e.refuse(n, "function values are not first-class; callbacks inline only at higher-order array sites")
@@ -2057,13 +2113,19 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 				return "0", tUnknown
 			}
 			if ret == tVoid {
-				e.emit("call @%s(%s)", fname, strings.Join(args, ", "))
+				e.emit("call @%s(%s)", e.fnRef(fname), strings.Join(args, ", "))
 				return "0", tVoid
 			}
 			t := e.freshTmp()
-			e.emit("%s = call @%s(%s)", t, fname, strings.Join(args, ", "))
+			e.emit("%s = call @%s(%s)", t, e.fnRef(fname), strings.Join(args, ", "))
 			e.ownTemp(t)
 			return t, ret
+		}
+		if e.link != nil {
+			if owner, ok := e.linkExports[fname]; ok {
+				e.refuse(n, "%s is defined in %s; import it first", fname, owner)
+				return "0", tUnknown
+			}
 		}
 		e.refuse(n, "call to unknown function %s (declare it before use)", fname)
 		return "0", tUnknown
@@ -2098,6 +2160,25 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		recv = pa.Expression.Text()
 	} else {
 		return "", tUnknown, false
+	}
+	// Namespace import: `import * as u` + `u.add(1)` calls the qualified
+	// callee (export must exist; checked at link time).
+	if fileKey, ok := e.nsImports[recv]; ok {
+		_ = fileKey
+		q, ok := e.importEnv[recv+"."+method]
+		if !ok {
+			e.refuse(pos, "%s.%s is not exported by its module", recv, method)
+			return "0", tUnknown, true
+		}
+		ret := e.importRet[recv+"."+method]
+		if ret == tVoid {
+			e.emit("call @%s(%s)", q, strings.Join(args, ", "))
+			return "0", tVoid, true
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, q, strings.Join(args, ", "))
+		e.ownTemp(t)
+		return t, ret, true
 	}
 	if pa.Expression.Kind == ast.KindThisKeyword {
 		// Per-instance fn fields devirtualize (`this.pick(e)` replays the
@@ -5812,6 +5893,83 @@ func (e *emitter) lowerImport(st *ast.Node) {
 	}
 	if strings.HasSuffix(mod, ".wit") {
 		e.refuse(st, ".wit import %s refused: the assembler accepts no @wit_import directive", mod)
+		return
+	}
+	// Linked program: the import graph pre-resolved every local module;
+	// bind imported names to qualified callees (link-time environment).
+	if e.link != nil {
+		if e.importEnv == nil {
+			e.importEnv = map[string]string{}
+		}
+		if e.importRet == nil {
+			e.importRet = map[string]saType{}
+		}
+		if e.nsImports == nil {
+			e.nsImports = map[string]string{}
+		}
+		if e.importedNames == nil {
+			e.importedNames = map[string]bool{}
+		}
+		res, ok := e.link.resolved[mod]
+		if !ok {
+			e.refuse(st, "import %s is not resolvable (bare third-party imports are Phase 3; see todo/03_npm.md)", mod)
+			return
+		}
+		bind := func(local, remote string) {
+			q := res.prefix + remote
+			e.importEnv[local] = q
+			if r, ok := res.rets[remote]; ok {
+				e.importRet[local] = r
+			} else {
+				e.importRet[local] = tI32
+			}
+			e.importedNames[local] = true
+		}
+		if imp.ImportClause != nil {
+			clause := imp.ImportClause.AsImportClause()
+			// Default import: unsupported in the link subset (loud).
+			if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+				e.refuse(st, "default imports are not lowerable (use named imports)")
+				return
+			}
+			nb := clause.NamedBindings
+			if nb != nil {
+				if nb.Kind == ast.KindNamespaceImport {
+					ns := nb.AsNamespaceImport().Name().Text()
+					e.nsImports[ns] = res.key
+					for exp, r := range res.rets {
+						e.importEnv[ns+"."+exp] = res.prefix + exp
+						e.importRet[ns+"."+exp] = r
+					}
+					return
+				}
+				for _, el := range nb.AsNamedImports().Elements.Nodes {
+					if el.Kind != ast.KindImportSpecifier {
+						continue
+					}
+					// `import { a }` / `import { b as c }`: PropertyName
+					// holds the remote name when aliased.
+					remote, local := "", ""
+					sp := el.AsImportSpecifier()
+					if sp.PropertyName != nil {
+						remote = sp.PropertyName.Text()
+					}
+					if n := el.Name(); n != nil {
+						local = n.Text()
+					}
+					if remote == "" {
+						remote = local
+					}
+					if _, ok := res.exports[remote]; !ok {
+						e.refuse(el, "%s is not exported by %s", remote, mod)
+						continue
+					}
+					bind(local, remote)
+				}
+				return
+			}
+		}
+		// Side-effect import: module is linked; nothing to bind.
 		return
 	}
 	// Local .ts modules: multi-file linking is Phase 2.
