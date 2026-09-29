@@ -303,6 +303,21 @@ func TestLowerNodeOs(t *testing.T) {
 	}
 }
 
+func TestLowerTopLevelConst(t *testing.T) {
+	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
+	res := mustLower(t, "tc.ts", src)
+	for _, want := range []string{"add 42,", "@const str_const_"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	bad := "var r = require(\"x\");\nfunction main(): i32 {\n  return 1;\n}\n"
+	r := Lower("tc2.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected effectful top-level refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

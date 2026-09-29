@@ -350,6 +350,12 @@ type emitter struct {
 	setVars map[string]bool
 	// f64Vars marks float-valued bindings (sqrt and friends refuse them).
 	f64Vars map[string]bool
+	// constVals folds top-level pure literals (name -> literal text plus a
+	// string flag); mathAliases maps top-level `var f = Math.g` to g.
+	// Reassignment drops the entry (then normal declaration applies).
+	constVals   map[string]string
+	constIsStr  map[string]bool
+	mathAliases map[string]string
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -524,6 +530,11 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 			// A top-level `const f = (...) => ...` is a file-scope callback
 			// (mirrors sa_plugin_ts parseTopLevelArrowFn): emit @f directly.
 			if e.tryTopLevelArrow(st) {
+				return
+			}
+			// Top-level pure bindings (`var K = 1.5`, `var nativeMax =
+			// Math.max`) fold without registers (see tryTopLevelConst).
+			if e.tryTopLevelConst(st) {
 				return
 			}
 			e.refuse(st, "top-level variable statements are not lowerable; move state into function scope")
@@ -910,6 +921,9 @@ func (e *emitter) checkArity(fname string, args []string, pos *ast.Node) bool {
 	}
 	return true
 }
+
+// captureSig renders captured outer names as trailing i32 params. Slice
+// captures keep ptr width (both render as handle registers at call sites).
 func captureSig(e *emitter, captures []string) []string {
 	sig := make([]string, 0, len(captures))
 	for _, c := range captures {
@@ -1588,16 +1602,29 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 	case ast.KindIdentifier:
 		// Handle aliases resolve to the underlying register (inlined
 		// method params never copy handles).
-		if b := e.lookupBinding(n.Text()); b != nil && b.alias != "" {
-			target := b.alias
-			for i := 0; i < 8; i++ {
-				nb := e.lookupBinding(target)
-				if nb == nil || nb.alias == "" {
-					break
+		if b := e.lookupBinding(n.Text()); b != nil {
+			if b.alias != "" {
+				target := b.alias
+				for i := 0; i < 8; i++ {
+					nb := e.lookupBinding(target)
+					if nb == nil || nb.alias == "" {
+						break
+					}
+					target = nb.alias
 				}
-				target = nb.alias
+				return target, tArray
 			}
-			return target, tArray
+			return n.Text(), tI32
+		}
+		// Top-level pure consts inline (locals shadow via scopes above).
+		if lit, ok := e.constVals[n.Text()]; ok {
+			if e.constIsStr[n.Text()] {
+				return e.lowerStringLiteral(lit), tString
+			}
+			if isFloatLiteral(lit) {
+				return lit, tF64
+			}
+			return lit, tI32
 		}
 		return n.Text(), tI32
 	case ast.KindBinaryExpression:
@@ -1647,13 +1674,77 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 func isFloatLiteral(text string) bool {
 	for i := 0; i < len(text); i++ {
 		if text[i] == '.' || text[i] == 'e' || text[i] == 'E' {
-	return true
-}
-
-// captureSig renders captured outer names as trailing i32 params. Slice
-// captures keep ptr width (both render as handle registers at call sites).
+			return true
+		}
 	}
 	return false
+}
+
+// tryTopLevelConst folds top-level pure declarators: numeric/string
+// literals become inline consts, `var f = Math.g` becomes a math alias.
+// Reports whether every declarator folded (partial folds stay bound; the
+// caller refuses when false).
+func (e *emitter) tryTopLevelConst(st *ast.Node) bool {
+	dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) == 0 {
+		return false
+	}
+	allOk := true
+	for _, d := range dl.Declarations.Nodes {
+		name, ok := bindingNameText(d)
+		if !ok {
+			allOk = false
+			continue
+		}
+		init := d.Initializer()
+		if init == nil {
+			allOk = false
+			continue
+		}
+		switch init.Kind {
+		case ast.KindNumericLiteral, ast.KindStringLiteral, ast.KindTrueKeyword, ast.KindFalseKeyword:
+			if e.constVals == nil {
+				e.constVals = map[string]string{}
+			}
+			if e.constIsStr == nil {
+				e.constIsStr = map[string]bool{}
+			}
+			if init.Kind == ast.KindStringLiteral {
+				s, ok := stringLiteralText(init)
+				if !ok {
+					allOk = false
+					continue
+				}
+				e.constVals[name] = s
+				e.constIsStr[name] = true
+				continue
+			}
+			if init.Kind == ast.KindTrueKeyword {
+				e.constVals[name] = "1"
+				continue
+			}
+			if init.Kind == ast.KindFalseKeyword {
+				e.constVals[name] = "0"
+				continue
+			}
+			e.constVals[name] = init.Text()
+		case ast.KindPropertyAccessExpression:
+			pa := init.AsPropertyAccessExpression()
+			if pa.Expression.Kind == ast.KindIdentifier && pa.Expression.Text() == "Math" {
+				if _, ok := projectionByTS("Math." + pa.Name().Text()); ok {
+					if e.mathAliases == nil {
+						e.mathAliases = map[string]string{}
+					}
+					e.mathAliases[name] = pa.Name().Text()
+					continue
+				}
+			}
+			allOk = false
+		default:
+			allOk = false
+		}
+	}
+	return allOk
 }
 
 // lowerStringLiteral materializes a real slice: @const utf8 + 16-byte header.
@@ -2090,6 +2181,16 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		}
 		e.refuse(n, "Math.%s is not supported", name)
 		return "0", tUnknown
+	}
+	// Top-level `var f = Math.g` aliases dispatch as Math.g.
+	if call.Expression.Kind == ast.KindIdentifier {
+		if g, ok := e.mathAliases[call.Expression.Text()]; ok {
+			if v, t, ok := e.lowerMathCall(g, args, argTypes, call.Arguments, n); ok {
+				return v, t
+			}
+			e.refuse(n, "Math.%s is not supported", g)
+			return "0", tUnknown
+		}
 	}
 	// String.fromCharCode → sa_std/string.sai (policy: primitives live in sci)
 	if isStringFromCharCode(call.Expression) {
@@ -6584,10 +6685,29 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		}
 		if imp.ImportClause != nil {
 			clause := imp.ImportClause.AsImportClause()
-			// Default import: unsupported in the link subset (loud).
+			// Default import binds the target's default export.
 			if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
-				e.refuse(st, "default imports are not lowerable (use named imports)")
-				return
+				if res.defLocal == "" {
+					e.refuse(st, "%s has no default export", mod)
+					return
+				}
+				if _, ok := res.rets[res.defLocal]; !ok {
+					e.refuse(st, "default export of %s is not callable", mod)
+					return
+				}
+				q := res.prefix + res.defLocal
+				local := nm.Text()
+				e.importEnv[local] = q
+				if r, ok := res.rets[res.defLocal]; ok {
+					e.importRet[local] = r
+				} else {
+					e.importRet[local] = tI32
+				}
+				e.importedNames[local] = true
+				// `import d, { x } from`: fall through to named bindings.
+				if clause.NamedBindings == nil {
+					return
+				}
 			}
 			nb := clause.NamedBindings
 			if nb != nil {
@@ -6895,6 +7015,11 @@ func (e *emitter) assign(dst, src, srcKind string, srcType saType, pos *ast.Node
 	if b := e.lookupBinding(dst); b != nil && b.alias != "" {
 		b.alias = ""
 	}
+	// Reassignment drops top-level const/alias folds (normal declaration
+	// applies from here on).
+	delete(e.constVals, dst)
+	delete(e.constIsStr, dst)
+	delete(e.mathAliases, dst)
 	fresh := e.lookupBinding(dst) == nil
 	if srcKind == "named" {
 		if _, ok := e.handleNamed(src); ok {

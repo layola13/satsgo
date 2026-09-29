@@ -56,6 +56,12 @@
   node 契约 5/5 全过。
 - ✅ 未决第三方依赖聚合：`LowerProgram.Unresolved` + `subset-report.txt` 按包 section
   （`package X: no SA backend yet`），裸 import 仍大声拒；单测 1 项。286 零回退。
+- ✅ `export default` + 默认导入（`export default f;`/`export {x as default}`/声明位）：
+  lodash program 实测消灭 25 项默认导入拒 + 级联 `import it first`；匿名/`export =` 大声拒。
+  单测 1 项（成功/赋值式/无默认）；286 零回退。
+- ✅ 顶层纯量折叠：字面量内联（`var K=42`/`S="hi"`，f64 保类型）+ `var f=Math.g` 别名调度；
+  重赋值自动摘表；effectful（require/typeof 链）仍拒。lodash chunk 子树 top-level 拒 26→20；
+  单测 1 项。286 零回退。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 

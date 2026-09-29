@@ -27,10 +27,11 @@ type fileLink struct {
 
 // modResolution binds one module specifier to its target file exports.
 type modResolution struct {
-	key     string
-	prefix  string
-	exports map[string]bool
-	rets    map[string]saType
+	key      string
+	prefix   string
+	exports  map[string]bool
+	rets     map[string]saType
+	defLocal string
 }
 
 // ProgramResult is the linked program outcome.
@@ -165,6 +166,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	type fileExports struct {
 		exports map[string]bool
 		rets    map[string]saType
+		// defLocal is the local name of the default export ("" if none).
+		defLocal string
 	}
 	expOf := map[string]*fileExports{}
 	globalDefaults := map[string]map[string][]bool{}
@@ -186,11 +189,20 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			switch st.Kind {
 			case ast.KindFunctionDeclaration:
 				if st.Name() == nil || st.Name().Kind != ast.KindIdentifier {
+					// Anonymous `export default function`: needs a
+					// synthesized symbol (loud gap for now).
+					if hasDefaultModifier(st) {
+						res.Refused = true
+						res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: anonymous default export needs a name", p))
+					}
 					continue
 				}
 				name := st.Name().Text()
 				if hasExportModifier(st) {
 					expOf[p].exports[name] = true
+				}
+				if hasDefaultModifier(st) {
+					expOf[p].defLocal = name
 				}
 				ret := tVoid
 				if fd := st.AsFunctionDeclaration(); fd.Type != nil {
@@ -244,6 +256,21 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					res.Refused = true
 					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: %s", p, refused))
 				}
+				if def := collectDefaultExport(st); def != "" {
+					expOf[p].defLocal = def
+				}
+			case ast.KindExportAssignment:
+				// `export default foo;`: the identifier names the default.
+				ea := st.AsExportAssignment()
+				if ea.IsExportEquals {
+					res.Refused = true
+					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: export = is not lowerable (use ES exports)", p))
+				} else if ea.Expression != nil && ea.Expression.Kind == ast.KindIdentifier {
+					expOf[p].defLocal = ea.Expression.Text()
+				} else {
+					res.Refused = true
+					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: non-identifier default export is not lowerable", p))
+				}
 			}
 		}
 		for k, l := range scratch.layouts {
@@ -266,10 +293,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		lk := &fileLink{key: p, prefix: prefixOf[p], resolved: map[string]*modResolution{}}
 		for spec, tgt := range specOf[p] {
 			lk.resolved[spec] = &modResolution{
-				key:     tgt,
-				prefix:  prefixOf[tgt],
-				exports: expOf[tgt].exports,
-				rets:    expOf[tgt].rets,
+				key:      tgt,
+				prefix:   prefixOf[tgt],
+				exports:  expOf[tgt].exports,
+				rets:     expOf[tgt].rets,
+				defLocal: expOf[tgt].defLocal,
 			}
 		}
 		links[p] = lk
@@ -435,7 +463,7 @@ func moduleSpecifierOf(st *ast.Node) string {
 }
 
 // resolveRelative maps "./x" against the importer's dir into the file set
-// (tries x.ts, x/index.ts; "" when absent).
+// (tries x.ts, x.js, extensionless, x/index.ts, x/index.js; "" when absent).
 func resolveRelative(importer, spec string, files map[string]string) string {
 	dir := path.Dir(importer)
 	if dir == "." {
@@ -447,7 +475,10 @@ func resolveRelative(importer, spec string, files map[string]string) string {
 		}
 		return path.Clean(dir + "/" + base)
 	}
-	cands := []string{join(spec) + ".ts", join(spec) + "/index.ts", join(spec)}
+	cands := []string{
+		join(spec) + ".ts", join(spec) + ".js", join(spec),
+		join(spec) + "/index.ts", join(spec) + "/index.js",
+	}
 	for _, c := range cands {
 		if _, ok := files[c]; ok {
 			return c
@@ -468,6 +499,45 @@ func hasExportModifier(st *ast.Node) bool {
 		}
 	}
 	return false
+}
+
+// hasDefaultModifier reports a `default` keyword modifier.
+func hasDefaultModifier(st *ast.Node) bool {
+	mods := st.Modifiers()
+	if mods == nil {
+		return false
+	}
+	for _, m := range mods.Nodes {
+		if m.Kind == ast.KindDefaultKeyword {
+			return true
+		}
+	}
+	return false
+}
+
+// collectDefaultExport records `export { x as default }` ("" if absent).
+func collectDefaultExport(st *ast.Node) string {
+	ed := st.AsExportDeclaration()
+	if ed.ModuleSpecifier != nil || ed.ExportClause == nil {
+		return ""
+	}
+	clause := ed.ExportClause
+	if clause.Kind == ast.KindNamespaceExport {
+		return ""
+	}
+	for _, el := range clause.AsNamedExports().Elements.Nodes {
+		if el.Kind != ast.KindExportSpecifier {
+			continue
+		}
+		sp := el.AsExportSpecifier()
+		if n := el.Name(); n != nil && n.Text() == "default" {
+			if sp.PropertyName != nil {
+				return sp.PropertyName.Text()
+			}
+			return "default"
+		}
+	}
+	return ""
 }
 
 // collectExportList records `export { a, b }` names; `export *` and

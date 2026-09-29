@@ -73,14 +73,33 @@ func TestLowerProgramImportFirst(t *testing.T) {
 	}
 }
 
-func TestLowerProgramDefaultExportRefuses(t *testing.T) {
+func TestLowerProgramDefaultImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import d from \"./util\";\nfunction main(): i32 { return d(1); }\n",
 		"util.ts": "export default function d(x: i32): i32 { return x; }\n",
 	}
-	res := LowerProgram("main.ts", files)
-	if !res.Refused {
-		t.Fatalf("expected default-import refusal, got:\n%s", res.SAI)
+	res := mustLowerProgram(t, "main.ts", files)
+	if !strings.Contains(res.SAI, "call @util__d(1)") {
+		t.Errorf("missing default-import call:\n%s", res.SAI)
+	}
+	assign := map[string]string{
+		"main.ts": "import d from \"./util\";\nfunction main(): i32 { return d(1); }\n",
+		"util.ts": "function d(x: i32): i32 { return x; }\nexport default d;\n",
+	}
+	res = mustLowerProgram(t, "main.ts", assign)
+	if !strings.Contains(res.SAI, "call @util__d(1)") {
+		t.Errorf("missing export-assignment default call:\n%s", res.SAI)
+	}
+	none := map[string]string{
+		"main.ts": "import d from \"./util\";\nfunction main(): i32 { return d(1); }\n",
+		"util.ts": "export function e(x: i32): i32 { return x; }\n",
+	}
+	r := LowerProgram("main.ts", none)
+	if !r.Refused {
+		t.Fatalf("expected no-default refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(strings.Join(r.Diagnostics, "\n"), "no default export") {
+		t.Errorf("missing no-default message:\n%s", strings.Join(r.Diagnostics, "\n"))
 	}
 }
 
