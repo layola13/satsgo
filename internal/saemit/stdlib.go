@@ -169,6 +169,12 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "os.arch", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_arch", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.homedir", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_homedir", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.tmpdir", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_tmpdir", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.hostname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_hostname", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

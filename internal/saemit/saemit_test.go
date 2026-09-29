@@ -290,6 +290,17 @@ func TestLowerNodeOs(t *testing.T) {
 	if !strings.Contains(res.SAI, "call @sa_node_plugin_os_arch") {
 		t.Errorf("missing node:os arch call:\n%s", res.SAI)
 	}
+	nodeOs := "import { homedir, tmpdir, hostname } from \"os\";\nfunction main(): i32 {\n  return homedir().length + tmpdir().length + hostname().length;\n}\n"
+	res = mustLower(t, "n3.ts", nodeOs)
+	for _, want := range []string{
+		"call @sa_node_plugin_os_homedir",
+		"call @sa_node_plugin_os_tmpdir",
+		"call @sa_node_plugin_os_hostname",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 }
 
 func TestLowerRefusesClassExtends(t *testing.T) {

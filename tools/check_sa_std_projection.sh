@@ -70,6 +70,9 @@ echo "PASS: all ${#symbols[@]} symbols resolve in sci/sa_std"
 node_symbols=(
   sa_node_plugin_os_platform
   sa_node_plugin_os_arch
+  sa_node_plugin_os_homedir
+  sa_node_plugin_os_tmpdir
+  sa_node_plugin_os_hostname
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

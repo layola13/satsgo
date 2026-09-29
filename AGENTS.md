@@ -52,3 +52,5 @@
   u32 状态检查（非零 panic，大声）+ string out-param wrap；`node:os` 前缀等价；
   `check_sa_std_projection.sh` 加 node 区（`all_exported_symbols.txt` 精确匹配）。
   67 sa_std + 2 node 契约全过；单测 1 项。btree 符号一并补进 sa_std 名单。
+- ✅ node `os.*` 同形状扩展（homedir/tmpdir/hostname，零参 string out-param 通用路径）；
+  node 契约 5/5 全过。
