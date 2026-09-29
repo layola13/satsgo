@@ -245,6 +245,21 @@ func TestLowerArity(t *testing.T) {
 	}
 }
 
+func TestLowerMathExtra(t *testing.T) {
+	src := "function main(): i32 {\n  const a = Math.sqrt(16);\n  const b = Math.log10(100);\n  const c = Math.random();\n  return a + b + c;\n}\n"
+	res := mustLower(t, "mx.ts", src)
+	for _, want := range []string{"L_sqrt_top", "L_l10_top", "1103515245", "32767"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	fl := "function main(): i32 {\n  const x: number = 2.5;\n  return Math.sqrt(x);\n}\n"
+	r2 := Lower("mx2.ts", fl)
+	if !r2.Refused {
+		t.Fatalf("expected float-sqrt refusal, got:\n%s", r2.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

@@ -348,6 +348,8 @@ type emitter struct {
 	// mapVars/setVars mark Map/Set handles for backend dispatch.
 	mapVars map[string]bool
 	setVars map[string]bool
+	// f64Vars marks float-valued bindings (sqrt and friends refuse them).
+	f64Vars map[string]bool
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -1103,6 +1105,13 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	if (annot != nil && annotationType(annot) == tString) || vtype == tString {
 		e.strVars[name] = true
 		return
+	}
+	// float bindings: f64-valued initializer (literal or copied).
+	if vtype == tF64 || (init != nil && init.Kind == ast.KindIdentifier && e.f64Vars[init.Text()]) {
+		if e.f64Vars == nil {
+			e.f64Vars = map[string]bool{}
+		}
+		e.f64Vars[name] = true
 	}
 	if vtype == tArray {
 		e.arrVars[name] = true
@@ -2076,7 +2085,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	}
 	// Math.* inline idioms (reference math_surface; trig etc. refuse).
 	if name, ok := mathMethod(call.Expression); ok {
-		if v, t, ok := e.lowerMathCall(name, args, call.Arguments, n); ok {
+		if v, t, ok := e.lowerMathCall(name, args, argTypes, call.Arguments, n); ok {
 			return v, t
 		}
 		e.refuse(n, "Math.%s is not supported", name)
@@ -3228,7 +3237,7 @@ func (e *emitter) lowerSortWithCmp(recv, elem string, esz int, argNodes *ast.Ele
 // lowerMathCall dispatches Math.* per the projection table: @inline shapes,
 // @const folds (property position only; calling a const refuses), unknown
 // methods refuse (trig etc. are MathNotSupported in the reference).
-func (e *emitter) lowerMathCall(method string, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+func (e *emitter) lowerMathCall(method string, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	proj, ok := projectionByTS("Math." + method)
 	if !ok {
 		return "", tUnknown, false
@@ -3238,8 +3247,8 @@ func (e *emitter) lowerMathCall(method string, args []string, argNodes *ast.Elem
 		return "0", tUnknown, true
 	}
 	switch method {
-	case "abs", "pow", "floor", "ceil", "round", "trunc":
-		if v, t, ok := e.lowerMathInline(method, args, pos); ok {
+	case "abs", "pow", "floor", "ceil", "round", "trunc", "sqrt", "log10", "random":
+		if v, t, ok := e.lowerMathInline(method, args, types, pos); ok {
 			return v, t, true
 		}
 		return "", tUnknown, true
@@ -3353,7 +3362,7 @@ func (e *emitter) lowerMathSpreadMinMax(isMax bool, args []string, spread *ast.N
 // lowerMathInline mirrors the sa_plugin_ts Math shapes: abs via branch join,
 // pow via integer loop, floor/ceil/round/trunc as integer identity or float
 // conversion (fptosi with sign adjust).
-func (e *emitter) lowerMathInline(method string, args []string, pos *ast.Node) (string, saType, bool) {
+func (e *emitter) lowerMathInline(method string, args []string, types []saType, pos *ast.Node) (string, saType, bool) {
 	switch method {
 	case "abs":
 		if len(args) != 1 {
@@ -3413,8 +3422,130 @@ func (e *emitter) lowerMathInline(method string, args []string, pos *ast.Node) (
 			return "", tUnknown, false
 		}
 		return e.lowerMathRounding(method, args[0]), tI32, true
+	case "sqrt":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		isFloat := len(types) > 0 && types[0] == tF64
+		if !isFloat && e.f64Vars[args[0]] {
+			isFloat = true
+		}
+		if isFloat {
+			e.refuse(pos, "Math.sqrt on floats is not supported (integer subset only)")
+			return "0", tUnknown, true
+		}
+		return e.lowerMathSqrt(args[0]), tI32, true
+	case "log10":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		return e.lowerMathLog10(args[0]), tI32, true
+	case "random":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		return e.lowerMathRandom(), tI32, true
 	}
 	return "", tUnknown, false
+}
+
+// lowerMathSqrt ports the reference integer binary search: acc tracks the
+// best mid with mid <= x/mid over [1, x].
+func (e *emitter) lowerMathSqrt(x string) string {
+	fx := x
+	if !isTempName(x) && e.lookupBinding(x) != nil {
+		cp := e.freshTmp()
+		e.emit("%s = add %s, 0", cp, x)
+		fx = cp
+	}
+	acc := e.freshTmp()
+	e.emit("%s = 0", acc)
+	lo := e.freshTmp()
+	e.emit("%s = 1", lo)
+	hi := e.freshTmp()
+	e.emit("%s = add %s, 0", hi, fx)
+	topL := e.freshLabel("sqrt_top")
+	bodyL := e.freshLabel("sqrt_body")
+	takeL := e.freshLabel("sqrt_take")
+	skipL := e.freshLabel("sqrt_skip")
+	nextL := e.freshLabel("sqrt_next")
+	endL := e.freshLabel("sqrt_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = sle %s, %s", c, lo, hi)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	d := e.freshTmp()
+	e.emit("%s = sub %s, %s", d, hi, lo)
+	h := e.freshTmp()
+	e.emit("%s = div %s, 2", h, d)
+	mid := e.freshTmp()
+	e.emit("%s = add %s, %s", mid, lo, h)
+	q := e.freshTmp()
+	e.emit("%s = div %s, %s", q, fx, mid)
+	ok := e.freshTmp()
+	e.emit("%s = sle %s, %s", ok, mid, q)
+	e.emit("br %s -> %s, %s", ok, takeL, skipL)
+	e.emitRaw("%s:", takeL)
+	e.emit("%s = %s", acc, mid)
+	loN := e.freshTmp()
+	e.emit("%s = add %s, 1", loN, mid)
+	e.emit("%s = %s", lo, loN)
+	e.emit("jmp %s", nextL)
+	e.emitRaw("%s:", skipL)
+	hiN := e.freshTmp()
+	e.emit("%s = sub %s, 1", hiN, mid)
+	e.emit("%s = %s", hi, hiN)
+	e.emit("jmp %s", nextL)
+	e.emitRaw("%s:", nextL)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	return acc
+}
+
+// lowerMathLog10 ports the reference digit-count loop (integer log10).
+func (e *emitter) lowerMathLog10(x string) string {
+	lacc := e.freshTmp()
+	e.emit("%s = 0", lacc)
+	ltmp := e.freshTmp()
+	e.emit("%s = add %s, 0", ltmp, x)
+	topL := e.freshLabel("l10_top")
+	bodyL := e.freshLabel("l10_body")
+	endL := e.freshLabel("l10_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = sge %s, 10", c, ltmp)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	q := e.freshTmp()
+	e.emit("%s = div %s, 10", q, ltmp)
+	e.emit("%s = %s", ltmp, q)
+	a := e.freshTmp()
+	e.emit("%s = add %s, 1", a, lacc)
+	e.emit("%s = %s", lacc, a)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	return lacc
+}
+
+// lowerMathRandom ports the reference deterministic LCG in [0, 32767]
+// (documented: not cryptographic, sequences differ from Node).
+func (e *emitter) lowerMathRandom() string {
+	const seed = "__ts_rand_seed"
+	if e.lookupBinding(seed) == nil {
+		e.emit("%s = 12345", seed)
+		e.declarePlain(seed)
+	}
+	rs := e.freshTmp()
+	e.emit("%s = mul %s, 1103515245", rs, seed)
+	rs2 := e.freshTmp()
+	e.emit("%s = add %s, 12345", rs2, rs)
+	e.emit("%s = %s", seed, rs2)
+	ro := e.freshTmp()
+	e.emit("%s = ashr %s, 16", ro, seed)
+	out := e.freshTmp()
+	e.emit("%s = and %s, 32767", out, ro)
+	return out
 }
 
 // lowerMathRounding: integer operands are identity; float operands convert
