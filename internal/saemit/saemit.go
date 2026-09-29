@@ -2649,6 +2649,18 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 			}
 		}
 	}
+	// `f.call(thisArg, ...args)` desugars to a direct call with thisArg
+	// first (matches the static-method convention: self is explicit).
+	// The callee must resolve statically (aliases, imports, functions).
+	// Class instances keep their own `call` method if one exists.
+	if method == "call" {
+		if _, ok := e.varClass[recv]; !ok {
+			if v, t, ok := e.lowerCallDesugar(recv, args, types, argNodes, pos); ok {
+				return v, t, true
+			}
+			return "", tUnknown, false
+		}
+	}
 	// Class methods inline at the call site (no vtables in SA-ASM).
 	if className, ok := e.varClass[recv]; ok {
 		if v, t, ok := e.lowerClassMethodCall(recv, className, method, args, argNodes, pos); ok {
@@ -2694,6 +2706,70 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 	}
 	if v, t, ok := e.lowerStringMethod(recv, method, args, pos); ok {
 		return v, t, true
+	}
+	return "", tUnknown, false
+}
+
+// lowerCallDesugar lowers `f.call(thisArg, ...args)` as `f(thisArg, ...)`.
+// Only statically-known callees (aliases, imports, declared functions)
+// desugar; anything else refuses (true first-class values stay loud).
+func (e *emitter) lowerCallDesugar(recv string, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	_ = argNodes
+	if len(args) < 1 {
+		return "", tUnknown, false
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "@callback:") || strings.HasPrefix(a, "@spread:") {
+			return "", tUnknown, false
+		}
+	}
+	if _, ok := e.arrowAliases[recv]; ok {
+		ai := e.arrowAliases[recv]
+		if len(args)-1 != len(ai.params) {
+			e.refuse(pos, "arity mismatch in .call to %s", recv)
+			return "0", tUnknown, true
+		}
+		full := append(append([]string{}, args...), ai.captures...)
+		if ai.ret == tVoid {
+			e.emit("call @%s(%s)", ai.fn, strings.Join(full, ", "))
+			return "0", tVoid, true
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, ai.fn, strings.Join(full, ", "))
+		e.ownTemp(t)
+		return t, ai.ret, true
+	}
+	if q, ok := e.importEnv[recv]; ok {
+		ret := e.importRet[recv]
+		full := args
+		if !e.checkArity(q, full, pos) {
+			return "0", tUnknown, true
+		}
+		if ret == tVoid {
+			e.emit("call @%s(%s)", q, strings.Join(full, ", "))
+			return "0", tVoid, true
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, q, strings.Join(full, ", "))
+		e.ownTemp(t)
+		return t, ret, true
+	}
+	if ret, ok := e.funcSigs[recv]; ok {
+		if e.link != nil && !e.localDefs[recv] {
+			return "", tUnknown, false
+		}
+		full := args
+		if !e.checkArity(recv, full, pos) {
+			return "0", tUnknown, true
+		}
+		if ret == tVoid {
+			e.emit("call @%s(%s)", e.fnRef(recv), strings.Join(full, ", "))
+			return "0", tVoid, true
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, e.fnRef(recv), strings.Join(full, ", "))
+		e.ownTemp(t)
+		return t, ret, true
 	}
 	return "", tUnknown, false
 }

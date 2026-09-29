@@ -394,6 +394,14 @@ func TestLowerInDelete(t *testing.T) {
 	}
 }
 
+func TestLowerCallDesugar(t *testing.T) {
+	src := "function add(self: i32, x: i32): i32 {\n  return self + x;\n}\nfunction main(): i32 {\n  return add.call(20, 22);\n}\n"
+	res := mustLower(t, "cc.ts", src)
+	if !strings.Contains(res.SAI, "call @add(20, 22)") {
+		t.Errorf("missing desugared call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
