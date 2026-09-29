@@ -60,6 +60,38 @@ func TestLowerProgramDtsPairing(t *testing.T) {
 	}
 }
 
+func TestLowerProgramReExport(t *testing.T) {
+	named := map[string]string{
+		"main.ts": "import { add } from \"./idx\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",
+		"idx.ts":  "export { add } from \"./util\";\n",
+		"util.ts": "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", named)
+	if !strings.Contains(res.SAI, "call @util__add(1, 2)") {
+		t.Errorf("missing through-re-export call:\n%s", res.SAI)
+	}
+	star := map[string]string{
+		"main.ts": "import { add, sub } from \"./idx\";\nfunction main(): i32 {\n  return add(1, 2) + sub(5, 1);\n}\n",
+		"idx.ts":  "export * from \"./util\";\n",
+		"util.ts": "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\nexport function sub(a: i32, b: i32): i32 {\n  return a - b;\n}\n",
+	}
+	res = mustLowerProgram(t, "main.ts", star)
+	for _, want := range []string{"call @util__add(1, 2)", "call @util__sub(5, 1)"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	cyc := map[string]string{
+		"main.ts": "import { a } from \"./x\";\nfunction main(): i32 {\n  return a();\n}\n",
+		"x.ts":    "export { a } from \"./y\";\n",
+		"y.ts":    "export { a } from \"./x\";\n",
+	}
+	r := LowerProgram("main.ts", cyc)
+	if !r.Refused {
+		t.Fatalf("expected re-export cycle refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerProgramCycleRefuses(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { a } from \"./b\";\nfunction main(): i32 { return a(); }\n",

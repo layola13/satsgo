@@ -6984,6 +6984,9 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		}
 		bind := func(local, remote string) {
 			q := res.prefix + remote
+			if qq, ok := res.qualified[remote]; ok {
+				q = qq
+			}
 			e.importEnv[local] = q
 			if r, ok := res.rets[remote]; ok {
 				e.importRet[local] = r
@@ -6996,15 +6999,21 @@ func (e *emitter) lowerImport(st *ast.Node) {
 			clause := imp.ImportClause.AsImportClause()
 			// Default import binds the target's default export.
 			if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
-				if res.defLocal == "" {
+				if res.defQualified == "" {
 					e.refuse(st, "%s has no default export", mod)
 					return
 				}
-				if _, ok := res.rets[res.defLocal]; !ok {
+				callable := false
+				if res.defLocal != "" {
+					_, callable = res.rets[res.defLocal]
+				} else if _, ok := res.rets["default"]; ok {
+					callable = true
+				}
+				if !callable {
 					e.refuse(st, "default export of %s is not callable", mod)
 					return
 				}
-				q := res.prefix + res.defLocal
+				q := res.defQualified
 				local := nm.Text()
 				e.importEnv[local] = q
 				if r, ok := res.rets[res.defLocal]; ok {
@@ -7024,7 +7033,11 @@ func (e *emitter) lowerImport(st *ast.Node) {
 					ns := nb.AsNamespaceImport().Name().Text()
 					e.nsImports[ns] = res.key
 					for exp, r := range res.rets {
-						e.importEnv[ns+"."+exp] = res.prefix + exp
+						q := res.prefix + exp
+						if qq, ok := res.qualified[exp]; ok {
+							q = qq
+						}
+						e.importEnv[ns+"."+exp] = q
 						e.importRet[ns+"."+exp] = r
 					}
 					return

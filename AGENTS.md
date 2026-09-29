@@ -103,6 +103,9 @@
   （静态布局不可删字段；Map/Set 用方法）。真机 1 对数；单测 1 项。286 零回退。
 - ✅ `f.call(t, ...args)` 脱糖（thisArg 作首参，契合静态方法惯例；别名/导入/函数三路；
   类实例自有 `call` 优先）。真机 42 对数；单测 1 项。286 零回退。
+- ✅ 透传导出：`export {x} from` / `export {x as y} from` / `export * from`
+  （qualified 直达定义、rets/arity/默认透传、环带链拒；`export *` 不含 default；
+  default 透传经 defQualified）。单测 1 项（命名/star/环）。286 扫测 + `sa check` 全过。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 

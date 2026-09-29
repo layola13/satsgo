@@ -18,6 +18,29 @@ import (
 	"github.com/microsoft/typescript-go/internal/tspath"
 )
 
+// fileExports is one linked file's export surface: direct definitions,
+// default, re-export edges and the resolved qualified names.
+type fileExports struct {
+	exports map[string]bool
+	rets    map[string]saType
+	// defLocal is the local name of the default export ("" if none).
+	defLocal string
+	// reexp maps a locally-exported name to "fileKey.remote" for
+	// `export {x} from` forms; starFrom lists `export * from` targets.
+	reexp    map[string]string
+	starFrom []string
+	// reexpQualified maps every export to its linked @name (filled by
+	// resolveReExports).
+	reexpQualified map[string]string
+}
+
+// dtsSig is one .d.ts signature override for an unannotated .js def.
+type dtsSig struct {
+	ret   saType
+	arity int
+	defs  []bool
+}
+
 // fileLink is one linked file's link-time environment (see emitter.link).
 type fileLink struct {
 	key      string
@@ -31,7 +54,11 @@ type modResolution struct {
 	prefix   string
 	exports  map[string]bool
 	rets     map[string]saType
-	defLocal string
+	// qualified maps an export name to its linked @name (direct defs and
+	// resolved re-exports alike; default imports use defQualified).
+	qualified    map[string]string
+	defLocal     string
+	defQualified string
 }
 
 // ProgramResult is the linked program outcome.
@@ -166,18 +193,6 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		prefixOf[p] = b.String() + "__"
 	}
 	// Pre-pass: exports + shared type environment + global function table.
-	type fileExports struct {
-		exports map[string]bool
-		rets    map[string]saType
-		// defLocal is the local name of the default export ("" if none).
-		defLocal string
-	}
-	// dtsSig is one .d.ts signature override for an unannotated .js def.
-	type dtsSig struct {
-		ret   saType
-		arity int
-		defs  []bool
-	}
 	expOf := map[string]*fileExports{}
 	globalDefaults := map[string]map[string][]bool{}
 	// Pair co-located x.d.ts with x.js (signatures for unannotated bodies).
@@ -224,7 +239,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
 	for _, p := range reachable {
-		expOf[p] = &fileExports{exports: map[string]bool{}, rets: map[string]saType{}}
+		expOf[p] = &fileExports{exports: map[string]bool{}, rets: map[string]saType{}, reexp: map[string]string{}}
 		globalRets[p] = map[string]saType{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
@@ -298,12 +313,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					expOf[p].exports[st.Name().Text()] = true
 				}
 			case ast.KindExportDeclaration:
-				if refused := collectExportList(st, expOf[p].exports); refused != "" {
-					res.Refused = true
-					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: %s", p, refused))
-				}
-				if def := collectDefaultExport(st); def != "" {
-					expOf[p].defLocal = def
+				fromForm := collectReExport(st, p, files, expOf[p])
+				if !fromForm {
+					if refused := collectExportList(st, expOf[p].exports); refused != "" {
+						res.Refused = true
+						res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: %s", p, refused))
+					}
+					if def := collectDefaultExport(st); def != "" {
+						expOf[p].defLocal = def
+					}
 				}
 			case ast.KindExportAssignment:
 				// `export default foo;`: the identifier names the default.
@@ -349,17 +367,39 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			}
 		}
 	}
+	// Re-export resolution: every export (direct, re-exported, star)
+	// maps to its defining qualified name, with rets/arity/defaults
+	// propagated and cycles refused.
+	qualDiag := resolveReExports(reachable, expOf, prefixOf, globalRets, globalArity, globalDefaults)
+	if len(qualDiag) > 0 {
+		res.Refused = true
+		res.Diagnostics = append(res.Diagnostics, qualDiag...)
+		return res
+	}
 	// Per-file link environments.
 	links := map[string]*fileLink{}
 	for _, p := range reachable {
 		lk := &fileLink{key: p, prefix: prefixOf[p], resolved: map[string]*modResolution{}}
 		for spec, tgt := range specOf[p] {
+			defQ := ""
+			if dl := expOf[tgt].defLocal; dl != "" {
+				if q, ok := expOf[tgt].reexpQualified[dl]; ok {
+					defQ = q
+				} else {
+					defQ = prefixOf[tgt] + dl
+				}
+			} else if q, ok := expOf[tgt].reexpQualified["default"]; ok {
+				// `export {x as default} from` without a local default.
+				defQ = q
+			}
 			lk.resolved[spec] = &modResolution{
-				key:      tgt,
-				prefix:   prefixOf[tgt],
-				exports:  expOf[tgt].exports,
-				rets:     expOf[tgt].rets,
-				defLocal: expOf[tgt].defLocal,
+				key:          tgt,
+				prefix:       prefixOf[tgt],
+				exports:      expOf[tgt].exports,
+				rets:         expOf[tgt].rets,
+				qualified:    expOf[tgt].reexpQualified,
+				defLocal:     expOf[tgt].defLocal,
+				defQualified: defQ,
 			}
 		}
 		links[p] = lk
@@ -568,6 +608,148 @@ func hasExportModifier(st *ast.Node) bool {
 	return false
 }
 
+// resolveReExports computes per-file qualified export names, following
+// re-export edges (named and star, default excluded from star per spec)
+// with cycle diagnostics. Direct definitions map to prefix+name; rets,
+// arity and defaults propagate to the re-exporting file.
+func resolveReExports(reachable []string, expOf map[string]*fileExports, prefixOf map[string]string, rets map[string]map[string]saType, arity map[string]map[string]int, defs map[string]map[string][]bool) []string {
+	var diags []string
+	qual := map[string]map[string]string{}
+	for _, p := range reachable {
+		qual[p] = map[string]string{}
+	}
+	var resolve func(p, name string, stack []string) (string, bool)
+	resolve = func(p, name string, stack []string) (string, bool) {
+		if q, ok := qual[p][name]; ok {
+			return q, true
+		}
+		for _, s := range stack {
+			if s == p+"\x00"+name {
+				chain := append(append([]string{}, stack...), p+"\x00"+name)
+				diags = append(diags, "re-export cycle: "+strings.Join(chain, " -> "))
+				return "", false
+			}
+		}
+		stack = append(stack, p+"\x00"+name)
+		ex := expOf[p]
+		// Direct definition (function, arrow): own prefix.
+		if _, ok := rets[p][name]; ok {
+			if _, isReexp := ex.reexp[name]; !isReexp {
+				q := prefixOf[p] + name
+				qual[p][name] = q
+				return q, true
+			}
+		}
+		// Named re-export edge.
+		if edge, ok := ex.reexp[name]; ok {
+			parts := strings.SplitN(edge, "\x00", 2)
+			if len(parts) == 2 {
+				tgt, remote := parts[0], parts[1]
+				if q, ok := resolve(tgt, remote, stack); ok {
+					qual[p][name] = q
+					if _, ok := rets[p][name]; !ok {
+						if r, ok := rets[tgt][remote]; ok {
+							rets[p][name] = r
+						}
+					}
+					if _, ok := arity[p][name]; !ok {
+						if a, ok := arity[tgt][remote]; ok {
+							arity[p][name] = a
+						}
+					}
+					if _, ok := defs[p][name]; !ok {
+						if d, ok := defs[tgt][remote]; ok {
+							defs[p][name] = d
+						}
+					}
+					ex.rets[name] = rets[p][name]
+					return q, true
+				}
+				return "", false
+			}
+		}
+		// Star re-exports (first match wins, shadowing local defs never:
+		// locals were handled above).
+		for _, tgt := range ex.starFrom {
+			if _, ok := expOf[tgt]; !ok {
+				continue
+			}
+			// Enumerate the target's export names.
+			names := map[string]bool{}
+			for n := range rets[tgt] {
+				names[n] = true
+			}
+			for n := range expOf[tgt].exports {
+				names[n] = true
+			}
+			if _, ok := names[name]; ok {
+				if q, ok := resolve(tgt, name, stack); ok {
+					qual[p][name] = q
+					if r, ok := rets[tgt][name]; ok {
+						rets[p][name] = r
+						ex.rets[name] = r
+					}
+					if a, ok := arity[tgt][name]; ok {
+						arity[p][name] = a
+					}
+					if d, ok := defs[tgt][name]; ok {
+						defs[p][name] = d
+					}
+					return q, true
+				}
+				return "", false
+			}
+		}
+		return "", false
+	}
+	for _, p := range reachable {
+		// Direct definitions first.
+		for name := range rets[p] {
+			if _, isReexp := expOf[p].reexp[name]; !isReexp {
+				qual[p][name] = prefixOf[p] + name
+			}
+		}
+		// Named re-exports (default included: `export {x as default} from`).
+		for local := range expOf[p].reexp {
+			if _, ok := qual[p][local]; !ok {
+				resolve(p, local, nil)
+			}
+		}
+		// Star enumerations for namespace imports (and the existence
+		// table importers check against).
+		for _, tgt := range expOf[p].starFrom {
+			if _, ok := expOf[tgt]; !ok {
+				continue
+			}
+			for n := range rets[tgt] {
+				if _, ok := qual[p][n]; !ok {
+					resolve(p, n, nil)
+				}
+				expOf[p].exports[n] = true
+			}
+			for n := range expOf[tgt].exports {
+				if strings.HasPrefix(n, "*") {
+					continue
+				}
+				if _, ok := qual[p][n]; !ok {
+					resolve(p, n, nil)
+				}
+				expOf[p].exports[n] = true
+			}
+		}
+		// Export existence for star markers is informational only.
+		for _, tgt := range expOf[p].starFrom {
+			delete(expOf[p].exports, "*"+tgt)
+			_ = tgt
+		}
+	}
+	// Store qualified maps for link building.
+	for _, p := range reachable {
+		expOf[p].reexpQualified = qual[p]
+	}
+	return diags
+}
+
 // hasDefaultModifier reports a `default` keyword modifier.
 func hasDefaultModifier(st *ast.Node) bool {
 	mods := st.Modifiers()
@@ -607,8 +789,62 @@ func collectDefaultExport(st *ast.Node) string {
 	return ""
 }
 
-// collectExportList records `export { a, b }` names; `export *` and
-// re-exports refuse (link subset v1), returning the refusal message.
+// collectReExport records `export {x} from "./m"`, `export {x as y} from`
+// and `export * from` edges (true when the statement is a resolvable local
+// from-form; bare/absolute/unresolvable specifiers refuse loudly).
+func collectReExport(st *ast.Node, importer string, files map[string]string, exp *fileExports) bool {
+	ed := st.AsExportDeclaration()
+	if ed.ModuleSpecifier == nil {
+		return false
+	}
+	spec, ok := stringLiteralText(ed.ModuleSpecifier)
+	if !ok || !strings.HasPrefix(spec, ".") {
+		return false
+	}
+	tgt := resolveRelative(importer, spec, files)
+	if tgt == "" {
+		return false
+	}
+	// Bare `export * from`: nil clause fans out the whole target.
+	if ed.ExportClause == nil {
+		exp.starFrom = append(exp.starFrom, tgt)
+		return true
+	}
+	if ed.ExportClause == nil {
+		return false
+	}
+	clause := ed.ExportClause
+	if clause.Kind == ast.KindNamespaceExport {
+		exp.starFrom = append(exp.starFrom, tgt)
+		exp.exports["*"+tgt] = true
+		return true
+	}
+	for _, el := range clause.AsNamedExports().Elements.Nodes {
+		if el.Kind != ast.KindExportSpecifier {
+			continue
+		}
+		sp := el.AsExportSpecifier()
+		remote := ""
+		if sp.PropertyName != nil {
+			remote = sp.PropertyName.Text()
+		}
+		local := ""
+		if n := el.Name(); n != nil {
+			local = n.Text()
+		}
+		if remote == "" {
+			remote = local
+		}
+		if local == "" {
+			continue
+		}
+		exp.reexp[local] = tgt + "\x00" + remote
+		exp.exports[local] = true
+	}
+	return true
+}
+// collectExportList records local `export { a, b }` names; from-forms and
+// `export *` refuse here (from-forms resolve via collectReExport first).
 func collectExportList(st *ast.Node, exports map[string]bool) string {
 	ed := st.AsExportDeclaration()
 	if ed.ModuleSpecifier != nil {
