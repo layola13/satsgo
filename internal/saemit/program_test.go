@@ -31,6 +31,20 @@ func TestLowerProgramCrossFile(t *testing.T) {
 	}
 }
 
+func TestLowerProgramUnresolvedDeps(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { x } from \"lodash-es\";\nimport { y } from \"./u\";\nfunction main(): i32 { return y(1); }\n",
+		"u.ts":    "export function y(a: i32): i32 { return a; }\n",
+	}
+	res := LowerProgram("main.ts", files)
+	if !res.Refused {
+		t.Fatalf("expected refusal on bare import, got:\n%s", res.SAI)
+	}
+	if len(res.Unresolved) != 1 || res.Unresolved[0] != "lodash-es" {
+		t.Errorf("missing unresolved dep aggregate: %v", res.Unresolved)
+	}
+}
+
 func TestLowerProgramCycleRefuses(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { a } from \"./b\";\nfunction main(): i32 { return a(); }\n",

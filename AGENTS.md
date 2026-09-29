@@ -54,3 +54,5 @@
   67 sa_std + 2 node 契约全过；单测 1 项。btree 符号一并补进 sa_std 名单。
 - ✅ node `os.*` 同形状扩展（homedir/tmpdir/hostname，零参 string out-param 通用路径）；
   node 契约 5/5 全过。
+- ✅ 未决第三方依赖聚合：`LowerProgram.Unresolved` + `subset-report.txt` 按包 section
+  （`package X: no SA backend yet`），裸 import 仍大声拒；单测 1 项。286 零回退。

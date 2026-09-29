@@ -105,6 +105,14 @@ func programReport(opts ProgramScaffoldOptions, res ProgramResult) string {
 	for _, d := range res.Diagnostics {
 		fmt.Fprintf(&b, "%s\n", d)
 	}
+	// Per-package aggregation: third-party specifiers are Phase-3
+	// candidates (whitelist or SA-native rewrite), not file-level noise.
+	if len(res.Unresolved) > 0 {
+		fmt.Fprintf(&b, "== unresolved third-party deps (%d) ==\n", len(res.Unresolved))
+		for _, u := range res.Unresolved {
+			fmt.Fprintf(&b, "package %s: no SA backend yet (see todo/03_npm.md)\n", u)
+		}
+	}
 	return b.String()
 }
 

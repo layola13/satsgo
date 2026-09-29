@@ -40,6 +40,9 @@ type ProgramResult struct {
 	PerFile     map[string]Result
 	Refused     bool
 	Diagnostics []string
+	// Unresolved lists bare third-party specifiers met during linking
+	// (Phase-3 candidates; also surfaced per-package in the report).
+	Unresolved []string
 }
 
 // LowerProgram lowers entry plus reachable relative .ts modules.
@@ -67,13 +70,29 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	// Import graph over relative specifiers.
 	graph := map[string][]string{}
 	specOf := map[string]map[string]string{} // file -> spec -> target
+	unresolved := map[string]bool{}
+	isBuiltinMod := func(spec string) bool {
+		switch spec {
+		case "fs", "net", "path", "os",
+			"node:fs", "node:net", "node:path", "node:os",
+			"node:process", "node:buffer":
+			return true
+		}
+		return strings.HasSuffix(spec, ".wasm") || strings.HasSuffix(spec, ".wit")
+	}
 	for p, sf := range parsed {
 		for _, st := range sf.AsSourceFile().Statements.Nodes {
 			if st.Kind != ast.KindImportDeclaration && st.Kind != ast.KindExportDeclaration {
 				continue
 			}
 			spec := moduleSpecifierOf(st)
-			if spec == "" || !strings.HasPrefix(spec, ".") {
+			if spec == "" {
+				continue
+			}
+			if !strings.HasPrefix(spec, ".") {
+				if !isBuiltinMod(spec) {
+					unresolved[spec] = true
+				}
 				continue
 			}
 			tgt := resolveRelative(p, spec, files)
@@ -388,6 +407,10 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	}
 	out.WriteString(strings.Join(bodies, "\n"))
 	res.SAI = out.String()
+	for spec := range unresolved {
+		res.Unresolved = append(res.Unresolved, spec)
+	}
+	sort.Strings(res.Unresolved)
 	sort.Strings(res.Files)
 	return res
 }
