@@ -55,6 +55,9 @@
   67 sa_std + 2 node 契约全过；单测 1 项。btree 符号一并补进 sa_std 名单。
 - ✅ node `os.*` 同形状扩展（homedir/tmpdir/hostname，零参 string out-param 通用路径）；
   node 契约 5/5 全过。
+- ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
+  node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
+  门禁为符号契约 + 形状；sa_std 面仍全量真机。
 - ✅ 未决第三方依赖聚合：`LowerProgram.Unresolved` + `subset-report.txt` 按包 section
   （`package X: no SA backend yet`），裸 import 仍大声拒；单测 1 项。286 零回退。
 - ✅ `export default` + 默认导入（`export default f;`/`export {x as default}`/声明位）：

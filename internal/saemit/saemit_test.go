@@ -301,6 +301,16 @@ func TestLowerNodeOs(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
 	}
+	nodeGlobals := "function main(): i32 {\n  const c = process.cwd();\n  const u = crypto.randomUUID();\n  return c.length + u.length;\n}\n"
+	res = mustLower(t, "n4.ts", nodeGlobals)
+	for _, want := range []string{
+		"call @sa_node_plugin_process_cwd",
+		"call @sa_node_plugin_crypto_random_uuid",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 }
 
 func TestLowerTopLevelConst(t *testing.T) {

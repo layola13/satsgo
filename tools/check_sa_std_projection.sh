@@ -73,6 +73,8 @@ node_symbols=(
   sa_node_plugin_os_homedir
   sa_node_plugin_os_tmpdir
   sa_node_plugin_os_hostname
+  sa_node_plugin_process_cwd
+  sa_node_plugin_crypto_random_uuid
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

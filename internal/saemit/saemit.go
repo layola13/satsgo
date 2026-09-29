@@ -2661,6 +2661,17 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 			return "", tUnknown, false
 		}
 	}
+	// process/crypto globals lower through the node backend without an
+	// import (Node exposes them globally; same zero-arg string shape).
+	if (recv == "process" || recv == "crypto") && len(args) == 0 {
+		if proj, ok := projectionByTS(recv + "." + method); ok && proj.Backend == "node" {
+			v, t := e.emitProjCall(proj, args, pos)
+			if e.refused {
+				return "0", tUnknown, true
+			}
+			return v, t, true
+		}
+	}
 	// Class methods inline at the call site (no vtables in SA-ASM).
 	if className, ok := e.varClass[recv]; ok {
 		if v, t, ok := e.lowerClassMethodCall(recv, className, method, args, argNodes, pos); ok {

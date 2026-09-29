@@ -175,6 +175,11 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "os.hostname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_hostname", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	// process/crypto globals (Node exposes them without import; same shape).
+	{TS: "process.cwd", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_process_cwd", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "crypto.randomUUID", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_crypto_random_uuid", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table
