@@ -116,3 +116,5 @@
   date-fns 12.4%（259/2093）；零 panic。主因：跨文件 import（未走链接）+ `.js` 无注解
   （未配 `.d.ts`）+ 顶层 require。结论：单文件口径系统性低估，不触发收缩线；
   下一步 program 口径 + `.d.ts` 配对后再判定（已记入 todo/03）。
+- ✅ 鲁棒性：lodash-es 644 文件 hostile 语料零 panic（checker 异常一律回退语法 lowering；
+  拒绝全是定位 diagnostic）。
