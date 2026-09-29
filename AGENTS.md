@@ -56,3 +56,9 @@
   node 契约 5/5 全过。
 - ✅ 未决第三方依赖聚合：`LowerProgram.Unresolved` + `subset-report.txt` 按包 section
   （`package X: no SA backend yet`），裸 import 仍大声拒；单测 1 项。286 零回退。
+
+### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
+
+- ✅ 静态模板切片（`tsx.go` + `LowerTSX`）：纯静态 JSX（标签/文本/string 属性/self-closing/
+  fragment）→ `.sax` Component + 空 state；hooks/事件处理器/表达式子节点/自定义组件/
+  spread 全部大声拒。单测 2 项（静态形状/三类动态拒绝）。286 零回退（独立入口）。
