@@ -328,6 +328,29 @@ func TestLowerNullArray(t *testing.T) {
 	}
 }
 
+func TestLowerFromCharCodeUnwrap(t *testing.T) {
+	src := "function main(): i32 {\n  const s = String.fromCharCode(65);\n  return s.length;\n}\n"
+	res := mustLower(t, "fcc.ts", src)
+	// Buffer-handle protocol: data/len unwrap, never a direct slice read.
+	for _, want := range []string{
+		"call @sa_string_from_char_code",
+		"call @sa_fmt_buffer_data",
+		"call @sa_fmt_buffer_len",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestLowerLengthFieldPriority(t *testing.T) {
+	src := "interface Header {\n  kind: i32;\n  length: i32;\n}\nfunction main(): i32 {\n  const h: Header = { kind: 1, length: 64 };\n  return h.length;\n}\n"
+	res := mustLower(t, "hdr.ts", src)
+	if !strings.Contains(res.SAI, "load h + 4 as i32") {
+		t.Errorf("struct length field must win over slice-len alias:\n%s", res.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

@@ -1633,6 +1633,18 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 				}
 				return target, tArray
 			}
+			// Bindings report their static kind (strings/arrays/floats
+			// must not masquerade as i32: interpolation, map keys and
+			// join typing depend on it).
+			if e.strVars[n.Text()] {
+				return n.Text(), tString
+			}
+			if e.arrVars[n.Text()] || e.mapVars[n.Text()] || e.setVars[n.Text()] {
+				return n.Text(), tArray
+			}
+			if e.f64Vars[n.Text()] {
+				return n.Text(), tF64
+			}
 			return n.Text(), tI32
 		}
 		// Top-level pure consts inline (locals shadow via scopes above).
@@ -1772,6 +1784,9 @@ func (e *emitter) lowerStringLiteral(text string) string {
 	cname := fmt.Sprintf("str_const_%d", e.tmp)
 	escaped := strings.ReplaceAll(text, "\\", "\\\\")
 	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+	escaped = strings.ReplaceAll(escaped, "\n", "\\n")
+	escaped = strings.ReplaceAll(escaped, "\r", "\\r")
+	escaped = strings.ReplaceAll(escaped, "\t", "\\t")
 	fmt.Fprintf(&e.header, "@const %s = utf8:\"%s\\0\"\n", cname, escaped)
 	h := e.freshTmp()
 	e.emit("%s = alloc 16", h)
@@ -2191,7 +2206,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	}
 	// console.log(...) → @sa_print_bytes via sa_std/io/print.sai
 	if isConsoleLog(call.Expression) {
-		return e.lowerConsoleLog(args), tVoid
+		return e.lowerConsoleLog(args, argTypes, n), tVoid
 	}
 	// Math.* inline idioms (reference math_surface; trig etc. refuse).
 	if name, ok := mathMethod(call.Expression); ok {
@@ -2211,12 +2226,30 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			return "0", tUnknown
 		}
 	}
-	// String.fromCharCode → sa_std/string.sai (policy: primitives live in sci)
+	// String.fromCharCode → sa_std/string.sai (policy: primitives live in sci).
+	// The primitive returns a BUFFER handle (u64); unwrap via
+	// sa_fmt_buffer_data/len exactly like concatSlices (reading the u64
+	// as a slice header segfaults).
 	if isStringFromCharCode(call.Expression) {
 		e.needImport("sa_std/string.sai")
+		e.needImport("sa_std/fmt.sai")
+		hbuf := e.freshTmp()
+		e.emit("%s = call @sa_string_from_char_code(%s)", hbuf, strings.Join(args, ", "))
+		e.ownTemp(hbuf)
+		hptr := e.freshTmp()
+		e.emit("%s = call @sa_fmt_buffer_data(%s)", hptr, hbuf)
+		e.ownTemp(hptr)
+		hlen := e.freshTmp()
+		e.emit("%s = call @sa_fmt_buffer_len(%s)", hlen, hbuf)
+		e.ownTemp(hlen)
 		t := e.freshTmp()
-		e.emit("%s = call @sa_string_from_char_code(%s)", t, strings.Join(args, ", "))
-		e.ownTemp(t)
+		e.emit("%s = alloc 16", t)
+		e.emit("store %s + 0, %s as ptr", t, hptr)
+		e.emit("store %s + 8, %s as u64", t, hlen)
+		e.declareOwned(t)
+		e.releaseIfOwnedTemp(hptr)
+		e.releaseIfOwnedTemp(hlen)
+		e.releaseIfOwnedTemp(hbuf)
 		return t, tString
 	}
 	// Number.isInteger(x): i32 operands are trivially integral.
@@ -2307,6 +2340,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			bp, bl := e.expandSlice(args[0])
 			t := e.freshTmp()
 			e.emit("%s = call @sa_parse_float(%s, %s)", t, bp, bl)
+			e.ownTemp(t)
 			return t, tF64
 		}
 		// structuredClone(v): deep copy by static shape (see lowerClone).
@@ -2314,6 +2348,13 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			at := tI32
 			if len(argTypes) > 0 {
 				at = argTypes[0]
+			}
+			// Identifiers report tI32; recover handle-ness from the
+			// binding maps (arrays/strings need element-wise copies).
+			if e.arrVars[args[0]] {
+				at = tArray
+			} else if e.strVars[args[0]] {
+				at = tString
 			}
 			return e.lowerDeepClone(args[0], at, n), at
 		}
@@ -2646,6 +2687,7 @@ func (e *emitter) lowerMapMethod(recv, method string, args []string, types []saT
 		ks := e.mapKeySlice(args[0], kt)
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_map_get(&%s, &%s)", t, recv, ks)
+		e.ownTemp(t)
 		return t, tI32, true
 	case "has":
 		if len(args) != 1 {
@@ -2654,6 +2696,7 @@ func (e *emitter) lowerMapMethod(recv, method string, args []string, types []saT
 		ks := e.mapKeySlice(args[0], kt)
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_map_contains_key(&%s, &%s)", t, recv, ks)
+		e.ownTemp(t)
 		return t, tBool, true
 	case "delete":
 		if len(args) != 1 {
@@ -2663,8 +2706,10 @@ func (e *emitter) lowerMapMethod(recv, method string, args []string, types []saT
 		// Probe presence first so a stored 0 still reports true.
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_map_contains_key(&%s, &%s)", t, recv, ks)
+		e.ownTemp(t)
 		drop := e.freshTmp()
 		e.emit("%s = call @sa_btree_map_remove(&%s, &%s)", drop, recv, ks)
+		e.ownTemp(drop)
 		return t, tBool, true
 	case "clear":
 		if len(args) != 0 {
@@ -2678,6 +2723,7 @@ func (e *emitter) lowerMapMethod(recv, method string, args []string, types []saT
 		}
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_map_len(&%s)", t, recv)
+		e.ownTemp(t)
 		return t, tI32, true
 	case "keys", "values", "entries":
 		if len(args) != 0 {
@@ -2721,6 +2767,7 @@ func (e *emitter) lowerSetMethod(recv, method string, args []string, types []saT
 		ks := e.mapKeySlice(args[0], kt)
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_set_contains(&%s, &%s)", t, recv, ks)
+		e.ownTemp(t)
 		return t, tBool, true
 	case "delete":
 		if len(args) != 1 {
@@ -2729,8 +2776,10 @@ func (e *emitter) lowerSetMethod(recv, method string, args []string, types []saT
 		ks := e.mapKeySlice(args[0], kt)
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_set_contains(&%s, &%s)", t, recv, ks)
+		e.ownTemp(t)
 		drop := e.freshTmp()
 		e.emit("%s = call @sa_btree_set_remove(&%s, &%s)", drop, recv, ks)
+		e.ownTemp(drop)
 		return t, tBool, true
 	case "clear":
 		if len(args) != 0 {
@@ -2744,6 +2793,7 @@ func (e *emitter) lowerSetMethod(recv, method string, args []string, types []saT
 		}
 		t := e.freshTmp()
 		e.emit("%s = call @sa_btree_set_len(&%s)", t, recv)
+		e.ownTemp(t)
 		return t, tI32, true
 	default:
 		e.refuse(pos, "Set.%s is not a projected surface", method)
@@ -2770,7 +2820,11 @@ func (e *emitter) lowerHigherOrder(recv, method string, args []string, argNodes 
 	if elem == "" {
 		elem = "i32"
 	}
-	esz, _ := widthOf(elem)
+	// Fixed 4-byte slots: literals, push, checked-index and clone all
+	// build/read 4-wide (nested handles truncate but round-trip); a
+	// type-sized esz mis-strides those buffers (segfault). Struct field
+	// layouts still use widthOf; only array slots are fixed.
+	esz := 4
 	// Locate the inline callback (arrows arrive as @callback: markers;
 	// named function values cannot inline without a body).
 	var cb *ast.Node
@@ -2808,7 +2862,7 @@ func (e *emitter) lowerHigherOrder(recv, method string, args []string, argNodes 
 		addr := e.freshTmp()
 		e.emit("%s = add %s, %s", addr, data, off)
 		v := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", v, addr, elem)
+		e.emit("%s = load %s + 0 as i32", v, addr)
 		return v
 	}
 	switch method {
@@ -3140,8 +3194,7 @@ func (e *emitter) bindCallbackParam(p *ast.Node, val string, pos *ast.Node) {
 		return
 	}
 	if name.Kind == ast.KindIdentifier {
-		if l := e.layoutOfVar(val); l != nil {
-			e.declareAlias(name.Text(), val)
+		if l := e.layoutOfVar(val); l != nil {			e.declareAlias(name.Text(), val)
 			if e.varLayouts == nil {
 				e.varLayouts = map[string]*layout{}
 			}
@@ -3168,11 +3221,11 @@ func (e *emitter) bindCallbackParam(p *ast.Node, val string, pos *ast.Node) {
 			}
 			return
 		}
-		kind := "named"
-		if isTempName(val) {
-			kind = "temp"
-		}
-		e.assign(name.Text(), val, kind, tI32, pos)
+		// Scalars snapshot by copy, never move: a `p = tmp` move of a
+		// loop-invariant temp breaks back-edge path states
+		// (PhiStateConflict), so callbacks always copy their values.
+		e.emit("%s = add %s, 0", name.Text(), val)
+		e.declarePlain(name.Text())
 		return
 	}
 	if name.Kind == ast.KindArrayBindingPattern {
@@ -3352,7 +3405,7 @@ func (e *emitter) lowerSortWithCmp(recv, elem string, esz int, argNodes *ast.Ele
 		addr := e.freshTmp()
 		e.emit("%s = add %s, %s", addr, data, off)
 		v := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", v, addr, elem)
+		e.emit("%s = load %s + 0 as i32", v, addr)
 		return v
 	}
 	storeAt := func(idx, v string) {
@@ -3360,7 +3413,7 @@ func (e *emitter) lowerSortWithCmp(recv, elem string, esz int, argNodes *ast.Ele
 		e.emit("%s = mul %s, %d", off, idx, esz)
 		addr := e.freshTmp()
 		e.emit("%s = add %s, %s", addr, data, off)
-		e.emit("store %s + 0, %s as %s", addr, v, elem)
+		e.emit("store %s + 0, %s as i32", addr, v)
 	}
 	// cmpGt(x, y) lowers the comparator body with x/y bound, testing > 0.
 	cmpGt := func(x, y string) string {
@@ -3825,10 +3878,10 @@ func (e *emitter) lowerArrayPush(arr, val, elem string, esz int) string {
 	saddr := e.freshTmp()
 	e.emit("%s = add %s, %s", saddr, data, soff)
 	tmp := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", tmp, saddr, elem)
+	e.emit("%s = load %s + 0 as i32", tmp, saddr)
 	daddr := e.freshTmp()
 	e.emit("%s = add %s, %s", daddr, ndata, soff)
-	e.emit("store %s + 0, %s as %s", daddr, tmp, elem)
+	e.emit("store %s + 0, %s as i32", daddr, tmp)
 	inext := e.freshTmp()
 	e.emit("%s = add %s, 1", inext, i)
 	e.emit("%s = %s", i, inext)
@@ -3838,7 +3891,7 @@ func (e *emitter) lowerArrayPush(arr, val, elem string, esz int) string {
 	e.emit("%s = mul %s, %d", voff, ln, esz)
 	vaddr := e.freshTmp()
 	e.emit("%s = add %s, %s", vaddr, ndata, voff)
-	e.emit("store %s + 0, %s as %s", vaddr, val, elem)
+	e.emit("store %s + 0, %s as i32", vaddr, val)
 	e.emit("store %s + 0, %s as ptr", arr, ndata)
 	e.emit("store %s + 8, %s as u64", arr, nlen)
 	e.emit("!%s", ndata)
@@ -3931,13 +3984,17 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 	if elem == "" {
 		elem = "i32"
 	}
-	esz, _ := widthOf(elem)
+	// Fixed 4-byte slots: literals, push, checked-index and clone all
+	// build/read 4-wide (nested handles truncate but round-trip); a
+	// type-sized esz mis-strides those buffers (segfault). Struct field
+	// layouts still use widthOf; only array slots are fixed.
+	esz := 4
 	switch method {
 	case "push":
 		if len(args) != 1 {
 			return "", tUnknown, false
 		}
-		return e.lowerArrayPush(recv, args[0], elem, esz), tI32, true
+		return e.lowerArrayPush(recv, args[0], "i32", 4), tI32, true
 	case "pop":
 		if len(args) != 0 {
 			return "", tUnknown, false
@@ -3953,7 +4010,7 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 		addr := e.freshTmp()
 		e.emit("%s = add %s, %s", addr, data, off)
 		out := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", out, addr, elem)
+		e.emit("%s = load %s + 0 as i32", out, addr)
 		e.emit("store %s + 8, %s as u64", recv, last)
 		return out, tI32, true
 	case "shift":
@@ -3965,7 +4022,7 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 		data := e.freshTmp()
 		e.emit("%s = load %s + 0 as ptr", data, recv)
 		out := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", out, data, elem)
+		e.emit("%s = load %s + 0 as i32", out, data)
 		nlen := e.freshTmp()
 		e.emit("%s = sub %s, 1", nlen, ln)
 		topL := e.freshLabel("sh_top")
@@ -3985,12 +4042,12 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 		saddr := e.freshTmp()
 		e.emit("%s = add %s, %s", saddr, data, soff)
 		tmp := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", tmp, saddr, elem)
+		e.emit("%s = load %s + 0 as i32", tmp, saddr)
 		doff := e.freshTmp()
 		e.emit("%s = mul %s, %d", doff, i, esz)
 		daddr := e.freshTmp()
 		e.emit("%s = add %s, %s", daddr, data, doff)
-		e.emit("store %s + 0, %s as %s", daddr, tmp, elem)
+		e.emit("store %s + 0, %s as i32", daddr, tmp)
 		inext := e.freshTmp()
 		e.emit("%s = add %s, 1", inext, i)
 		e.emit("%s = %s", i, inext)
@@ -4002,7 +4059,7 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 		if len(args) != 1 {
 			return "", tUnknown, false
 		}
-		nlen := e.lowerArrayPush(recv, args[0], elem, esz)
+		nlen := e.lowerArrayPush(recv, args[0], "i32", 4)
 		data := e.freshTmp()
 		e.emit("%s = load %s + 0 as ptr", data, recv)
 		topL := e.freshLabel("unsh_top")
@@ -4022,16 +4079,16 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 		saddr := e.freshTmp()
 		e.emit("%s = add %s, %s", saddr, data, soff)
 		tmp := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", tmp, saddr, elem)
+		e.emit("%s = load %s + 0 as i32", tmp, saddr)
 		doff := e.freshTmp()
 		e.emit("%s = mul %s, %d", doff, i, esz)
 		daddr := e.freshTmp()
 		e.emit("%s = add %s, %s", daddr, data, doff)
-		e.emit("store %s + 0, %s as %s", daddr, tmp, elem)
+		e.emit("store %s + 0, %s as i32", daddr, tmp)
 		e.emit("%s = %s", i, prev)
 		e.emit("jmp %s", topL)
 		e.emitRaw("%s:", endL)
-		e.emit("store %s + 0, %s as %s", data, args[0], elem)
+		e.emit("store %s + 0, %s as i32", data, args[0])
 		return nlen, tI32, true
 	case "fill":
 		if len(args) != 1 {
@@ -4055,7 +4112,7 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 		e.emit("%s = mul %s, %d", off, i, esz)
 		addr := e.freshTmp()
 		e.emit("%s = add %s, %s", addr, data, off)
-		e.emit("store %s + 0, %s as %s", addr, args[0], elem)
+		e.emit("store %s + 0, %s as i32", addr, args[0])
 		inext := e.freshTmp()
 		e.emit("%s = add %s, 1", inext, i)
 		e.emit("%s = %s", i, inext)
@@ -4264,7 +4321,7 @@ func (e *emitter) lowerArrayScan(recv, elem string, esz int, want, from string, 
 	addr := e.freshTmp()
 	e.emit("%s = add %s, %s", addr, data, off)
 	cur := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", cur, addr, elem)
+	e.emit("%s = load %s + 0 as i32", cur, addr)
 	eq := e.freshTmp()
 	e.emit("%s = eq %s, %s", eq, cur, want)
 	e.emit("br %s -> %s, %s", eq, hitL, nextL)
@@ -4322,11 +4379,11 @@ func (e *emitter) lowerArrayReverse(recv, elem string, esz int) {
 	ba := e.freshTmp()
 	e.emit("%s = add %s, %s", ba, data, bo)
 	a := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", a, aa, elem)
+	e.emit("%s = load %s + 0 as i32", a, aa)
 	b := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", b, ba, elem)
-	e.emit("store %s + 0, %s as %s", aa, b, elem)
-	e.emit("store %s + 0, %s as %s", ba, a, elem)
+	e.emit("%s = load %s + 0 as i32", b, ba)
+	e.emit("store %s + 0, %s as i32", aa, b)
+	e.emit("store %s + 0, %s as i32", ba, a)
 	inext := e.freshTmp()
 	e.emit("%s = add %s, 1", inext, i)
 	e.emit("%s = %s", i, inext)
@@ -4348,28 +4405,32 @@ func (e *emitter) lowerArraySlice(recv, elem string, esz int, start, end string,
 	}
 	n := e.freshTmp()
 	e.emit("%s = sub %s, %s", n, f, s)
-	// Empty/negative ranges yield an empty array (no branch: zero alloc).
-	neg := e.freshTmp()
-	zL := e.freshLabel("sl_z")
-	nzL := e.freshLabel("sl_nz")
-	doneL := e.freshLabel("sl_done")
-	e.emit("%s = sle %s, 0", neg, n)
-	e.emit("br %s -> %s, %s", neg, zL, nzL)
-	e.emitRaw("%s:", zL)
-	zh := e.freshTmp()
-	e.emit("%s = alloc 16", zh)
-	e.emit("store %s + 0, 0 as ptr", zh)
-	e.emit("store %s + 8, 0 as u64", zh)
-	e.emit("jmp %s", doneL)
-	e.emitRaw("%s:", nzL)
+	// Clamp negative ranges to 0 branch-free (n * (n >= 0)): definitions
+	// stay on the single path (branch arms hide names from joins).
+	nneg := e.freshTmp()
+	e.emit("%s = slt %s, 0", nneg, n)
+	one := e.freshTmp()
+	e.emit("%s = 1", one)
+	keep := e.freshTmp()
+	e.emit("%s = sub %s, %s", keep, one, nneg)
+	nn := e.freshTmp()
+	e.emit("%s = mul %s, %s", nn, n, keep)
+	n = nn
+	// Single-path allocation: the buffer holds (n+1) slots, the header
+	// keeps the exact length, the copy loop runs zero times when empty.
+	n1 := e.freshTmp()
+	e.emit("%s = add %s, 1", n1, n)
 	nby := e.freshTmp()
-	e.emit("%s = mul %s, %d", nby, n, esz)
+	e.emit("%s = mul %s, %d", nby, n1, esz)
 	ddata := e.freshTmp()
 	e.emit("%s = alloc %s", ddata, nby)
 	dh := e.freshTmp()
 	e.emit("%s = alloc 16", dh)
 	e.emit("store %s + 0, %s as ptr", dh, ddata)
 	e.emit("store %s + 8, %s as u64", dh, n)
+	e.emit("!%s", ddata)
+	dloop := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", dloop, dh)
 	i := e.freshTmp()
 	e.emit("%s = 0", i)
 	topL := e.freshLabel("sl_top")
@@ -4387,70 +4448,44 @@ func (e *emitter) lowerArraySlice(recv, elem string, esz int, start, end string,
 	sa := e.freshTmp()
 	e.emit("%s = add %s, %s", sa, sdata, so)
 	cv := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", cv, sa, elem)
+	e.emit("%s = load %s + 0 as i32", cv, sa)
 	do := e.freshTmp()
 	e.emit("%s = mul %s, %d", do, i, esz)
 	da := e.freshTmp()
-	e.emit("%s = add %s, %s", da, ddata, do)
-	e.emit("store %s + 0, %s as %s", da, cv, elem)
+	e.emit("%s = add %s, %s", da, dloop, do)
+	e.emit("store %s + 0, %s as i32", da, cv)
 	inext := e.freshTmp()
 	e.emit("%s = add %s, 1", inext, i)
 	e.emit("%s = %s", i, inext)
 	e.emit("jmp %s", topL)
 	e.emitRaw("%s:", cendL)
-	e.emit("jmp %s", doneL)
-	e.emitRaw("%s:", doneL)
-	// Join the empty/non-empty arms via checked selection: reload by
-	// length (empty arm has len 0). Both arms wrote distinct headers;
-	// select on n<=0 guard recomputed.
-	out := e.freshTmp()
-	e.emit("%s = add %s, 0", out, dh)
-	isZ := e.freshTmp()
-	e.emit("%s = sle %s, 0", isZ, n)
-	fixL := e.freshLabel("sl_fix")
-	keepL := e.freshLabel("sl_keep")
-	finL := e.freshLabel("sl_fin")
-	e.emit("br %s -> %s, %s", isZ, fixL, keepL)
-	e.emitRaw("%s:", fixL)
-	e.emit("%s = %s", out, zh)
-	e.emit("jmp %s", finL)
-	e.emitRaw("%s:", keepL)
-	e.emit("jmp %s", finL)
-	e.emitRaw("%s:", finL)
-	e.declareOwned(out)
+	// The header owns itself (no snapshot copy: copies orphan the alloc
+	// temp as a leak).
+	e.declareOwned(dh)
 	if e.arrVars == nil {
 		e.arrVars = map[string]bool{}
 	}
 	if e.arrElems == nil {
 		e.arrElems = map[string]string{}
 	}
-	e.arrVars[out] = true
-	e.arrElems[out] = elem
-	return out
+	e.arrVars[dh] = true
+	e.arrElems[dh] = elem
+	return dh
 }
 
-// lowerArrayAt normalizes negative indices, then uses the checked-index
-// join (OOB yields 0, matching the subset rule).
+// lowerArrayAt normalizes negative indices branch-free
+// (sel = idx + (idx<0 ? ln : 0); arm rebinds would orphan temps), then
+// uses the checked-index join (OOB yields 0, matching the subset rule).
 func (e *emitter) lowerArrayAt(recv, idx string, pos *ast.Node) (string, saType, bool) {
 	_ = pos
 	ln := e.freshTmp()
 	e.emit("%s = load %s + 8 as u64", ln, recv)
-	sel := e.freshTmp()
-	e.emit("%s = add %s, 0", sel, idx)
 	isneg := e.freshTmp()
 	e.emit("%s = slt %s, 0", isneg, idx)
-	fixL := e.freshLabel("aat_fix")
-	keepL := e.freshLabel("aat_keep")
-	doneL := e.freshLabel("aat_done")
-	e.emit("br %s -> %s, %s", isneg, fixL, keepL)
-	e.emitRaw("%s:", fixL)
-	fv := e.freshTmp()
-	e.emit("%s = add %s, %s", fv, ln, idx)
-	e.emit("%s = %s", sel, fv)
-	e.emit("jmp %s", doneL)
-	e.emitRaw("%s:", keepL)
-	e.emit("jmp %s", doneL)
-	e.emitRaw("%s:", doneL)
+	adj := e.freshTmp()
+	e.emit("%s = mul %s, %s", adj, ln, isneg)
+	sel := e.freshTmp()
+	e.emit("%s = add %s, %s", sel, idx, adj)
 	return e.lowerCheckedIndex(recv, sel, false), tI32, true
 }
 
@@ -4494,7 +4529,7 @@ func (e *emitter) lowerArrayJoin(recv, elem, sep string, pos *ast.Node) string {
 	addr := e.freshTmp()
 	e.emit("%s = add %s, %s", addr, data, off)
 	raw := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", raw, addr, elem)
+	e.emit("%s = load %s + 0 as i32", raw, addr)
 	part := raw
 	if elem != "ptr" {
 		var ok bool
@@ -4607,14 +4642,14 @@ func (e *emitter) lowerCopyWithinStep(data string, esz int, elem, t, s, k string
 	sa := e.freshTmp()
 	e.emit("%s = add %s, %s", sa, data, so)
 	cur := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", cur, sa, elem)
+	e.emit("%s = load %s + 0 as i32", cur, sa)
 	di := e.freshTmp()
 	e.emit("%s = add %s, %s", di, t, k)
 	dof := e.freshTmp()
 	e.emit("%s = mul %s, %d", dof, di, esz)
 	da := e.freshTmp()
 	e.emit("%s = add %s, %s", da, data, dof)
-	e.emit("store %s + 0, %s as %s", da, cur, elem)
+	e.emit("store %s + 0, %s as i32", da, cur)
 }
 
 // lowerToReversed copies reversed into a fresh array.
@@ -4623,27 +4658,20 @@ func (e *emitter) lowerToReversed(recv, elem string, esz int) string {
 	e.emit("%s = load %s + 8 as u64", ln, recv)
 	sdata := e.freshTmp()
 	e.emit("%s = load %s + 0 as ptr", sdata, recv)
+	// Single-path: (len+1) slots always (see lowerArraySlice).
+	ln1 := e.freshTmp()
+	e.emit("%s = add %s, 1", ln1, ln)
 	nby := e.freshTmp()
-	e.emit("%s = mul %s, %d", nby, ln, esz)
+	e.emit("%s = mul %s, %d", nby, ln1, esz)
 	ddata := e.freshTmp()
-	zL := e.freshLabel("rv_z")
-	nzL := e.freshLabel("rv_nz")
-	isz := e.freshTmp()
-	e.emit("%s = eq %s, 0", isz, nby)
-	e.emit("br %s -> %s, %s", isz, zL, nzL)
-	e.emitRaw("%s:", zL)
-	e.emit("%s = alloc 4", ddata)
-	e.emit("jmp %s", nzL)
-	e.emitRaw("%s:", nzL)
-	dd := e.freshTmp()
-	e.emit("%s = add %s, 0", dd, nby)
-	dd2 := e.freshTmp()
-	e.emit("%s = alloc %s", dd2, dd)
-	e.emit("%s = %s", ddata, dd2)
+	e.emit("%s = alloc %s", ddata, nby)
 	dest := e.freshTmp()
 	e.emit("%s = alloc 16", dest)
 	e.emit("store %s + 0, %s as ptr", dest, ddata)
 	e.emit("store %s + 8, %s as u64", dest, ln)
+	e.emit("!%s", ddata)
+	dloop := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", dloop, dest)
 	i := e.freshTmp()
 	e.emit("%s = 0", i)
 	topL := e.freshLabel("tr_top")
@@ -4663,12 +4691,12 @@ func (e *emitter) lowerToReversed(recv, elem string, esz int) string {
 	sa := e.freshTmp()
 	e.emit("%s = add %s, %s", sa, sdata, so)
 	cv := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", cv, sa, elem)
+	e.emit("%s = load %s + 0 as i32", cv, sa)
 	dof := e.freshTmp()
 	e.emit("%s = mul %s, %d", dof, i, esz)
 	da := e.freshTmp()
-	e.emit("%s = add %s, %s", da, ddata, dof)
-	e.emit("store %s + 0, %s as %s", da, cv, elem)
+	e.emit("%s = add %s, %s", da, dloop, dof)
+	e.emit("store %s + 0, %s as i32", da, cv)
 	inext := e.freshTmp()
 	e.emit("%s = add %s, 1", inext, i)
 	e.emit("%s = %s", i, inext)
@@ -4691,22 +4719,12 @@ func (e *emitter) lowerToReversed(recv, elem string, esz int) string {
 func (e *emitter) lowerArrayWith(recv, elem string, esz int, idx, val string, pos *ast.Node) string {
 	ln := e.freshTmp()
 	e.emit("%s = load %s + 8 as u64", ln, recv)
-	norm := e.freshTmp()
-	e.emit("%s = add %s, 0", norm, idx)
 	isneg := e.freshTmp()
 	e.emit("%s = slt %s, 0", isneg, idx)
-	fixL := e.freshLabel("w_fix")
-	keepL := e.freshLabel("w_keep")
-	doneL := e.freshLabel("w_done")
-	e.emit("br %s -> %s, %s", isneg, fixL, keepL)
-	e.emitRaw("%s:", fixL)
-	fv := e.freshTmp()
-	e.emit("%s = add %s, %s", fv, ln, idx)
-	e.emit("%s = %s", norm, fv)
-	e.emit("jmp %s", doneL)
-	e.emitRaw("%s:", keepL)
-	e.emit("jmp %s", doneL)
-	e.emitRaw("%s:", doneL)
+	adj := e.freshTmp()
+	e.emit("%s = mul %s, %s", adj, ln, isneg)
+	norm := e.freshTmp()
+	e.emit("%s = add %s, %s", norm, idx, adj)
 	// One copy up front; the store runs only when 0 <= norm < len
 	// (RangeError has no SA-ASM edge, so out-of-range passes the copy
 	// through unchanged).
@@ -4730,7 +4748,7 @@ func (e *emitter) lowerArrayWith(recv, elem string, esz int, idx, val string, po
 	e.emit("%s = mul %s, %d", off, norm, esz)
 	addr := e.freshTmp()
 	e.emit("%s = add %s, %s", addr, cdata, off)
-	e.emit("store %s + 0, %s as %s", addr, val, elem)
+	e.emit("store %s + 0, %s as i32", addr, val)
 	e.emit("jmp %s", finL)
 	e.emitRaw("%s:", finL)
 	return cp
@@ -4762,31 +4780,27 @@ func (e *emitter) lowerToSpliced(recv, elem string, esz int, args []string, pos 
 		}
 	}
 	s := e.arrayClampLen(start, ln)
-	// Clamp delete count to [0, len - s].
+	// Clamp delete count to [0, maxdel] branch-free (arm rebinds orphan
+	// temps; see lowerArrayAt).
 	maxdel := e.freshTmp()
 	e.emit("%s = sub %s, %s", maxdel, ln, s)
 	d := e.freshTmp()
 	e.emit("%s = add %s, 0", d, del)
 	neg := e.freshTmp()
-	negL := e.freshLabel("ts_neg")
-	negE := e.freshLabel("ts_nege")
 	e.emit("%s = slt %s, 0", neg, d)
-	e.emit("br %s -> %s, %s", neg, negL, negE)
-	e.emitRaw("%s:", negL)
-	e.emit("%s = 0", d)
-	e.emit("jmp %s", negE)
-	e.emitRaw("%s:", negE)
+	keepNeg := e.freshTmp()
+	e.emit("%s = sub 1, %s", keepNeg, neg)
+	d0 := e.freshTmp()
+	e.emit("%s = mul %s, %s", d0, d, keepNeg)
 	over := e.freshTmp()
-	overL := e.freshLabel("ts_over")
-	overE := e.freshLabel("ts_overe")
-	e.emit("%s = sgt %s, %s", over, d, maxdel)
-	e.emit("br %s -> %s, %s", over, overL, overE)
-	e.emitRaw("%s:", overL)
-	nd := e.freshTmp()
-	e.emit("%s = add %s, 0", nd, maxdel)
-	e.emit("%s = %s", d, nd)
-	e.emit("jmp %s", overE)
-	e.emitRaw("%s:", overE)
+	e.emit("%s = sgt %s, %s", over, d0, maxdel)
+	gap := e.freshTmp()
+	e.emit("%s = sub %s, %s", gap, maxdel, d0)
+	fix := e.freshTmp()
+	e.emit("%s = mul %s, %s", fix, gap, over)
+	d1 := e.freshTmp()
+	e.emit("%s = add %s, %s", d1, d0, fix)
+	d = d1
 	// newlen = len - d + nitems; copy head, items, tail.
 	ni := fmt.Sprintf("%d", len(items))
 	kept := e.freshTmp()
@@ -4799,29 +4813,21 @@ func (e *emitter) lowerToSpliced(recv, elem string, esz int, args []string, pos 
 // spliceCopy builds the toSpliced result: head [0,s), items, tail [s+d, len).
 func (e *emitter) spliceCopy(recv, elem string, esz int, sdata, ln, s, d string, items []string, nlen string) string {
 	_ = recv
+	nlen1 := e.freshTmp()
+	e.emit("%s = add %s, 1", nlen1, nlen)
 	nby := e.freshTmp()
-	e.emit("%s = mul %s, %d", nby, nlen, esz)
+	e.emit("%s = mul %s, %d", nby, nlen1, esz)
 	ddata := e.freshTmp()
-	zL := e.freshLabel("sp_z")
-	nzL := e.freshLabel("sp_nz")
-	isz := e.freshTmp()
-	e.emit("%s = eq %s, 0", isz, nby)
-	e.emit("br %s -> %s, %s", isz, zL, nzL)
-	e.emitRaw("%s:", zL)
-	e.emit("%s = alloc 4", ddata)
-	e.emit("jmp %s", nzL)
-	e.emitRaw("%s:", nzL)
-	dd := e.freshTmp()
-	e.emit("%s = add %s, 0", dd, nby)
-	dd2 := e.freshTmp()
-	e.emit("%s = alloc %s", dd2, dd)
-	e.emit("%s = %s", ddata, dd2)
+	e.emit("%s = alloc %s", ddata, nby)
 	dest := e.freshTmp()
 	e.emit("%s = alloc 16", dest)
 	e.emit("store %s + 0, %s as ptr", dest, ddata)
 	e.emit("store %s + 8, %s as u64", dest, nlen)
+	e.emit("!%s", ddata)
+	dloop := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", dloop, dest)
 	// Head [0, s).
-	e.copyRange(sdata, ddata, esz, elem, "0", s, "0")
+	e.copyRange(sdata, dloop, esz, elem, "0", s, "0")
 	// Items at s.
 	for k, it := range items {
 		di := e.freshTmp()
@@ -4829,8 +4835,8 @@ func (e *emitter) spliceCopy(recv, elem string, esz int, sdata, ln, s, d string,
 		dof := e.freshTmp()
 		e.emit("%s = mul %s, %d", dof, di, esz)
 		da := e.freshTmp()
-		e.emit("%s = add %s, %s", da, ddata, dof)
-		e.emit("store %s + 0, %s as %s", da, it, elem)
+		e.emit("%s = add %s, %s", da, dloop, dof)
+		e.emit("store %s + 0, %s as i32", da, it)
 	}
 	// Tail [s+d, len) at s+nitems.
 	ni := fmt.Sprintf("%d", len(items))
@@ -4838,7 +4844,7 @@ func (e *emitter) spliceCopy(recv, elem string, esz int, sdata, ln, s, d string,
 	e.emit("%s = add %s, %s", tailStart, s, d)
 	dstOff := e.freshTmp()
 	e.emit("%s = add %s, %s", dstOff, s, ni)
-	e.copyRange(sdata, ddata, esz, elem, tailStart, ln, dstOff)
+	e.copyRange(sdata, dloop, esz, elem, tailStart, ln, dstOff)
 	e.declareOwned(dest)
 	if e.arrVars == nil {
 		e.arrVars = map[string]bool{}
@@ -4871,14 +4877,14 @@ func (e *emitter) copyRange(sdata, ddata string, esz int, elem, s0, s1, d0 strin
 	sa := e.freshTmp()
 	e.emit("%s = add %s, %s", sa, sdata, so)
 	cv := e.freshTmp()
-	e.emit("%s = load %s + 0 as %s", cv, sa, elem)
+	e.emit("%s = load %s + 0 as i32", cv, sa)
 	di := e.freshTmp()
 	e.emit("%s = add %s, %s", di, d0, rel)
 	dof := e.freshTmp()
 	e.emit("%s = mul %s, %d", dof, di, esz)
 	da := e.freshTmp()
 	e.emit("%s = add %s, %s", da, ddata, dof)
-	e.emit("store %s + 0, %s as %s", da, cv, elem)
+	e.emit("store %s + 0, %s as i32", da, cv)
 	inext := e.freshTmp()
 	e.emit("%s = add %s, 1", inext, i)
 	e.emit("%s = %s", i, inext)
@@ -4955,25 +4961,15 @@ func (e *emitter) lowerArrayFromBase(args []string, argNodes *ast.ElementList, p
 			}
 			h := e.freshTmp()
 			e.emit("%s = alloc 16", h)
+			n1 := e.freshTmp()
+			e.emit("%s = add %s, 1", n1, n)
 			nby := e.freshTmp()
-			e.emit("%s = mul %s, 4", nby, n)
+			e.emit("%s = mul %s, 4", nby, n1)
 			buf := e.freshTmp()
-			zL := e.freshLabel("af_z")
-			nzL := e.freshLabel("af_nz")
-			isz := e.freshTmp()
-			e.emit("%s = eq %s, 0", isz, nby)
-			e.emit("br %s -> %s, %s", isz, zL, nzL)
-			e.emitRaw("%s:", zL)
-			e.emit("%s = alloc 4", buf)
-			e.emit("jmp %s", nzL)
-			e.emitRaw("%s:", nzL)
-			b2 := e.freshTmp()
-			e.emit("%s = add %s, 0", b2, nby)
-			b3 := e.freshTmp()
-			e.emit("%s = alloc %s", b3, b2)
-			e.emit("%s = %s", buf, b3)
+			e.emit("%s = alloc %s", buf, nby)
 			e.emit("store %s + 0, %s as ptr", h, buf)
 			e.emit("store %s + 8, %s as u64", h, n)
+			e.emit("!%s", buf)
 			e.declareOwned(h)
 			if e.arrVars == nil {
 				e.arrVars = map[string]bool{}
@@ -5000,6 +4996,7 @@ func (e *emitter) lowerStringMethod(recv, method string, args []string, pos *ast
 		all := append([]string{bp, bl}, extra...)
 		t := e.freshTmp()
 		e.emit("%s = call @%s(%s)", t, sym, strings.Join(all, ", "))
+		e.ownTemp(t)
 		return t, tI32
 	}
 	callStr := func(sym string, extra ...string) (string, saType) {
@@ -5016,6 +5013,7 @@ func (e *emitter) lowerStringMethod(recv, method string, args []string, pos *ast
 		}
 		t := e.freshTmp()
 		e.emit("%s = call @sa_string_code_point_at(%s, %s, %s)", t, bp, bl, args[0])
+		e.ownTemp(t)
 		return t, tI32, true
 	case "indexOf", "lastIndexOf":
 		if len(args) < 1 {
@@ -5123,23 +5121,14 @@ func (e *emitter) lowerStringMethod(recv, method string, args []string, pos *ast
 		if len(args) != 1 {
 			return "", tUnknown, false
 		}
-		// Select via a branch: negative counts from the end.
-		sel := e.freshTmp()
-		e.emit("%s = add %s, 0", sel, args[0])
+		// Negative indices count from the end, branch-free
+		// (sel = idx + (idx<0 ? len : 0); arm rebinds orphan temps).
 		isneg := e.freshTmp()
 		e.emit("%s = slt %s, 0", isneg, args[0])
-		fixL := e.freshLabel("at_fix")
-		keepL := e.freshLabel("at_keep")
-		doneL := e.freshLabel("at_done")
-		e.emit("br %s -> %s, %s", isneg, fixL, keepL)
-		e.emitRaw("%s:", fixL)
-		fv := e.freshTmp()
-		e.emit("%s = add %s, %s", fv, bl, args[0])
-		e.emit("%s = %s", sel, fv)
-		e.emit("jmp %s", doneL)
-		e.emitRaw("%s:", keepL)
-		e.emit("jmp %s", doneL)
-		e.emitRaw("%s:", doneL)
+		adj := e.freshTmp()
+		e.emit("%s = mul %s, %s", adj, bl, isneg)
+		sel := e.freshTmp()
+		e.emit("%s = add %s, %s", sel, args[0], adj)
 		addr := e.freshTmp()
 		e.emit("%s = add %s, %s", addr, bp, sel)
 		out := e.freshTmp()
@@ -5152,8 +5141,10 @@ func (e *emitter) lowerStringMethod(recv, method string, args []string, pos *ast
 		// Compose the sci trim primitives (ascii subset).
 		start := e.freshTmp()
 		e.emit("%s = call @sa_str_trim_ascii_start_index(%s, %s)", start, bp, bl)
+		e.ownTemp(start)
 		full := e.freshTmp()
 		e.emit("%s = call @sa_str_trim_ascii_end_len(%s, %s)", full, bp, bl)
+		e.ownTemp(full)
 		s, l := start, full
 		if method == "trimStart" {
 			rest := e.freshTmp()
@@ -5226,6 +5217,7 @@ func (e *emitter) lowerStringMethod(recv, method string, args []string, pos *ast
 		}
 		t := e.freshTmp()
 		e.emit("%s = call @sa_string_code_point_at(%s, %s, %s)", t, bp, bl, args[0])
+		e.ownTemp(t)
 		return t, tI32, true
 	}
 	return "", tUnknown, false
@@ -5331,6 +5323,7 @@ func (e *emitter) lowerStringSplit(recv, bp, bl, sepArg string, pos *ast.Node) s
 	e.emitRaw("%s:", topL)
 	idx := e.freshTmp()
 	e.emit("%s = call @sa_string_index_of(%s, %s, %s, %s, %s)", idx, bp, bl, sp, sl, start)
+	e.ownTemp(idx)
 	found := e.freshTmp()
 	e.emit("%s = ne %s, -1", found, idx)
 	e.emit("br %s -> %s, %s", found, bodyL, endL)
@@ -5461,6 +5454,14 @@ func (e *emitter) lowerParseIntCall(s string, pos *ast.Node) string {
 // slices copy element-wise, recursing into nested slices (by the static
 // arrElems record; unknown temps default to scalar elements).
 func (e *emitter) lowerDeepClone(src string, st saType, pos *ast.Node) string {
+	return e.lowerDeepCloneInner(src, st, pos, true)
+}
+
+// lowerDeepCloneInner ports sa_plugin_ts lowerDeepClone. takeOwn marks the
+// result owned for function-exit release; recursive inners pass false
+// (their headers move into the outer array, and exit-releasing a
+// loop-scoped temp is UnknownRegister).
+func (e *emitter) lowerDeepCloneInner(src string, st saType, pos *ast.Node, takeOwn bool) string {
 	_ = pos
 	if st != tArray {
 		cp := e.freshTmp()
@@ -5479,25 +5480,17 @@ func (e *emitter) lowerDeepClone(src string, st saType, pos *ast.Node) string {
 	e.emit("%s = load %s + 0 as ptr", sdata, src)
 	dest := e.freshTmp()
 	e.emit("%s = alloc 16", dest)
+	ln1 := e.freshTmp()
+	e.emit("%s = add %s, 1", ln1, ln)
 	nby := e.freshTmp()
-	e.emit("%s = mul %s, %d", nby, ln, esz)
+	e.emit("%s = mul %s, %d", nby, ln1, esz)
 	ddata := e.freshTmp()
-	zL := e.freshLabel("dc_z")
-	nzL := e.freshLabel("dc_nz")
-	isz := e.freshTmp()
-	e.emit("%s = eq %s, 0", isz, nby)
-	e.emit("br %s -> %s, %s", isz, zL, nzL)
-	e.emitRaw("%s:", zL)
-	e.emit("%s = alloc 4", ddata)
-	e.emit("jmp %s", nzL)
-	e.emitRaw("%s:", nzL)
-	nb2 := e.freshTmp()
-	e.emit("%s = add %s, 0", nb2, nby)
-	dd2 := e.freshTmp()
-	e.emit("%s = alloc %s", dd2, nb2)
-	e.emit("%s = %s", ddata, dd2)
+	e.emit("%s = alloc %s", ddata, nby)
 	e.emit("store %s + 0, %s as ptr", dest, ddata)
 	e.emit("store %s + 8, %s as u64", dest, ln)
+	e.emit("!%s", ddata)
+	dloop := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", dloop, dest)
 	i := e.freshTmp()
 	e.emit("%s = 0", i)
 	topL := e.freshLabel("dc_top")
@@ -5513,14 +5506,14 @@ func (e *emitter) lowerDeepClone(src string, st saType, pos *ast.Node) string {
 	saddr := e.freshTmp()
 	e.emit("%s = add %s, %s", saddr, sdata, so)
 	daddr := e.freshTmp()
-	e.emit("%s = add %s, %s", daddr, ddata, so)
+	e.emit("%s = add %s, %s", daddr, dloop, so)
 	if elemIsSlice {
 		inner := e.freshTmp()
-		e.emit("%s = load %s + 0 as %s", inner, saddr, saElem)
-		inew := e.lowerDeepClone(inner, tArray, pos)
+		e.emit("%s = load %s + 0 as i32", inner, saddr)
+		inew := e.lowerDeepCloneInner(inner, tArray, pos, false)
 		// Nested elements default to scalars (two-level shapes cover
 		// the demo corpus; deeper nests copy the inner slice headers).
-		e.emit("store %s + 0, %s as %s", daddr, inew, saElem)
+		e.emit("store %s + 0, %s as i32", daddr, inew)
 	} else {
 		cv := e.freshTmp()
 		e.emit("%s = load %s + 0 as %s", cv, saddr, saElem)
@@ -5531,7 +5524,9 @@ func (e *emitter) lowerDeepClone(src string, st saType, pos *ast.Node) string {
 	e.emit("%s = %s", i, inext)
 	e.emit("jmp %s", topL)
 	e.emitRaw("%s:", endL)
-	e.declareOwned(dest)
+	if takeOwn {
+		e.declareOwned(dest)
+	}
 	if e.arrVars == nil {
 		e.arrVars = map[string]bool{}
 	}
@@ -5578,6 +5573,23 @@ func (e *emitter) newSizedArray(lenOp string) string {
 //     (OOB yields 0 via the checked-index join).
 // Calls without markers pass through untouched.
 func (e *emitter) resolveSpreadCall(fname string, args []string, types []saType, pos *ast.Node) ([]string, []saType) {
+	// Rest callees always pack (spread markers or plain statics alike).
+	if e.funcHasRest[fname] {
+		h := e.newEmptyArray()
+		for i, a := range args {
+			_ = types[i]
+			if strings.HasPrefix(a, "@spread:") {
+				e.appendSlice(h, strings.TrimPrefix(a, "@spread:"))
+				continue
+			}
+			if strings.HasPrefix(a, "@callback:") {
+				e.refuse(pos, "callbacks are not rest values")
+				return args, types
+			}
+			e.lowerArrayPush(h, a, "i32", 4)
+		}
+		return []string{h}, []saType{tArray}
+	}
 	hasSpread := false
 	for _, a := range args {
 		if strings.HasPrefix(a, "@spread:") {
@@ -5587,18 +5599,6 @@ func (e *emitter) resolveSpreadCall(fname string, args []string, types []saType,
 	}
 	if !hasSpread {
 		return args, types
-	}
-	if e.funcHasRest[fname] {
-		h := e.newEmptyArray()
-		for i, a := range args {
-			_ = types[i]
-			if strings.HasPrefix(a, "@spread:") {
-				e.appendSlice(h, strings.TrimPrefix(a, "@spread:"))
-				continue
-			}
-			e.lowerArrayPush(h, a, "i32", 4)
-		}
-		return []string{h}, []saType{tArray}
 	}
 	arity, ok := e.funcParams[fname]
 	if !ok {
@@ -5692,17 +5692,43 @@ func isConsoleLog(fn *ast.Node) bool {
 
 // lowerConsoleLog normalizes each operand to a text slice then joins with a
 // space + trailing newline, mirroring sa_plugin_ts emitPrintln shape.
-func (e *emitter) lowerConsoleLog(args []string) string {
+// lowerConsoleLog mirrors the reference: each operand normalises to a
+// text slice (renderInterpValue), operands join with a space, then a
+// trailing newline (JS console.log shape).
+func (e *emitter) lowerConsoleLog(args []string, types []saType, pos *ast.Node) string {
 	e.needImport("sa_std/io/print.sai")
-	for _, a := range args {
-		// Slice fields load into temps; the pointer carries `&`
-		// (copied from sa_plugin_sla emitPrintln via the reference).
-		bp, bl := e.expandSlice(a)
+	// Operands render through sa_fmt (numbers) and sa_string (concat
+	// unwraps) even with no template literal in sight.
+	e.needImport("sa_std/fmt.sai")
+	e.needImport("sa_std/string.sai")
+	for i, a := range args {
+		if i > 0 {
+			e.printConstText(" ")
+		}
+		vt := tI32
+		if i < len(types) {
+			vt = types[i]
+		}
+		seg, ok := e.renderInterpValue(a, vt, pos)
+		if !ok {
+			return "0"
+		}
+		bp, bl := e.expandSlice(seg)
 		e.emit("call @sa_print_bytes(&%s, %s)", bp, bl)
 		e.releaseIfOwnedTemp(bp)
 		e.releaseIfOwnedTemp(bl)
 	}
+	e.printConstText("\n")
 	return "0"
+}
+
+// printConstText materialises static text as a slice and prints it.
+func (e *emitter) printConstText(text string) {
+	seg := e.lowerStringLiteral(text)
+	bp, bl := e.expandSlice(seg)
+	e.emit("call @sa_print_bytes(&%s, %s)", bp, bl)
+	e.releaseIfOwnedTemp(bp)
+	e.releaseIfOwnedTemp(bl)
 }
 
 func (e *emitter) lowerPropertyAccess(n *ast.Node) (string, saType) {
@@ -5777,8 +5803,19 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 			return v, tI32
 		}
 	}
-	// s.length aliases the string slice len field.
+	// s.length aliases the string slice len field — but a struct field
+	// literally named length wins (member chain first when a layout
+	// provides it).
 	if pa.Name().Text() == "length" {
+		if pa.Expression.Kind == ast.KindIdentifier {
+			if l := e.layoutOfVar(pa.Expression.Text()); l != nil {
+				if _, ok := l.offsets["length"]; ok {
+					if v, t, ok := e.lowerMemberChain(n); ok {
+						return v, t
+					}
+				}
+			}
+		}
 		base, _ := e.lowerExpr(pa.Expression)
 		t := e.freshTmp()
 		e.emit("%s = load %s + 8 as u64", t, base)
@@ -6609,11 +6646,10 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 				e.strVars[pname] = true
 			}
 		} else {
-			kind := "named"
-			if isTempName(args[i]) {
-				kind = "temp"
-			}
-			e.assign(pname, args[i], kind, tI32, pos)
+			// Scalars snapshot by copy (same back-edge rule as
+			// bindCallbackParam: never move caller temps into params).
+			e.emit("%s = add %s, 0", pname, args[i])
+			e.declarePlain(pname)
 		}
 	}
 	slot := e.freshTmp()
@@ -6846,6 +6882,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		e.ownTemp(ls)
 		st := e.freshTmp()
 		e.emit("%s = call @%s(&%s, &%s)", st, proj.Symbol, ps, ls)
+		e.ownTemp(st)
 		badL := e.freshLabel("node_bad")
 		okL := e.freshLabel("node_ok")
 		bad := e.freshTmp()
@@ -6915,6 +6952,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		e.emit("%s = call @%s(%s)", sc, proj.Symbol, strings.Join(out, ", "))
 		dest := e.freshTmp()
 		e.emit("%s = load %s + 0 as i64", dest, sc)
+		e.emit("!%s", sc)
 		e.ownTemp(dest)
 		return dest, proj.Ret
 	}
@@ -7041,6 +7079,16 @@ func (e *emitter) consume(name string) {
 	}
 }
 
+// markRebound flags a name as freshly bound: the new value is live and
+// needs its own future release, even if the previous value was just
+// released or consumed (mirrors sa_plugin_ts markRebound).
+func (e *emitter) markRebound(name string) {
+	if b := e.lookupBinding(name); b != nil {
+		b.released = false
+		b.consumed = false
+	}
+}
+
 // rebindRelease kills a live NAMED register before rebinding (always legal,
 // mirrors the `!r` / `!best` shapes). Compiler temps (t_N) are loop-carried
 // SSA values rebound plainly (machine-verified legal, matches the pow loop).
@@ -7096,6 +7144,7 @@ func (e *emitter) assign(dst, src, srcKind string, srcType saType, pos *ast.Node
 		e.rebindRelease(dst)
 		e.emit("%s = %s", dst, c2)
 		e.setHeap(dst, false)
+		e.markRebound(dst)
 		return
 	}
 	if !fresh {
@@ -7110,6 +7159,7 @@ func (e *emitter) assign(dst, src, srcKind string, srcType saType, pos *ast.Node
 		}
 		if !fresh {
 			e.setHeap(dst, true)
+			e.markRebound(dst)
 		} else if !isTempName(dst) {
 			e.declareOwned(dst)
 		}
@@ -7225,9 +7275,13 @@ func (e *emitter) releaseScope() {
 
 func (e *emitter) releaseAllOwnedExcept(except string) {
 	done := map[string]bool{}
+	// Fresh backing array: kept aliases e.owned would corrupt the
+	// reverse iteration it reads from.
+	kept := make([]string, 0, len(e.owned))
 	for i := len(e.owned) - 1; i >= 0; i-- {
 		name := e.owned[i]
 		if name == except || done[name] {
+			kept = append(kept, name)
 			continue
 		}
 		done[name] = true
@@ -7235,13 +7289,12 @@ func (e *emitter) releaseAllOwnedExcept(except string) {
 			e.emit("!%s", name)
 			b.released = true
 		}
+		// Bindings stay in their scopes (marked released): wiping them
+		// orphans outer names after early returns (045/222), which then
+		// redeclare as heap in inner scopes and break back-edge states.
+		kept = append(kept, name)
 	}
-	e.owned = nil
-	for _, s := range e.scopes {
-		for k := range s {
-			delete(s, k)
-		}
-	}
+	e.owned = kept
 }
 
 func (e *emitter) releaseAllOwned() {

@@ -69,6 +69,25 @@
   顶层无注解体回退；date-fns esm 子树默认链无级联（其 d.ts 为空 re-export 印证需真类型源）。
   单测 1 项；286 零回退。
 
+### 真机门禁（`sa check` + Node 差分，`tools/verify_demos_diff.sh`）
+
+- 286/286 过 `sa check`；差分 259 机器验证 + 9 手工验证（073/154/156/221/274-278，
+  oracle 侧 strip 不支持 tuple/泛型，手工对数全对）+ 18 fs/net 系环境项
+  （真 IO，需 fixtures；汇编+运行正常）。
+- 差分修出的真 bug 族（单测已锁关键两项）：
+  - 所有权：call 结果一律 own（出口释放）；`assign` 重绑定复位 released；
+    rest 调用恒打包；fallible scratch 用后释放；`releaseAllOwnedExcept` 不再清空 scope
+    （early return 后名字丢失，045/222）+ `kept` 别名迭代修（曾 277→223 回退）。
+  - 作用域：零分配分支改单路径过分配（`alloc 0` 改 `(n+1)` 槽）；`!raw` 后循环重载 header；
+    跨 arm 重绑定改无分支算术（at/with/toSpliced-d）；`out=add dh,0` 删（alloc 头自 own）。
+  - 槽模型：数组槽统一 4 字节 + i32 流量（字面量/push/check-index 一致；嵌套句柄 round-trip），
+    结构体布局仍 widthOf。
+  - 协议：from_char_code 经 buffer_data/len 解包（直接读 u64 会 segfault）；
+    console.log 按参考重写（render+空格+换行，补 fmt/string import，`@const` 转义 \n\r\t）；
+    `.length` 结构体同名字段优先；clone 恢复句柄性（Identifier 恒 tI32 坑）；
+    Identifier 上报静态类型（修字符串变量被 sext 格式化）。
+  - 复制：`copyRange` 目标偏移用 di（曾用循环变量 i，toSpliced 错 4）。
+
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 
 - ✅ 静态模板切片（`tsx.go` + `LowerTSX`）：纯静态 JSX（标签/文本/string 属性/self-closing/
