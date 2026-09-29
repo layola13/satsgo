@@ -224,6 +224,27 @@ func TestLowerMapSet(t *testing.T) {
 	}
 }
 
+func TestLowerArity(t *testing.T) {
+	many := "function f(a: i32): i32 {\n  return a;\n}\nfunction main(): i32 {\n  return f(1, 2);\n}\n"
+	res := Lower("ar.ts", many)
+	if !res.Refused {
+		t.Fatalf("expected too-many refusal, got:\n%s", res.SAI)
+	}
+	if !strings.Contains(diagText(res), "too many arguments") {
+		t.Errorf("missing arity message:\n%s", diagText(res))
+	}
+	few := "function f(a: i32, b: i32): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	res = Lower("ar2.ts", few)
+	if !res.Refused {
+		t.Fatalf("expected too-few refusal, got:\n%s", res.SAI)
+	}
+	def := "function f(a: i32, b: i32 = 5): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	res = mustLower(t, "ar3.ts", def)
+	if !strings.Contains(res.SAI, "call @f(1)") {
+		t.Errorf("missing short call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

@@ -148,6 +148,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		rets    map[string]saType
 	}
 	expOf := map[string]*fileExports{}
+	globalDefaults := map[string]map[string][]bool{}
 	sharedLayouts := map[string]*layout{}
 	sharedClassDefs := map[string]*classDef{}
 	sharedEnums := map[string]map[string]int64{}
@@ -159,6 +160,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		globalRets[p] = map[string]saType{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
+		globalDefaults[p] = map[string][]bool{}
 		text := files[p]
 		scratch := &emitter{file: p, src: text, lines: lineOffsets(text)}
 		for _, st := range parsed[p].AsSourceFile().Statements.Nodes {
@@ -182,6 +184,13 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				globalRets[p][name] = ret
 				params := st.Parameters()
 				globalArity[p][name] = len(params)
+				defs := make([]bool, len(params))
+				for i, pm := range params {
+					if pd := pm.AsParameterDeclaration(); pd.Initializer != nil {
+						defs[i] = true
+					}
+				}
+				globalDefaults[p][name] = defs
 				if len(params) > 0 {
 					if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
 						globalRest[p][name] = true
@@ -304,6 +313,12 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		for name := range globalRest[p] {
 			e.funcHasRest[name] = true
 		}
+		if e.funcDefaults == nil {
+			e.funcDefaults = map[string][]bool{}
+		}
+		for name, defs := range globalDefaults[p] {
+			e.funcDefaults[name] = defs
+		}
 		for spec, r := range links[p].resolved {
 			_ = spec
 			for name, ret := range r.rets {
@@ -314,6 +329,9 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				}
 				if globalRest[r.key][name] {
 					e.funcHasRest[q] = true
+				}
+				if defs, ok := globalDefaults[r.key][name]; ok {
+					e.funcDefaults[q] = defs
 				}
 			}
 		}

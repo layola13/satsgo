@@ -42,3 +42,5 @@
 - ✅ Map/Set 方法直连 `sa_std` btree 后端（`new Map/Set` 句柄标记 + 方法路由优先于数组面）：
   set/get/has/delete（presence 探针保真）/clear/size/getSize/keys/values/entries；
   add/has/delete/clear/size；key 经 mapKeySlice（string 直通/int 装箱）。286 零回退；单测 1 项。
+- ✅ 调用元数检查：多传拒、无默认少传拒、有默认短调放行（replay 仍为已知缺口，注释标明）；
+  箭头精确元数；importEnv/跨文件同规则。286 零回退；单测 1 项。

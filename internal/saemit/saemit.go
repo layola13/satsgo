@@ -316,6 +316,9 @@ type emitter struct {
 	// trailing ...rest parameter (spread calls pack or expand per arity).
 	funcParams  map[string]int
 	funcHasRest map[string]bool
+	// funcDefaults records per-parameter defaults (missing args are only
+	// tolerable when every omitted parameter declares one).
+	funcDefaults map[string][]bool
 	// inlineRet intercepts callback returns (higher-order inlining).
 	inlineRet *inlineRetState
 	// classDefs records class shapes; varClass maps instance variables to
@@ -457,6 +460,9 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	if e.funcHasRest == nil {
 		e.funcHasRest = map[string]bool{}
 	}
+	if e.funcDefaults == nil {
+		e.funcDefaults = map[string][]bool{}
+	}
 	for _, st := range stmts {
 		if st.Kind == ast.KindFunctionDeclaration && st.Name() != nil &&
 			st.Name().Kind == ast.KindIdentifier {
@@ -470,6 +476,16 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 			e.funcSigs[st.Name().Text()] = ret
 			params := st.Parameters()
 			e.funcParams[st.Name().Text()] = len(params)
+			defs := make([]bool, len(params))
+			for i, p := range params {
+				if pd := p.AsParameterDeclaration(); pd.Initializer != nil {
+					defs[i] = true
+				}
+			}
+			if e.funcDefaults == nil {
+				e.funcDefaults = map[string][]bool{}
+			}
+			e.funcDefaults[st.Name().Text()] = defs
 			if len(params) > 0 {
 				if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
 					e.funcHasRest[st.Name().Text()] = true
@@ -863,8 +879,35 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	}
 }
 
-// captureSig renders captured outer names as trailing i32 params. Slice
-// captures keep ptr width (both render as handle registers at call sites).
+// checkArity enforces call arity loudly: rest callees take any count;
+// fixed callees take exactly arity, except trailing parameters with
+// defaults may be omitted (their replay is a known gap: omitted values
+// arrive as caller-passed zeros only when the caller pads; short calls
+// otherwise refuse rather than miscompile).
+func (e *emitter) checkArity(fname string, args []string, pos *ast.Node) bool {
+	if e.funcHasRest[fname] {
+		return true
+	}
+	arity, ok := e.funcParams[fname]
+	if !ok {
+		return true
+	}
+	if len(args) == arity {
+		return true
+	}
+	if len(args) > arity {
+		e.refuse(pos, "too many arguments in call to %s (%d given, %d expected)", fname, len(args), arity)
+		return false
+	}
+	defs := e.funcDefaults[fname]
+	for i := len(args); i < arity; i++ {
+		if i >= len(defs) || !defs[i] {
+			e.refuse(pos, "too few arguments in call to %s (%d given, %d expected)", fname, len(args), arity)
+			return false
+		}
+	}
+	return true
+}
 func captureSig(e *emitter, captures []string) []string {
 	sig := make([]string, 0, len(captures))
 	for _, c := range captures {
@@ -1595,8 +1638,11 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 func isFloatLiteral(text string) bool {
 	for i := 0; i < len(text); i++ {
 		if text[i] == '.' || text[i] == 'e' || text[i] == 'E' {
-			return true
-		}
+	return true
+}
+
+// captureSig renders captured outer names as trailing i32 params. Slice
+// captures keep ptr width (both render as handle registers at call sites).
 	}
 	return false
 }
@@ -2143,6 +2189,12 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 					return "0", tUnknown
 				}
 			}
+			// Arrows declare no defaults: exact arity (captures append
+			// internally and never count).
+			if len(args) != len(ai.params) {
+				e.refuse(n, "arity mismatch in call to %s (%d given, %d expected)", fname, len(args), len(ai.params))
+				return "0", tUnknown
+			}
 			full := append(append([]string{}, args...), ai.captures...)
 			if ai.ret == tVoid {
 				e.emit("call @%s(%s)", ai.fn, strings.Join(full, ", "))
@@ -2159,6 +2211,9 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			ret := e.importRet[fname]
 			args, argTypes = e.resolveSpreadCall(q, args, argTypes, n)
 			if e.refused {
+				return "0", tUnknown
+			}
+			if !e.checkArity(q, args, n) {
 				return "0", tUnknown
 			}
 			if ret == tVoid {
@@ -2185,6 +2240,9 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			}
 			args, argTypes = e.resolveSpreadCall(fname, args, argTypes, n)
 			if e.refused {
+				return "0", tUnknown
+			}
+			if !e.checkArity(fname, args, n) {
 				return "0", tUnknown
 			}
 			if ret == tVoid {
