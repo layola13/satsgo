@@ -177,6 +177,26 @@ function main(): i32 {
 	}
 }
 
+func TestLowerDestructuring(t *testing.T) {
+	arr := "function main(): i32 {\n  const p: number[] = [3, 4];\n  const [a, b] = p;\n  return a * 10 + b;\n}\n"
+	res := mustLower(t, "ds.ts", arr)
+	if !strings.Contains(res.SAI, "return") {
+		t.Errorf("missing return:\n%s", res.SAI)
+	}
+	obj := "interface Pt {\n  x: i32;\n  y: i32;\n}\nfunction main(): i32 {\n  const pt: Pt = { x: 3, y: 4 };\n  const { x, y } = pt;\n  return x + y;\n}\n"
+	res = mustLower(t, "ds2.ts", obj)
+	for _, want := range []string{"load pt + 0 as i32", "load pt + 4 as i32"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	forof := "function main(): i32 {\n  const pairs: number[][] = [[1, 2], [3, 4]];\n  let s: i32 = 0;\n  for (const [a, b] of pairs) { s = s + a + b; }\n  return s;\n}\n"
+	res = mustLower(t, "ds3.ts", forof)
+	if res.Refused {
+		t.Fatalf("unexpected refusal:\n%s", diagText(res))
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

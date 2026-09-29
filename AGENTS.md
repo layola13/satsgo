@@ -37,3 +37,5 @@
 - ✅ `?.` 真守卫：checker 可空（union 含 null/undefined）→ null-join（`a?.b`/`f?.()`）；
   非空保持直调；effectful 基座大声拒。联合注解（`Box|null`）贡献首个已知布局。
 - 286 单文件扫测零回退 + 形状全过；单测 2 项（可空守卫/非空直调）。
+- ✅ 解构声明：`const [a,b] = arr` / `const {x,y} = obj`（init 单次求值 + 安全索引/布局偏移）+
+  `for (const [a,b] of pairs)`；for-of 对象模式缺元素布局仍大声拒。286 零回退；单测 1 项。

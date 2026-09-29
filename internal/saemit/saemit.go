@@ -939,17 +939,23 @@ func (e *emitter) lowerVarStatement(st *ast.Node) {
 func (e *emitter) lowerVarDeclList(list *ast.Node) {
 	dl := list.AsVariableDeclarationList()
 	for _, d := range dl.Declarations.Nodes {
+		init := d.Initializer()
+		if init == nil {
+			e.refuse(d, "declaration without initializer is not lowerable")
+			continue
+		}
+		// Destructuring declarations bind element/field-wise (mirrors
+		// sa_plugin_ts destructuring; holes skip, rest refuses loudly).
+		if nm := d.Name(); nm != nil && nm.Kind != ast.KindIdentifier {
+			e.lowerDestructuringDecl(d, nm, init)
+			continue
+		}
 		name, ok := bindingNameText(d)
 		if !ok {
 			e.refuse(d, "destructuring declarations are not in the SA-lowerable subset")
 			continue
 		}
 		atype := annotationType(d.AsVariableDeclaration().Type)
-		init := d.Initializer()
-		if init == nil {
-			e.refuse(d, "declaration of %s without initializer is not lowerable", name)
-			continue
-		}
 		// `let f = (x) => ...` desugars to an out-of-line callee; the
 		// name becomes a call alias, not a register binding.
 		if init.Kind == ast.KindArrowFunction {
@@ -1204,8 +1210,26 @@ func (e *emitter) lowerForOf(st *ast.Node) {
 	e.emit("%s = add %s, %s", elemPtr, baseT, offT)
 	elemT := e.freshTmp()
 	e.emit("%s = load %s + 0 as i32", elemT, elemPtr)
-	binding := foBindingName(fo)
-	e.assign(binding, elemT, "temp", tI32, st)
+	// Pattern bindings (`for (const [a, b] of pairs)`) destructure the
+	// element slice; object patterns need element layouts (loud gap).
+	if pat := foBindingPattern(fo); pat != nil {
+		if pat.Kind == ast.KindArrayBindingPattern {
+			if e.arrVars == nil {
+				e.arrVars = map[string]bool{}
+			}
+			if e.arrElems == nil {
+				e.arrElems = map[string]string{}
+			}
+			e.arrVars[elemT] = true
+			e.arrElems[elemT] = "i32"
+			e.destructureArray(pat, elemT, st)
+		} else {
+			e.refuse(st, "object patterns in for-of need static element layouts")
+		}
+	} else {
+		binding := foBindingName(fo)
+		e.assign(binding, elemT, "temp", tI32, st)
+	}
 	e.terminated = false
 	e.lowerBranchBody(fo.Statement)
 	if !e.terminated {
@@ -2763,6 +2787,45 @@ func (e *emitter) destructureArray(pat *ast.Node, arr string, pos *ast.Node) {
 			return
 		}
 		idx++
+	}
+}
+
+// lowerDestructuringDecl binds `const [a, b] = arr` / `const {x} = obj`
+// element/field-wise (initializers lower once, then destructure).
+func (e *emitter) lowerDestructuringDecl(d, nm, init *ast.Node) {
+	if init.Kind == ast.KindArrowFunction || init.Kind == ast.KindFunctionExpression {
+		e.refuse(d, "function values do not destructure")
+		return
+	}
+	v, _ := e.lowerExpr(init)
+	if e.refused {
+		return
+	}
+	switch nm.Kind {
+	case ast.KindArrayBindingPattern:
+		if e.arrVars == nil {
+			e.arrVars = map[string]bool{}
+		}
+		if e.arrElems == nil {
+			e.arrElems = map[string]string{}
+		}
+		e.arrVars[v] = true
+		if _, ok := e.arrElems[v]; !ok {
+			e.arrElems[v] = "i32"
+		}
+		e.destructureArray(nm, v, d)
+	case ast.KindObjectBindingPattern:
+		if init.Kind == ast.KindObjectLiteralExpression {
+			if l := e.layoutOfLiteral(init); l != nil {
+				if e.varLayouts == nil {
+					e.varLayouts = map[string]*layout{}
+				}
+				e.varLayouts[v] = l
+			}
+		}
+		e.destructureObject(nm, v, d)
+	default:
+		e.refuse(d, "binding pattern %s is not lowerable", nm.Kind.String())
 	}
 }
 
@@ -6571,6 +6634,20 @@ func (e *emitter) releaseTemp(t string) {
 // ---------------------------------------------------------------------------
 // Small AST shape helpers
 // ---------------------------------------------------------------------------
+
+// foBindingPattern returns the loop binding pattern when the declarator
+// is not a plain identifier (e.g. `for (const [a, b] of pairs)`).
+func foBindingPattern(fo *ast.ForInOrOfStatement) *ast.Node {
+	init := fo.Initializer
+	if init != nil && init.Kind == ast.KindVariableDeclarationList {
+		if decls := init.AsVariableDeclarationList().Declarations.Nodes; len(decls) > 0 {
+			if nm := decls[0].Name(); nm != nil && nm.Kind != ast.KindIdentifier {
+				return nm
+			}
+		}
+	}
+	return nil
+}
 
 func foBindingName(fo *ast.ForInOrOfStatement) string {
 	init := fo.Initializer
