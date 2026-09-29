@@ -25,9 +25,15 @@ type StdProjection struct {
 	// TS is the TypeScript surface, e.g. "console.log", "Math.sin",
 	// "String.fromCharCode", "fs.readFile", "net.tcpConnect", "new Map".
 	TS string
-	// Module is the sa_std contract file imported by generated code,
-	// e.g. "sa_std/io/print.sai".
+	// Module is the contract file imported by generated code,
+	// e.g. "sa_std/io/print.sai". Plugin backends name their .sai
+	// (e.g. "node.sai", resolved via plugin share dirs at sa build time).
 	Module string
+	// Backend selects the runtime owner: "" (default) is compiler-shipped
+	// sci/sa_std; "node"/"deno"/"bun" are the same-named SA plugins'
+	// native surfaces (see tools/check_sa_std_projection.sh: each backend
+	// is verified against its own exported-symbols contract).
+	Backend string
 	// Symbol is the SA callee, e.g. "sa_print_bytes".
 	Symbol string
 	// Ret is the SA return type of the call.
@@ -45,6 +51,10 @@ type StdProjection struct {
 	// Fallible marks the u64!-returning trio whose handle materialises
 	// via scratch + field-0 load (mirrors isFallibleHandle).
 	Fallible bool
+	// NodeOut marks node-plugin u32-status out-param calls whose shape is
+	// (status, outs...): "string" wraps (&ptr,&len) outs into a slice.
+	// Nonzero status panics (loud; no silent error zeros).
+	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
 }
@@ -152,6 +162,13 @@ var StdProjectionTable = []StdProjection{
 	// ---- async/await → sa_std ready-future (Phase 2; refused in Phase 1) --
 	{TS: "async/await", Module: "sa_std/async.sla", Symbol: "(ready-future handle)", Ret: tArray,
 		Note: "Phase 2: async fn returns 16-byte {state,value}; await unwraps; async main driven by sync @main"},
+
+	// ---- node plugin backend (pilot): native os surfaces ---------------
+	// Convention per node.sai: u32 status + &out slots; nonzero panics.
+	{TS: "os.platform", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_platform", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.arch", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_arch", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

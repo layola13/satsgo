@@ -33,6 +33,11 @@ symbols=(
   sa_math_atan2 sa_math_sinh sa_math_cosh sa_math_tanh sa_math_exp sa_math_expm1
   sa_math_log sa_math_log1p sa_math_log2 sa_math_cbrt sa_math_hypot sa_math_fround
   sa_btree_map_new
+  sa_btree_map_insert sa_btree_map_get sa_btree_map_contains_key
+  sa_btree_map_remove sa_btree_map_len sa_btree_map_clear
+  sa_btree_map_keys_set sa_btree_map_values_vec sa_btree_map_iter_vec
+  sa_btree_set_new sa_btree_set_insert sa_btree_set_contains
+  sa_btree_set_remove sa_btree_set_len sa_btree_set_clear
   sa_fs_read_file sa_fs_write_file sa_fs_file_open sa_fs_file_create
   sa_fs_file_close sa_fs_file_read sa_fs_file_write
   sa_fs_remove_file sa_fs_make_dir
@@ -56,3 +61,38 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 echo "PASS: all ${#symbols[@]} symbols resolve in sci/sa_std"
+
+# ---- plugin backends -------------------------------------------------------
+# Entries with Backend: "node"/"deno"/"bun" verify against the plugin's own
+# exported-symbols contract (exact match in all_exported_symbols.txt where
+# present, else @extern in the plugin .sai).
+# Usage: SA_PLUGINS_ROOT=/content/sa_all tools/check_sa_std_projection.sh
+node_symbols=(
+  sa_node_plugin_os_platform
+  sa_node_plugin_os_arch
+)
+
+if [[ ${#node_symbols[@]} -gt 0 ]]; then
+  PLUGINS_ROOT="${SA_PLUGINS_ROOT:-}"
+  if [[ -z "$PLUGINS_ROOT" ]]; then
+    echo "SKIP: node backend check needs SA_PLUGINS_ROOT (sa_plugin_node checkout)" >&2
+  else
+    NODE="$PLUGINS_ROOT/sa_plugin_node"
+    nfail=0
+    for sym in "${node_symbols[@]}"; do
+      if [[ -f "$NODE/all_exported_symbols.txt" ]] && grep -qx "$sym" "$NODE/all_exported_symbols.txt"; then
+        echo "ok: $sym (node)"
+      elif grep -rq --include='*.sai' -e "@extern $sym(" "$NODE"; then
+        echo "ok: $sym (node .sai)"
+      else
+        echo "MISSING: $sym (no export in sa_plugin_node)"
+        nfail=$((nfail + 1))
+      fi
+    done
+    if [[ "$nfail" -ne 0 ]]; then
+      echo "FAIL: $nfail node symbol(s) missing" >&2
+      exit 1
+    fi
+    echo "PASS: all ${#node_symbols[@]} node symbols resolve"
+  fi
+fi

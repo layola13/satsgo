@@ -273,6 +273,25 @@ func TestLowerFindLastFrom(t *testing.T) {
 	}
 }
 
+func TestLowerNodeOs(t *testing.T) {
+	src := "import { platform, arch } from \"os\";\nfunction main(): i32 {\n  const p = platform();\n  return p.length;\n}\n"
+	res := mustLower(t, "n.ts", src)
+	for _, want := range []string{
+		"@import \"node.sai\"",
+		"call @sa_node_plugin_os_platform",
+		"panic",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	nodeArch := "import { arch } from \"node:os\";\nfunction main(): i32 {\n  return arch().length;\n}\n"
+	res = mustLower(t, "n2.ts", nodeArch)
+	if !strings.Contains(res.SAI, "call @sa_node_plugin_os_arch") {
+		t.Errorf("missing node:os arch call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
@@ -295,7 +314,9 @@ func TestProjectionTableSymbolsDocumented(t *testing.T) {
 			t.Errorf("missing module for projected symbol: %+v", p)
 		}
 		if !strings.HasPrefix(p.Module, "sa_std/") {
-			t.Errorf("module must live under sa_std/: %+v", p)
+			if p.Backend == "" {
+				t.Errorf("module must live under sa_std/ or declare a plugin Backend: %+v", p)
+			}
 		}
 	}
 }

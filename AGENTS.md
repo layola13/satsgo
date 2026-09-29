@@ -48,3 +48,7 @@
   f64 追踪（字面量 + 拷贝传播）支撑 float-sqrt 大声拒。286 零回退；单测 1 项。
 - ✅ `findLast/findLastIndex`（无早退覆写 slot）+ `Array.from` mapper（clone 后走 map 内联，
   `{length}` 按 JS mapper 协议传 index）。286 零回退；单测 1 项。
+- ✅ node 插件后端试点（`os.platform/arch`）：投影表 Backend 维度 + `node.sai` `@import` +
+  u32 状态检查（非零 panic，大声）+ string out-param wrap；`node:os` 前缀等价；
+  `check_sa_std_projection.sh` 加 node 区（`all_exported_symbols.txt` 精确匹配）。
+  67 sa_std + 2 node 契约全过；单测 1 项。btree 符号一并补进 sa_std 名单。

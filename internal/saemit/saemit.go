@@ -2184,7 +2184,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		// Named std imports: readFile(...) with `import { readFile } from "fs"`.
 		if mod, ok := e.importedFrom[fname]; ok {
 			if proj, ok := projectionByTS(mod + "." + fname); ok {
-				return e.emitProjCall(proj, args)
+				return e.emitProjCall(proj, args, n)
 			}
 			e.refuse(n, "%s.%s is not a projected std surface (see StdProjectionTable)", mod, fname)
 			return "0", tUnknown
@@ -6535,10 +6535,13 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		e.refuse(st, "non-literal module specifiers are not lowerable")
 		return
 	}
-	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" {
+	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" ||
+		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" {
 		// Record named imports so bare calls (readFile(...)) resolve via
-		// the projection table at call sites.
-		e.recordNamedImports(imp, mod)
+		// the projection table at call sites ("node:" maps to the same
+		// backend table; node-plugin symbols carry Backend: "node").
+		base := strings.TrimPrefix(mod, "node:")
+		e.recordNamedImports(imp, base)
 		return
 	}
 	if strings.HasSuffix(mod, ".wasm") {
@@ -6658,8 +6661,46 @@ func (e *emitter) recordNamedImports(imp *ast.ImportDeclaration, mod string) {
 // expand to (`&`ptr, len) pairs, Extra supplies fixed-arity parameters
 // (`&buf` materialises a 4096-byte scratch), and the fallible trio calls
 // into scratch with field-0 load. Results are owned temps.
-func (e *emitter) emitProjCall(proj StdProjection, args []string) (string, saType) {
+func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node) (string, saType) {
 	e.needImport(proj.Module)
+	// Node-plugin u32-status out-param shape: allocate out slots, call,
+	// panic on nonzero status (loud), then wrap outs per NodeOut.
+	if proj.Backend == "node" && proj.NodeOut == "string" {
+		if len(args) != 0 {
+			e.refuse(pos, "%s takes no arguments", proj.TS)
+			return "0", tUnknown
+		}
+		ps := e.freshTmp()
+		ls := e.freshTmp()
+		e.emit("%s = alloc 8", ps)
+		e.emit("%s = alloc 8", ls)
+		e.ownTemp(ps)
+		e.ownTemp(ls)
+		st := e.freshTmp()
+		e.emit("%s = call @%s(&%s, &%s)", st, proj.Symbol, ps, ls)
+		badL := e.freshLabel("node_bad")
+		okL := e.freshLabel("node_ok")
+		bad := e.freshTmp()
+		e.emit("%s = ne %s, 0", bad, st)
+		e.emit("br %s -> %s, %s", bad, badL, okL)
+		e.emitRaw("%s:", badL)
+		e.emit("panic")
+		e.terminated = true
+		e.emitRaw("%s:", okL)
+		e.terminated = false
+		ptr := e.freshTmp()
+		e.emit("%s = load %s + 0 as ptr", ptr, ps)
+		ln := e.freshTmp()
+		e.emit("%s = load %s + 0 as u64", ln, ls)
+		out := e.freshTmp()
+		e.emit("%s = alloc 16", out)
+		e.emit("store %s + 0, %s as ptr", out, ptr)
+		e.emit("store %s + 8, %s as u64", out, ln)
+		e.declareOwned(out)
+		e.releaseIfOwnedTemp(ps)
+		e.releaseIfOwnedTemp(ls)
+		return out, tString
+	}
 	isStr := func(i int) bool {
 		for _, s := range proj.StrArgs {
 			if s == i {
