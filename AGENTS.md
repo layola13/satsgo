@@ -62,3 +62,10 @@
 - ✅ 静态模板切片（`tsx.go` + `LowerTSX`）：纯静态 JSX（标签/文本/string 属性/self-closing/
   fragment）→ `.sax` Component + 空 state；hooks/事件处理器/表达式子节点/自定义组件/
   spread 全部大声拒。单测 2 项（静态形状/三类动态拒绝）。286 零回退（独立入口）。
+
+### Phase 3：npm 通道（进行中，见 todo/03_npm.md）
+
+- ✅ 白名单首轮实测（单文件口径，`npm pack` 实源）：lodash-es 5.4%（35/643）、
+  date-fns 12.4%（259/2093）；零 panic。主因：跨文件 import（未走链接）+ `.js` 无注解
+  （未配 `.d.ts`）+ 顶层 require。结论：单文件口径系统性低估，不触发收缩线；
+  下一步 program 口径 + `.d.ts` 配对后再判定（已记入 todo/03）。
