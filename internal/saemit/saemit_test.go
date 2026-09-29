@@ -318,6 +318,16 @@ func TestLowerTopLevelConst(t *testing.T) {
 	}
 }
 
+func TestLowerNullArray(t *testing.T) {
+	src := "function f(x: i32 | null): i32 {\n  if (x == null) {\n    return 0;\n  }\n  return x;\n}\nfunction main(): i32 {\n  const a = Array(3);\n  const b = Array(1, 2);\n  const u = undefined;\n  return f(null) + a.length + b[1] + u;\n}\n"
+	res := mustLower(t, "nv.ts", src)
+	for _, want := range []string{"eq x, 0", "call @f(0)"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)

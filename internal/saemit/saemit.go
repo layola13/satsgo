@@ -1599,6 +1599,15 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		return "1", tBool
 	case ast.KindFalseKeyword:
 		return "0", tBool
+	case ast.KindNullKeyword, ast.KindUndefinedKeyword:
+		// The subset maps null/undefined to 0 (checked-index OOB,
+		// `== null` handles, missing values).
+		return "0", tI32
+	case ast.KindVoidExpression:
+		// `void expr` evaluates to undefined → 0 (side effects keep
+		// lowering through the operand).
+		_, _ = e.lowerExpr(n.AsVoidExpression().Expression)
+		return "0", tI32
 	case ast.KindIdentifier:
 		// Handle aliases resolve to the underlying register (inlined
 		// method params never copy handles).
@@ -2229,6 +2238,22 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			e.emit("%s = alloc %s", t, args[0])
 			e.declareOwned(t)
 			return t, tArray
+		}
+		// Array(n) / Array(a, b, c): constructor-call form (JS semantics:
+		// single length allocates, multiple elements literalize).
+		if fname == "Array" {
+			if len(args) == 1 {
+				return e.newSizedArray(args[0]), tArray
+			}
+			h := e.newEmptyArray()
+			for _, a := range args {
+				if strings.HasPrefix(a, "@spread:") || strings.HasPrefix(a, "@callback:") {
+					e.refuse(n, "Array(...) elements must be plain values")
+					return "0", tUnknown
+				}
+				e.lowerArrayPush(h, a, "i32", 4)
+			}
+			return h, tArray
 		}
 		// String(x): strings pass through, scalars render via the shared
 		// sa_fmt_*_into path (same primitives as template interpolation).
@@ -5512,6 +5537,29 @@ func (e *emitter) lowerDeepClone(src string, st saType, pos *ast.Node) string {
 	return dest
 }
 
+// newSizedArray materializes a zeroed i32 array header of lenOp elements.
+func (e *emitter) newSizedArray(lenOp string) string {
+	bytes := e.freshTmp()
+	e.emit("%s = mul %s, 4", bytes, lenOp)
+	h := e.freshTmp()
+	buf := e.freshTmp()
+	e.emit("%s = alloc 16", h)
+	e.emit("%s = alloc %s", buf, bytes)
+	e.emit("store %s + 0, %s as ptr", h, buf)
+	e.emit("store %s + 8, %s as u64", h, lenOp)
+	e.emit("!%s", buf)
+	e.declareOwned(h)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrVars[h] = true
+	e.arrElems[h] = "i32"
+	return h
+}
+
 // resolveSpreadCall expands `@spread:` markers for a known callee
 // (mirrors sa_plugin_ts spread-call handling):
 //   - rest callees pack every argument (spreads appended element-wise)
@@ -5990,17 +6038,7 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 			// Element buffer is length*4 bytes (i32 stride); the header
 			// records the element count (mirrors the new Array tests).
 			lenOp, _ := e.lowerExpr(nw.Arguments.Nodes[0])
-			bytes := e.freshTmp()
-			e.emit("%s = mul %s, 4", bytes, lenOp)
-			h := e.freshTmp()
-			buf := e.freshTmp()
-			e.emit("%s = alloc 16", h)
-			e.emit("%s = alloc %s", buf, bytes)
-			e.emit("store %s + 0, %s as ptr", h, buf)
-			e.emit("store %s + 8, %s as u64", h, lenOp)
-			e.emit("!%s", buf)
-			e.declareOwned(h)
-			return h, tArray
+			return e.newSizedArray(lenOp), tArray
 		}
 	}
 	e.refuse(n, "new expressions other than new Map() / new Array(n) are not lowerable")
