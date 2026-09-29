@@ -295,6 +295,27 @@ type emitter struct {
 	conts   []jumpTarget          // continue target stack (label + scope depth)
 	inFunc  bool
 	retType saType
+	// pendingFuncs buffers out-of-line arrow-function bodies (mirrors the
+	// callbacks buffer in sa_plugin_ts parseTopLevelArrowFn/parseArrowBody):
+	// nested emission splices them into file scope at finish().
+	pendingFuncs []string
+	// arrowAliases maps a local/top-level value name bound to an arrow
+	// function to its generated callee (direct calls rewrite to it).
+	arrowAliases map[string]*arrowInfo
+	arrowSeq     int
+	// funcParams records top-level callee arity; funcHasRest marks a
+	// trailing ...rest parameter (spread calls pack or expand per arity).
+	funcParams  map[string]int
+	funcHasRest map[string]bool
+	// inlineRet intercepts callback returns (higher-order inlining).
+	inlineRet *inlineRetState
+	// classDefs records class shapes; varClass maps instance variables to
+	// their class; instFnFields maps instance -> field -> inline arrow for
+	// function-typed fields; thisSelf is the current method receiver.
+	classDefs    map[string]*classDef
+	varClass     map[string]string
+	instFnFields map[string]map[string]*ast.Node
+	thisSelf     string
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -351,7 +372,31 @@ func (e *emitter) emitRaw(format string, args ...any) {
 }
 
 func (e *emitter) finish() string {
+	// Out-of-line arrow bodies splice into file scope after the callers
+	// (SA-ASM resolves @labels file-wide, so order is irrelevant).
+	for _, fn := range e.pendingFuncs {
+		e.body.WriteString(fn)
+	}
+	e.pendingFuncs = nil
 	return e.header.String() + e.body.String()
+}
+
+// arrowInfo is one out-of-line arrow callee: the generated @name plus the
+// captured outer variables appended as extra trailing arguments.
+type arrowInfo struct {
+	fn       string
+	ret      saType
+	captures []string
+	params   []string
+}
+
+// inlineRetState intercepts return inside an inlined higher-order callback:
+// the value lands in the method join slot and control jumps to the end.
+type inlineRetState struct {
+	active bool
+	slot   string
+	end    string
+	saname string
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +408,8 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	// Pre-scan: register function signatures (forward calls resolve; void
 	// callees known before first use), interfaces and enums.
 	e.funcSigs = map[string]saType{}
+	e.funcParams = map[string]int{}
+	e.funcHasRest = map[string]bool{}
 	for _, st := range stmts {
 		if st.Kind == ast.KindFunctionDeclaration && st.Name() != nil &&
 			st.Name().Kind == ast.KindIdentifier {
@@ -374,6 +421,13 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 				}
 			}
 			e.funcSigs[st.Name().Text()] = ret
+			params := st.Parameters()
+			e.funcParams[st.Name().Text()] = len(params)
+			if len(params) > 0 {
+				if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
+					e.funcHasRest[st.Name().Text()] = true
+				}
+			}
 		}
 		if st.Kind == ast.KindInterfaceDeclaration {
 			e.recordLayout(st)
@@ -389,10 +443,24 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 
 func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 	switch st.Kind {
+	case ast.KindClassDeclaration:
+		// Classes record layouts + bodies for call-site inlining
+		// (mirrors sa_plugin_ts parseClass without vtables).
+		if !topLevel {
+			e.refuse(st, "nested class declarations are not lowerable")
+			return
+		}
+		e.recordClass(st)
+		return
 	case ast.KindFunctionDeclaration:
 		e.lowerFunction(st)
 	case ast.KindVariableStatement:
 		if topLevel {
+			// A top-level `const f = (...) => ...` is a file-scope callback
+			// (mirrors sa_plugin_ts parseTopLevelArrowFn): emit @f directly.
+			if e.tryTopLevelArrow(st) {
+				return
+			}
 			e.refuse(st, "top-level variable statements are not lowerable; move state into function scope")
 			return
 		}
@@ -423,6 +491,12 @@ func (e *emitter) lowerBlockStatement(st *ast.Node) {
 		e.lowerFor(st)
 	case ast.KindForOfStatement:
 		e.lowerForOf(st)
+	case ast.KindForInStatement:
+		e.lowerForIn(st)
+	case ast.KindDoStatement:
+		e.lowerDoWhile(st)
+	case ast.KindTryStatement:
+		e.lowerTry(st)
 	case ast.KindSwitchStatement:
 		e.lowerSwitch(st)
 	case ast.KindReturnStatement:
@@ -504,6 +578,18 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 			ptype = annotationType(pd.Type)
 			e.trackBinding(pname, pd.Type, nil, tUnknown)
 		}
+		// ...rest collects the packed variadic slice (callers pack).
+		if pd := p.AsParameterDeclaration(); pd.DotDotDotToken != nil {
+			ptype = tArray
+			if e.arrVars == nil {
+				e.arrVars = map[string]bool{}
+			}
+			if e.arrElems == nil {
+				e.arrElems = map[string]string{}
+			}
+			e.arrVars[pname] = true
+			e.arrElems[pname] = "i32"
+		}
 		sig = append(sig, fmt.Sprintf("%s: %s", pname, ptype))
 		e.declareOwned(pname)
 	}
@@ -542,6 +628,259 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 }
 
 // ---------------------------------------------------------------------------
+// Arrow functions → out-of-line callees (mirrors sa_plugin_ts
+// parseTopLevelArrowFn + the callbacks buffer: the name becomes a call
+// alias, captures append as trailing parameters, bodies splice into file
+// scope). Direct calls lower exactly; first-class passing still refuses.
+// ---------------------------------------------------------------------------
+
+// tryTopLevelArrow emits `const f = (...) => ...` at file scope as @f.
+// Reports whether the statement was consumed.
+func (e *emitter) tryTopLevelArrow(st *ast.Node) bool {
+	dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) != 1 {
+		return false
+	}
+	d := dl.Declarations.Nodes[0]
+	init := d.Initializer()
+	if init == nil || init.Kind != ast.KindArrowFunction {
+		return false
+	}
+	name, ok := bindingNameText(d)
+	if !ok {
+		return false
+	}
+	e.lowerArrowBinding(name, init, true)
+	return !e.refused
+}
+
+// lowerArrowBinding builds @gen(params..., captures...) for one arrow and
+// records the name as a call alias. Top-level arrows keep the source name
+// (reference behavior); locals get @__arrow_N.
+func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool) {
+	af := arrow.AsArrowFunction()
+	params := arrow.Parameters()
+	pnames := make([]string, 0, len(params))
+	psig := make([]string, 0, len(params))
+	ptypes := make([]saType, 0, len(params))
+	for _, p := range params {
+		pname, ok := bindingNameText(p.AsNode())
+		if !ok {
+			e.refuse(p.AsNode(), "destructured parameters are not in the SA-lowerable subset")
+			return
+		}
+		pt := tI32
+		if pd := p.AsParameterDeclaration(); pd.Type != nil {
+			pt = annotationType(pd.Type)
+			if pt == tUnknown {
+				pt = tI32
+			}
+		}
+		pnames = append(pnames, pname)
+		ptypes = append(ptypes, pt)
+		psig = append(psig, fmt.Sprintf("%s: %s", pname, pt))
+	}
+	// Return type: explicit annotation wins; otherwise an expression body
+	// or any parameter means a value function (reference value_fn rule).
+	ret := tVoid
+	if af.Type != nil {
+		ret = annotationType(af.Type)
+		if ret == tUnknown {
+			ret = tI32
+		}
+	} else {
+		body := arrow.Body()
+		if body == nil {
+			e.refuse(arrow, "arrow function %s has no body", name)
+			return
+		}
+		if body.Kind != ast.KindBlock || len(pnames) > 0 {
+			ret = tI32
+		}
+	}
+	// Captures: free identifiers minus params, minus locals declared in
+	// the body, minus globals and callee names (never values).
+	bodyNode := arrow.Body()
+	uses := map[string]bool{}
+	collectValueIdents(bodyNode, uses)
+	decls := map[string]bool{name: true}
+	for _, p := range pnames {
+		decls[p] = true
+	}
+	collectDeclaredNames(bodyNode, decls)
+	for fn := range e.funcSigs {
+		decls[fn] = true
+	}
+	for _, g := range []string{"console", "Math", "String", "Number", "alloc", "structuredClone", "Array", "Map", "Set", "undefined", "null", "true", "false"} {
+		decls[g] = true
+	}
+	captures := []string{}
+	for id := range uses {
+		if !decls[id] && e.lookupBinding(id) != nil {
+			captures = append(captures, id)
+		}
+	}
+	sortStrings(captures)
+	gen := name
+	if !topLevel {
+		e.arrowSeq++
+		gen = fmt.Sprintf("__arrow_%d", e.arrowSeq)
+	}
+	if e.funcSigs == nil {
+		e.funcSigs = map[string]saType{}
+	}
+	e.funcSigs[gen] = ret
+	if e.arrowAliases == nil {
+		e.arrowAliases = map[string]*arrowInfo{}
+	}
+	e.arrowAliases[name] = &arrowInfo{fn: gen, ret: ret, captures: captures, params: pnames}
+	// Out-of-line emission with swapped builders and saved CFG state.
+	savedBody := e.body
+	savedOwned := e.owned
+	savedScopes := e.scopes
+	savedBreaks := e.breaks
+	savedConts := e.conts
+	savedRet := e.retType
+	savedInFunc := e.inFunc
+	savedTerm := e.terminated
+	savedInline := e.inlineRet
+	e.body = strings.Builder{}
+	e.owned = nil
+	e.scopes = nil
+	e.breaks = nil
+	e.conts = nil
+	e.retType = ret
+	e.inFunc = true
+	e.terminated = false
+	e.inlineRet = nil
+	full := append(append([]string{}, psig...), captureSig(e, captures)...)
+	retAnn := ""
+	if ret != tVoid {
+		retAnn = fmt.Sprintf(" -> %s", ret)
+	}
+	e.emitRaw("@%s(%s)%s:", gen, strings.Join(full, ", "), retAnn)
+	e.pushScope()
+	for i, p := range pnames {
+		// Mirror lowerFunction: record layouts and slice kinds so field
+		// access and method dispatch resolve inside the body.
+		var annot *ast.Node
+		if pd := params[i].AsParameterDeclaration(); pd.Type != nil {
+			annot = pd.Type
+		}
+		e.trackBinding(p, annot, nil, ptypes[i])
+		e.declareOwned(p)
+	}
+	// Captures arrive as same-named trailing params: re-declare them so
+	// the body resolves. Slice kinds stay visible via the shared
+	// strVars/arrVars maps (outer entries are still present).
+	for _, c := range captures {
+		e.declareOwned(c)
+	}
+	e.pushScope()
+	bd := arrow.Body()
+	if bd.Kind == ast.KindBlock {
+		for _, s := range bd.Statements() {
+			e.lowerBlockStatement(s)
+		}
+		if !e.terminated {
+			e.releaseAllOwned()
+			if ret == tVoid {
+				e.emit("return")
+			} else {
+				e.emit("return 0")
+			}
+		}
+	} else {
+		v, _ := e.lowerExpr(bd)
+		e.releaseAllOwnedExcept(v)
+		e.emit("return %s", v)
+	}
+	e.terminated = false
+	e.popScope()
+	e.popScope()
+	fnText := e.body.String()
+	e.body = savedBody
+	e.owned = savedOwned
+	e.scopes = savedScopes
+	e.breaks = savedBreaks
+	e.conts = savedConts
+	e.retType = savedRet
+	e.inFunc = savedInFunc
+	e.terminated = savedTerm
+	e.inlineRet = savedInline
+	e.pendingFuncs = append(e.pendingFuncs, fnText)
+	// The alias name itself is a plain (non-owned) local binding.
+	if !topLevel {
+		e.declarePlain(name)
+	}
+}
+
+// captureSig renders captured outer names as trailing i32 params. Slice
+// captures keep ptr width (both render as handle registers at call sites).
+func captureSig(e *emitter, captures []string) []string {
+	sig := make([]string, 0, len(captures))
+	for _, c := range captures {
+		t := "i32"
+		if e.strVars[c] || e.arrVars[c] {
+			t = "ptr"
+		}
+		sig = append(sig, fmt.Sprintf("%s: %s", c, t))
+	}
+	return sig
+}
+
+// collectValueIdents gathers identifier uses, skipping property names
+// (`a.b` contributes `a`, not `b`).
+func collectValueIdents(n *ast.Node, out map[string]bool) {
+	if n == nil {
+		return
+	}
+	if n.Kind == ast.KindPropertyAccessExpression {
+		pa := n.AsPropertyAccessExpression()
+		collectValueIdents(pa.Expression, out)
+		return
+	}
+	if n.Kind == ast.KindIdentifier {
+		out[n.Text()] = true
+		return
+	}
+	n.ForEachChild(func(c *ast.Node) bool {
+		collectValueIdents(c, out)
+		return false
+	})
+}
+
+// collectDeclaredNames gathers locally-declared names (vars, functions,
+// classes, params of nested arrows) so they are not mistaken for captures.
+func collectDeclaredNames(n *ast.Node, out map[string]bool) {
+	if n == nil {
+		return
+	}
+	switch n.Kind {
+	case ast.KindVariableDeclaration:
+		if name, ok := bindingNameText(n); ok {
+			out[name] = true
+		}
+	case ast.KindFunctionDeclaration, ast.KindClassDeclaration, ast.KindInterfaceDeclaration, ast.KindEnumDeclaration:
+		if n.Name() != nil && n.Name().Kind == ast.KindIdentifier {
+			out[n.Name().Text()] = true
+		}
+	}
+	n.ForEachChild(func(c *ast.Node) bool {
+		collectDeclaredNames(c, out)
+		return false
+	})
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Variables
 // ---------------------------------------------------------------------------
 
@@ -566,6 +905,12 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 			e.refuse(d, "declaration of %s without initializer is not lowerable", name)
 			continue
 		}
+		// `let f = (x) => ...` desugars to an out-of-line callee; the
+		// name becomes a call alias, not a register binding.
+		if init.Kind == ast.KindArrowFunction {
+			e.lowerArrowBinding(name, init, false)
+			continue
+		}
 		val, vtype := e.lowerExpr(init)
 		if atype == tUnknown {
 			atype = vtype
@@ -573,6 +918,26 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		_ = atype
 		e.assign(name, val, operandKind(val, init), vtype, d)
 		e.trackBinding(name, d.AsVariableDeclaration().Type, init, vtype)
+		// `const b = new Box(...)` records the instance class for method
+		// dispatch and per-instance fn-field devirtualization.
+		if init.Kind == ast.KindNewExpression {
+			if nw := init.AsNewExpression(); nw.Expression.Kind == ast.KindIdentifier {
+				if _, ok := e.classDefs[nw.Expression.Text()]; ok {
+					if e.varClass == nil {
+						e.varClass = map[string]string{}
+					}
+					e.varClass[name] = nw.Expression.Text()
+					// Retarget per-instance fn fields from the result temp
+					// (lowerNewClass records under it) to the bound name.
+					if fields, ok := e.instFnFields[val]; ok {
+						if e.instFnFields == nil {
+							e.instFnFields = map[string]map[string]*ast.Node{}
+						}
+						e.instFnFields[name] = fields
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -802,6 +1167,138 @@ func (e *emitter) lowerForOf(st *ast.Node) {
 	e.conts = e.conts[:len(e.conts)-1]
 }
 
+// lowerForIn desugars `for (const k in arr)` to an index loop over the
+// 16-byte slice (mirrors sa_plugin_ts for-in: arrays/strings by index,
+// objects refuse).
+func (e *emitter) lowerForIn(st *ast.Node) {
+	fo := st.AsForInOrOfStatement()
+	arrVal, _ := e.lowerExpr(fo.Expression)
+	idx := e.freshTmp()
+	e.emit("%s = 0", idx)
+	topL := e.freshLabel("forin_top")
+	bodyL := e.freshLabel("forin_body")
+	endL := e.freshLabel("forin_end")
+	lenT := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", lenT, arrVal)
+	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
+	e.conts = append(e.conts, jumpTarget{topL, len(e.scopes)})
+	e.emitRaw("%s:", topL)
+	cT := e.freshTmp()
+	e.emit("%s = slt %s, %s", cT, idx, lenT)
+	e.emit("br %s -> %s, %s", cT, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	e.pushScope()
+	binding := foBindingName(fo)
+	e.assign(binding, idx, "named", tI32, st)
+	e.declarePlain(binding)
+	e.terminated = false
+	e.lowerBranchBody(fo.Statement)
+	if !e.terminated {
+		incT := e.freshTmp()
+		e.emit("%s = add %s, 1", incT, idx)
+		e.emit("%s = %s", idx, incT)
+	}
+	e.releaseScope()
+	e.popScope()
+	if !e.terminated {
+		e.emit("jmp %s", topL)
+	}
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+	e.breaks = e.breaks[:len(e.breaks)-1]
+	e.conts = e.conts[:len(e.conts)-1]
+}
+
+// lowerDoWhile mirrors sa_plugin_ts parseDoWhile: the body runs once, then
+// the condition branches back to the top. continue lands on the condition.
+func (e *emitter) lowerDoWhile(st *ast.Node) {
+	ds := st.AsDoStatement()
+	loopL := e.freshLabel("dowhile")
+	condL := e.freshLabel("dowhile_cond")
+	endL := e.freshLabel("enddowhile")
+	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
+	e.conts = append(e.conts, jumpTarget{condL, len(e.scopes)})
+	e.emitRaw("%s:", loopL)
+	e.pushScope()
+	e.terminated = false
+	e.lowerBranchBody(ds.Statement)
+	e.releaseScope()
+	e.popScope()
+	if !e.terminated {
+		e.emit("jmp %s", condL)
+	}
+	e.emitRaw("%s:", condL)
+	cond, _ := e.lowerExpr(ds.Expression)
+	if cond == "1" || cond == "true" {
+		e.emit("jmp %s", loopL)
+	} else if cond == "0" || cond == "false" {
+		// Falls through to the end.
+	} else {
+		e.emit("br %s -> %s, %s", cond, loopL, endL)
+	}
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+	e.breaks = e.breaks[:len(e.breaks)-1]
+	e.conts = e.conts[:len(e.conts)-1]
+}
+
+// lowerTry mirrors sa_plugin_ts parseTryCatch: SA-ASM has no exception
+// edges and throw lowers to panic (unresumable), so a try whose body can
+// throw refuses loudly; otherwise the body runs and the catch handler is
+// skipped (dead code), while a finally block always runs.
+func (e *emitter) lowerTry(st *ast.Node) {
+	ts := st.AsTryStatement()
+	if containsThrow(ts.TryBlock) {
+		e.refuse(st, "throw inside try is not lowerable (catch cannot resume after panic)")
+		return
+	}
+	endL := e.freshLabel("endtry")
+	e.pushScope()
+	e.terminated = false
+	for _, s := range ts.TryBlock.Statements() {
+		e.lowerBlockStatement(s)
+	}
+	e.releaseScope()
+	e.popScope()
+	if !e.terminated {
+		e.emit("jmp %s", endL)
+	}
+	// Catch handler is dead code: skipped without emission.
+	if ts.FinallyBlock != nil {
+		e.pushScope()
+		e.terminated = false
+		for _, s := range ts.FinallyBlock.Statements() {
+			e.lowerBlockStatement(s)
+		}
+		e.releaseScope()
+		e.popScope()
+	}
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+}
+
+// containsThrow reports whether a block can throw (then catch is unreachably
+// dead and the try must refuse rather than miscompile).
+func containsThrow(n *ast.Node) bool {
+	found := false
+	var walk func(x *ast.Node)
+	walk = func(x *ast.Node) {
+		if x == nil || found {
+			return
+		}
+		if x.Kind == ast.KindThrowStatement {
+			found = true
+			return
+		}
+		x.ForEachChild(func(c *ast.Node) bool {
+			walk(c)
+			return false
+		})
+	}
+	walk(n)
+	return found
+}
+
 // lowerSwitch emits the guarded case-test chain, mirroring sa_plugin_ts
 // parseSwitch: each case gets a test label (eq scrutinee/case -> body/next
 // test) and a body label; bodies run sequentially so fallthrough is natural;
@@ -882,6 +1379,17 @@ func (e *emitter) lowerSwitch(st *ast.Node) {
 
 func (e *emitter) lowerReturn(st *ast.Node) {
 	rs := st.AsReturnStatement()
+	// Inside an inlined higher-order callback, return delivers the
+	// callback value into the join slot and jumps to the method end.
+	if e.inlineRet != nil && e.inlineRet.active {
+		if rs.Expression != nil {
+			v, _ := e.lowerExpr(rs.Expression)
+			e.emit("store %s + 0, %s as %s", e.inlineRet.slot, v, e.inlineRet.saname)
+		}
+		e.emit("jmp %s", e.inlineRet.end)
+		e.terminated = true
+		return
+	}
 	if rs.Expression != nil {
 		if e.retType == tVoid {
 			e.refuse(st, "function returns a value but declares no return type (a value-returning function needs `-> T`)")
@@ -925,6 +1433,19 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 	case ast.KindFalseKeyword:
 		return "0", tBool
 	case ast.KindIdentifier:
+		// Handle aliases resolve to the underlying register (inlined
+		// method params never copy handles).
+		if b := e.lookupBinding(n.Text()); b != nil && b.alias != "" {
+			target := b.alias
+			for i := 0; i < 8; i++ {
+				nb := e.lookupBinding(target)
+				if nb == nil || nb.alias == "" {
+					break
+				}
+				target = nb.alias
+			}
+			return target, tArray
+		}
 		return n.Text(), tI32
 	case ast.KindBinaryExpression:
 		return e.lowerBinary(n)
@@ -950,6 +1471,18 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		return e.lowerTemplate(n)
 	case ast.KindConditionalExpression:
 		return e.lowerTernary(n)
+	case ast.KindThisKeyword:
+		// Method receiver alias (set while inlining class methods).
+		if e.thisSelf == "" {
+			e.refuse(n, "`this` outside a class method is not lowerable")
+			return "0", tUnknown
+		}
+		return e.thisSelf, tArray
+	case ast.KindAwaitExpression:
+		// Await unwraps synchronously: the subset has no concurrent
+		// runtime (async lowers to direct calls; sa_std async.sla
+		// drivers are Phase 2), so await v ≡ v when v is a value.
+		return e.lowerExpr(n.AsAwaitExpression().Expression)
 	case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression:
 		return e.lowerExpr(n.Expression())
 	default:
@@ -1007,6 +1540,34 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	if isCompoundAssign(op) {
 		e.lowerCompoundAssign(bin, op)
 		return "0", tI32
+	}
+	// `??` lowers as a nullish join-slot (mirrors sa_plugin_ts
+	// parseNullishCoalesce): the subset maps null/undefined to 0, so a
+	// nonzero left passes through, otherwise the right lowers. The right
+	// lowers only in the fallback arm (lazy, single evaluation each).
+	if op == ast.KindQuestionQuestionToken {
+		l, lt := e.lowerExpr(bin.Left)
+		slot := e.freshTmp()
+		e.emit("%s = alloc 8", slot)
+		e.ownTemp(slot)
+		c := e.freshTmp()
+		tL := e.freshLabel("null_t")
+		fL := e.freshLabel("null_f")
+		endL := e.freshLabel("null_end")
+		e.emit("%s = ne %s, 0", c, l)
+		e.emit("br %s -> %s, %s", c, tL, fL)
+		e.emitRaw("%s:", tL)
+		e.emit("store %s + 0, %s as ptr", slot, l)
+		e.emit("jmp %s", endL)
+		e.emitRaw("%s:", fL)
+		r, _ := e.lowerExpr(bin.Right)
+		e.emit("store %s + 0, %s as ptr", slot, r)
+		e.emit("jmp %s", endL)
+		e.emitRaw("%s:", endL)
+		out := e.freshTmp()
+		e.emit("%s = load %s + 0 as i32", out, slot)
+		e.releaseIfOwnedTemp(slot)
+		return out, lt
 	}
 	l, lt := e.lowerExpr(bin.Left)
 	r, rt := e.lowerExpr(bin.Right)
@@ -1333,9 +1894,27 @@ func (e *emitter) lowerIncDec(operand *ast.Node, up, postfix bool, pos *ast.Node
 func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	call := n.AsCallExpression()
 	args := []string{}
+	argTypes := []saType{}
 	for _, a := range call.Arguments.Nodes {
-		v, _ := e.lowerExpr(a)
+		// Spread markers expand per-callee at dispatch (see
+		// resolveSpreadCall); Math spread reduces a slice separately.
+		if a.Kind == ast.KindSpreadElement {
+			se := a.AsSpreadElement()
+			sv, st := e.lowerExpr(se.Expression)
+			args = append(args, "@spread:"+sv)
+			argTypes = append(argTypes, st)
+			continue
+		}
+		// Callbacks lower inline at the higher-order call site (see
+		// lowerHigherOrder); pre-lowering them here would refuse.
+		if a.Kind == ast.KindArrowFunction || a.Kind == ast.KindFunctionExpression {
+			args = append(args, "@callback:")
+			argTypes = append(argTypes, tI32)
+			continue
+		}
+		v, t := e.lowerExpr(a)
 		args = append(args, v)
+		argTypes = append(argTypes, t)
 	}
 	// console.log(...) → @sa_print_bytes via sa_std/io/print.sai
 	if isConsoleLog(call.Expression) {
@@ -1357,6 +1936,18 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		e.ownTemp(t)
 		return t, tString
 	}
+	// Number.isInteger(x): i32 operands are trivially integral.
+	if isNumberIsInteger(call.Expression) {
+		if len(args) != 1 {
+			e.refuse(n, "Number.isInteger takes one argument")
+			return "0", tUnknown
+		}
+		if len(argTypes) > 0 && argTypes[0] == tF64 {
+			e.refuse(n, "Number.isInteger on floats is not lowerable (i32 subset only)")
+			return "0", tUnknown
+		}
+		return "1", tBool
+	}
 	// new Map() is a NewExpression, not a call; plain identifier calls are user fns.
 	if call.Expression.Kind == ast.KindIdentifier {
 		fname := call.Expression.Text()
@@ -1375,6 +1966,58 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			e.declareOwned(t)
 			return t, tArray
 		}
+		// String(x): strings pass through, scalars render via the shared
+		// sa_fmt_*_into path (same primitives as template interpolation).
+		if fname == "String" && len(args) == 1 {
+			at := tI32
+			if len(argTypes) > 0 {
+				at = argTypes[0]
+			}
+			if at == tString {
+				return args[0], tString
+			}
+			e.needImport("sa_std/fmt.sai")
+			if v, ok := e.renderInterpValue(args[0], at, n); ok {
+				return v, tString
+			}
+			return "0", tUnknown
+		}
+		// Number(s): numeric strings parse via sa_parse_float (sci primitive).
+		if fname == "Number" && len(args) == 1 {
+			at := tI32
+			if len(argTypes) > 0 {
+				at = argTypes[0]
+			}
+			if at == tString {
+				e.needImport("sa_std/string.sai")
+				bp, bl := e.expandSlice(args[0])
+				t := e.freshTmp()
+				e.emit("%s = call @sa_parse_float(%s, %s)", t, bp, bl)
+				return t, tF64
+			}
+			return args[0], at
+		}
+		// parseInt(s)/parseFloat(s): decimal/lexical scan (sci/simulated
+		// only via existing sa_parse_float for floats; integers scan inline
+		// per the reference lowerParseInt).
+		if fname == "parseInt" && len(args) == 1 {
+			return e.lowerParseIntCall(args[0], n), tI32
+		}
+		if fname == "parseFloat" && len(args) == 1 {
+			e.needImport("sa_std/string.sai")
+			bp, bl := e.expandSlice(args[0])
+			t := e.freshTmp()
+			e.emit("%s = call @sa_parse_float(%s, %s)", t, bp, bl)
+			return t, tF64
+		}
+		// structuredClone(v): deep copy by static shape (see lowerClone).
+		if fname == "structuredClone" && len(args) == 1 {
+			at := tI32
+			if len(argTypes) > 0 {
+				at = argTypes[0]
+			}
+			return e.lowerDeepClone(args[0], at, n), at
+		}
 		// Named std imports: readFile(...) with `import { readFile } from "fs"`.
 		if mod, ok := e.importedFrom[fname]; ok {
 			if proj, ok := projectionByTS(mod + "." + fname); ok {
@@ -1383,7 +2026,36 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			e.refuse(n, "%s.%s is not a projected std surface (see StdProjectionTable)", mod, fname)
 			return "0", tUnknown
 		}
+		// Arrow alias: `let f = (x) => ...; f(41)` rewrites to the
+		// out-of-line callee with captured outer variables appended.
+		if ai, ok := e.arrowAliases[fname]; ok {
+			for _, a := range args {
+				if strings.HasPrefix(a, "@spread:") {
+					e.refuse(n, "spread arguments to arrow callees are not lowerable")
+					return "0", tUnknown
+				}
+			}
+			full := append(append([]string{}, args...), ai.captures...)
+			if ai.ret == tVoid {
+				e.emit("call @%s(%s)", ai.fn, strings.Join(full, ", "))
+				return "0", tVoid
+			}
+			t := e.freshTmp()
+			e.emit("%s = call @%s(%s)", t, ai.fn, strings.Join(full, ", "))
+			e.ownTemp(t)
+			return t, ai.ret
+		}
 		if ret, ok := e.funcSigs[fname]; ok {
+			for _, a := range args {
+				if strings.HasPrefix(a, "@callback:") {
+					e.refuse(n, "function values are not first-class; callbacks inline only at higher-order array sites")
+					return "0", tUnknown
+				}
+			}
+			args, argTypes = e.resolveSpreadCall(fname, args, argTypes, n)
+			if e.refused {
+				return "0", tUnknown
+			}
 			if ret == tVoid {
 				e.emit("call @%s(%s)", fname, strings.Join(args, ", "))
 				return "0", tVoid
@@ -1399,7 +2071,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	// Method calls: Math.* inline idioms and string-method projections
 	// (sci/sa_std reuse), mirroring sa_plugin_ts lib surface tables.
 	if call.Expression.Kind == ast.KindPropertyAccessExpression {
-		if v, t, ok := e.lowerMethodCall(call.Expression, args, n); ok {
+		if v, t, ok := e.lowerMethodCall(call.Expression, args, argTypes, call.Arguments, n); ok {
 			return v, t
 		}
 	}
@@ -1409,14 +2081,51 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 
 // lowerMethodCall dispatches property calls. It returns ok=false when the
 // method is not a projected surface (caller refuses loudly).
-func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, pos *ast.Node) (string, saType, bool) {
+func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	pa := fn.AsPropertyAccessExpression()
-	if pa.Expression.Kind != ast.KindIdentifier {
-		return "", tUnknown, false
-	}
-	recv := pa.Expression.Text()
 	method := pa.Name().Text()
 	// Math is handled at the call site (needs argument nodes for spread).
+	// `this.m(...)` aliases the current method receiver (Text() panics on
+	// non-identifier expressions, so resolve the receiver first).
+	recv := ""
+	if pa.Expression.Kind == ast.KindThisKeyword {
+		if e.thisSelf == "" {
+			e.refuse(pos, "`this` outside a class method is not lowerable")
+			return "0", tUnknown, true
+		}
+		recv = e.thisSelf
+	} else if pa.Expression.Kind == ast.KindIdentifier {
+		recv = pa.Expression.Text()
+	} else {
+		return "", tUnknown, false
+	}
+	if pa.Expression.Kind == ast.KindThisKeyword {
+		// Per-instance fn fields devirtualize (`this.pick(e)` replays the
+		// captured arrow inline with caller-scope captures).
+		if fields, ok := e.instFnFields[recv]; ok {
+			if anode, ok := fields[method]; ok {
+				if v, t, ok := e.inlineInstanceCallback(recv, anode, args, argNodes, pos); ok {
+					return v, t, true
+				}
+				return "", tUnknown, false
+			}
+		}
+	}
+	// Class methods inline at the call site (no vtables in SA-ASM).
+	if className, ok := e.varClass[recv]; ok {
+		if v, t, ok := e.lowerClassMethodCall(recv, className, method, args, argNodes, pos); ok {
+			return v, t, true
+		}
+		// Unknown method: fall through to array/string surfaces, then refuse.
+	}
+	// Higher-order array sites inline the callback body (no function
+	// pointers; captures resolve in the caller scope).
+	if isHigherOrderMethod(method) {
+		if v, t, ok := e.lowerHigherOrder(recv, method, args, argNodes, pos); ok {
+			return v, t, true
+		}
+		return "", tUnknown, false
+	}
 	// Receiver-kind dispatch (mirrors the scope lookup): string bindings
 	// route to the string surface, array bindings to array methods.
 	if e.strVars[recv] {
@@ -1425,7 +2134,7 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, pos *ast.Node) (s
 		}
 		return "", tUnknown, false
 	}
-	if v, t, ok := e.lowerArrayMethod(recv, method, args, pos); ok {
+	if v, t, ok := e.lowerArrayMethod(recv, method, args, types, argNodes, pos); ok {
 		return v, t, true
 	}
 	if e.arrVars[recv] {
@@ -1437,6 +2146,606 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, pos *ast.Node) (s
 	return "", tUnknown, false
 }
 
+// inlineInstanceCallback replays a per-instance captured arrow
+// (`this.pick(e)`): parameters bind positionally to the lowered arguments.
+func (e *emitter) inlineInstanceCallback(recv string, anode *ast.Node, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	_ = recv
+	_ = argNodes
+	vals := []string{}
+	for _, a := range args {
+		if strings.HasPrefix(a, "@callback:") || strings.HasPrefix(a, "@spread:") {
+			e.refuse(pos, "callback/spread arguments to instance callbacks are not lowerable")
+			return "0", tUnknown, false
+		}
+		vals = append(vals, a)
+	}
+	v, t := e.callbackValue(anode, vals, true, pos)
+	if e.refused {
+		return "0", tUnknown, false
+	}
+	return v, t, true
+}
+
+// isHigherOrderMethod reports array methods taking a callback (inlined at
+// the call site; plain forms of sort/toSorted still lower directly).
+func isHigherOrderMethod(method string) bool {
+	switch method {
+	case "forEach", "map", "filter", "find", "findIndex", "some", "every",
+		"reduce", "reduceRight", "sort", "toSorted":
+		return true
+	}
+	return false
+}
+
+// lowerHigherOrder inlines arrow callbacks into loop shapes (no function
+// pointers exist in SA-ASM; captures resolve in the caller scope, matching
+// the desugared semantics of sa_plugin_ts callbacks).
+func (e *emitter) lowerHigherOrder(recv, method string, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	elem := e.arrElems[recv]
+	if elem == "" {
+		elem = "i32"
+	}
+	esz, _ := widthOf(elem)
+	// Locate the inline callback (arrows arrive as @callback: markers;
+	// named function values cannot inline without a body).
+	var cb *ast.Node
+	cbIdx := -1
+	if argNodes != nil {
+		for i, a := range argNodes.Nodes {
+			if a.Kind == ast.KindArrowFunction || a.Kind == ast.KindFunctionExpression {
+				cb = a
+				cbIdx = i
+				break
+			}
+			if a.Kind == ast.KindIdentifier {
+				if _, ok := e.arrowAliases[a.Text()]; ok {
+					e.refuse(a, "pass the arrow inline at %s (named callbacks do not inline)", method)
+					return "0", tUnknown, true
+				}
+			}
+		}
+	}
+	// Plain sort/toSorted (no callback) lower directly.
+	if cb == nil && (method == "sort" || method == "toSorted") {
+		return e.lowerArrayMethod(recv, method, args, nil, argNodes, pos)
+	}
+	if cb == nil {
+		e.refuse(pos, "%s needs an inline arrow callback", method)
+		return "0", tUnknown, true
+	}
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, recv)
+	loadElem := func(idx string) string {
+		off := e.freshTmp()
+		e.emit("%s = mul %s, %d", off, idx, esz)
+		addr := e.freshTmp()
+		e.emit("%s = add %s, %s", addr, data, off)
+		v := e.freshTmp()
+		e.emit("%s = load %s + 0 as %s", v, addr, elem)
+		return v
+	}
+	switch method {
+	case "forEach":
+		i := e.freshTmp()
+		e.emit("%s = 0", i)
+		topL := e.freshLabel("fe_top")
+		bodyL := e.freshLabel("fe_body")
+		endL := e.freshLabel("fe_end")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		e.callbackValue(cb, []string{el, i}, false, pos)
+		inext := e.freshTmp()
+		e.emit("%s = add %s, 1", inext, i)
+		e.emit("%s = %s", i, inext)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		return "0", tI32, true
+	case "map":
+		h := e.newEmptyArray()
+		i := e.freshTmp()
+		e.emit("%s = 0", i)
+		topL := e.freshLabel("mp_top")
+		bodyL := e.freshLabel("mp_body")
+		endL := e.freshLabel("mp_end")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		v, _ := e.callbackValue(cb, []string{el, i}, true, pos)
+		e.lowerArrayPush(h, v, "i32", 4)
+		inext := e.freshTmp()
+		e.emit("%s = add %s, 1", inext, i)
+		e.emit("%s = %s", i, inext)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		return h, tArray, true
+	case "filter":
+		h := e.newEmptyArray()
+		i := e.freshTmp()
+		e.emit("%s = 0", i)
+		topL := e.freshLabel("fi_top")
+		bodyL := e.freshLabel("fi_body")
+		endL := e.freshLabel("fi_end")
+		takeL := e.freshLabel("fi_take")
+		skipL := e.freshLabel("fi_skip")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		v, _ := e.callbackValue(cb, []string{el, i}, true, pos)
+		e.emit("br %s -> %s, %s", v, takeL, skipL)
+		e.emitRaw("%s:", takeL)
+		e.lowerArrayPush(h, el, "i32", 4)
+		e.emit("jmp %s", skipL)
+		e.emitRaw("%s:", skipL)
+		inext := e.freshTmp()
+		e.emit("%s = add %s, 1", inext, i)
+		e.emit("%s = %s", i, inext)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		return h, tArray, true
+	case "find", "findIndex":
+		slot := e.freshTmp()
+		e.emit("%s = alloc 8", slot)
+		e.ownTemp(slot)
+		init := "-1"
+		if method == "find" {
+			init = "0"
+		}
+		e.emit("store %s + 0, %s as ptr", slot, init)
+		i := e.freshTmp()
+		e.emit("%s = 0", i)
+		topL := e.freshLabel("fd_top")
+		bodyL := e.freshLabel("fd_body")
+		endL := e.freshLabel("fd_end")
+		hitL := e.freshLabel("fd_hit")
+		nextL := e.freshLabel("fd_next")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		v, _ := e.callbackValue(cb, []string{el, i}, true, pos)
+		e.emit("br %s -> %s, %s", v, hitL, nextL)
+		e.emitRaw("%s:", hitL)
+		if method == "find" {
+			e.emit("store %s + 0, %s as ptr", slot, el)
+		} else {
+			e.emit("store %s + 0, %s as ptr", slot, i)
+		}
+		e.emit("jmp %s", endL)
+		e.emitRaw("%s:", nextL)
+		inext := e.freshTmp()
+		e.emit("%s = add %s, 1", inext, i)
+		e.emit("%s = %s", i, inext)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		out := e.freshTmp()
+		e.emit("%s = load %s + 0 as i32", out, slot)
+		e.releaseIfOwnedTemp(slot)
+		return out, tI32, true
+	case "some", "every":
+		slot := e.freshTmp()
+		e.emit("%s = alloc 8", slot)
+		e.ownTemp(slot)
+		init, stop := "0", "1"
+		if method == "every" {
+			init, stop = "1", "0"
+		}
+		e.emit("store %s + 0, %s as ptr", slot, init)
+		i := e.freshTmp()
+		e.emit("%s = 0", i)
+		topL := e.freshLabel("se_top")
+		bodyL := e.freshLabel("se_body")
+		endL := e.freshLabel("se_end")
+		hitL := e.freshLabel("se_hit")
+		nextL := e.freshLabel("se_next")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		v, _ := e.callbackValue(cb, []string{el, i}, true, pos)
+		cmp := v
+		if method == "every" {
+			nv := e.freshTmp()
+			e.emit("%s = eq %s, 0", nv, v)
+			cmp = nv
+		}
+		e.emit("br %s -> %s, %s", cmp, hitL, nextL)
+		e.emitRaw("%s:", hitL)
+		e.emit("store %s + 0, %s as ptr", slot, stop)
+		e.emit("jmp %s", endL)
+		e.emitRaw("%s:", nextL)
+		inext := e.freshTmp()
+		e.emit("%s = add %s, 1", inext, i)
+		e.emit("%s = %s", i, inext)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		out := e.freshTmp()
+		e.emit("%s = load %s + 0 as i32", out, slot)
+		e.releaseIfOwnedTemp(slot)
+		return out, tBool, true
+	case "reduce", "reduceRight":
+		right := method == "reduceRight"
+		hasInit := cbIdx >= 0 && len(args) > cbIdx+1
+		var initVal string
+		if hasInit {
+			initVal = args[cbIdx+1]
+			// The init arg lowered before the callback marker; with a
+			// single callback arg the init is args[1].
+			if len(args) > 1 && args[1] != "@callback:" {
+				initVal = args[1]
+			}
+		}
+		acc := e.freshTmp()
+		i := e.freshTmp()
+		if hasInit {
+			e.emit("%s = add %s, 0", acc, initVal)
+			if !right {
+				e.emit("%s = 0", i)
+			} else {
+				e.emit("%s = sub %s, 1", i, ln)
+			}
+		} else {
+			// Seed from the edge element via the OOB-safe join (empty
+			// arrays seed 0 and skip the loop; the subset maps
+			// undefined to 0 instead of throwing).
+			if !right {
+				e.emit("%s = add %s, 0", acc, e.lowerCheckedIndex(recv, "0", false))
+				e.emit("%s = 1", i)
+			} else {
+				last := e.freshTmp()
+				e.emit("%s = sub %s, 1", last, ln)
+				e.emit("%s = add %s, 0", acc, e.lowerCheckedIndex(recv, last, false))
+				e.emit("%s = sub %s, 2", i, ln)
+			}
+		}
+		topL := e.freshLabel("rd_top")
+		bodyL := e.freshLabel("rd_body")
+		endL := e.freshLabel("rd_end")
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		if !right {
+			e.emit("%s = slt %s, %s", c, i, ln)
+		} else {
+			e.emit("%s = sge %s, 0", c, i)
+		}
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+		e.emitRaw("%s:", bodyL)
+		el := loadElem(i)
+		// Callback params: (acc, cur[, idx]).
+		v, _ := e.callbackValue(cb, []string{acc, el, i}, true, pos)
+		e.emit("%s = %s", acc, v)
+		step := e.freshTmp()
+		if !right {
+			e.emit("%s = add %s, 1", step, i)
+		} else {
+			e.emit("%s = sub %s, 1", step, i)
+		}
+		e.emit("%s = %s", i, step)
+		e.emit("jmp %s", topL)
+		e.emitRaw("%s:", endL)
+		return acc, tI32, true
+	case "sort":
+		return e.lowerSortWithCmp(recv, elem, esz, argNodes, pos)
+	case "toSorted":
+		cp := e.lowerArraySlice(recv, elem, esz, "0", "", pos)
+		return e.lowerSortWithCmp(cp, elem, esz, argNodes, pos)
+	}
+	return "", tUnknown, false
+}
+
+// callbackValue lowers one inline callback application: parameters bind to
+// the given loop values (identifier or array-pattern), then the body lowers
+// (expression bodies deliver the value; block bodies join through a slot
+// with return interception).
+func (e *emitter) callbackValue(cb *ast.Node, argVals []string, wantValue bool, pos *ast.Node) (string, saType) {
+	params := cb.Parameters()
+	if len(params) > len(argVals) {
+		e.refuse(pos, "callback declares %d parameters but only %d values are provided", len(params), len(argVals))
+		return "0", tUnknown
+	}
+	e.pushScope()
+	for i, p := range params {
+		e.bindCallbackParam(p.AsNode(), argVals[i], pos)
+		if e.refused {
+			e.popScope()
+			return "0", tUnknown
+		}
+	}
+	body := cb.Body()
+	if body == nil {
+		e.refuse(pos, "callback has no body")
+		e.popScope()
+		return "0", tUnknown
+	}
+	if body.Kind != ast.KindBlock {
+		v, t := e.lowerExpr(body)
+		e.popScope()
+		return v, t
+	}
+	slot := e.freshTmp()
+	e.emit("%s = alloc 8", slot)
+	e.ownTemp(slot)
+	e.emit("store %s + 0, 0 as ptr", slot)
+	endL := e.freshLabel("cb_end")
+	saved := e.inlineRet
+	e.inlineRet = &inlineRetState{active: true, slot: slot, end: endL, saname: "i32"}
+	e.terminated = false
+	for _, s := range body.Statements() {
+		e.lowerBlockStatement(s)
+		if e.refused {
+			break
+		}
+	}
+	e.inlineRet = saved
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+	out := e.freshTmp()
+	e.emit("%s = load %s + 0 as i32", out, slot)
+	e.releaseIfOwnedTemp(slot)
+	e.popScope()
+	_ = wantValue
+	return out, tI32
+}
+
+// bindCallbackParam binds one callback parameter: plain identifiers
+// snapshot scalars and alias handles (never copy), array patterns
+// destructure by safe indexed loads.
+func (e *emitter) bindCallbackParam(p *ast.Node, val string, pos *ast.Node) {
+	name := p.Name()
+	if name == nil {
+		e.refuse(pos, "callback parameter has no binding name")
+		return
+	}
+	if name.Kind == ast.KindIdentifier {
+		if l := e.layoutOfVar(val); l != nil {
+			e.declareAlias(name.Text(), val)
+			if e.varLayouts == nil {
+				e.varLayouts = map[string]*layout{}
+			}
+			e.varLayouts[name.Text()] = l
+			return
+		}
+		if e.arrVars[val] || e.strVars[val] {
+			e.declareAlias(name.Text(), val)
+			if e.arrVars[val] {
+				if e.arrVars == nil {
+					e.arrVars = map[string]bool{}
+				}
+				e.arrVars[name.Text()] = true
+				if e.arrElems == nil {
+					e.arrElems = map[string]string{}
+				}
+				e.arrElems[name.Text()] = e.arrElems[val]
+			}
+			if e.strVars[val] {
+				if e.strVars == nil {
+					e.strVars = map[string]bool{}
+				}
+				e.strVars[name.Text()] = true
+			}
+			return
+		}
+		kind := "named"
+		if isTempName(val) {
+			kind = "temp"
+		}
+		e.assign(name.Text(), val, kind, tI32, pos)
+		return
+	}
+	if name.Kind == ast.KindArrayBindingPattern {
+		e.destructureArray(name, val, pos)
+		return
+	}
+	if name.Kind == ast.KindObjectBindingPattern {
+		e.destructureObject(name, val, pos)
+		return
+	}
+	e.refuse(pos, "callback parameter shape is not lowerable")
+}
+
+// destructureArray binds [a, b, ...] from a slice via safe indexed loads
+// (missing elements read 0, matching the undefined→0 subset rule).
+func (e *emitter) destructureArray(pat *ast.Node, arr string, pos *ast.Node) {
+	idx := 0
+	for _, el := range pat.AsBindingPattern().Elements.Nodes {
+		if el.Kind != ast.KindBindingElement {
+			idx++
+			continue
+		}
+		be := el.AsBindingElement()
+		if be.DotDotDotToken != nil {
+			e.refuse(pos, "rest elements in destructuring are not lowerable")
+			return
+		}
+		nm := be.Name()
+		if nm == nil {
+			idx++
+			continue
+		}
+		v := e.lowerCheckedIndex(arr, fmt.Sprintf("%d", idx), false)
+		e.bindPatternName(nm, v, arr, idx, pos)
+		if e.refused {
+			return
+		}
+		idx++
+	}
+}
+
+// destructureObject binds {x, y: z} from a struct handle via static layout
+// offsets (mirrors interface field loads).
+func (e *emitter) destructureObject(pat *ast.Node, obj string, pos *ast.Node) {
+	l := e.layoutOfVar(obj)
+	for _, el := range pat.AsBindingPattern().Elements.Nodes {
+		if el.Kind != ast.KindBindingElement {
+			continue
+		}
+		be := el.AsBindingElement()
+		field := ""
+		if be.PropertyName != nil {
+			pn := be.PropertyName.AsNode()
+			switch pn.Kind {
+			case ast.KindIdentifier:
+				field = pn.Text()
+			case ast.KindStringLiteral:
+				field = pn.Text()
+			default:
+				e.refuse(pos, "computed destructuring keys are not lowerable")
+				return
+			}
+		}
+		nm := be.Name()
+		if nm == nil {
+			continue
+		}
+		if field == "" && nm.Kind == ast.KindIdentifier {
+			field = nm.Text()
+		}
+		if l == nil {
+			e.refuse(pos, "object destructuring needs a recorded struct layout for %s", obj)
+			return
+		}
+		off, ok := l.offsets[field]
+		if !ok {
+			e.refuse(pos, "field %s is not in the %s layout", field, l.name)
+			return
+		}
+		saname := l.types[field]
+		v := e.freshTmp()
+		e.emit("%s = load %s + %d as %s", v, obj, off, saname)
+		e.bindPatternName(nm, v, obj, -1, pos)
+		if e.refused {
+			return
+		}
+	}
+}
+
+// bindPatternName binds one destructured name: identifiers snapshot,
+// nested patterns recurse.
+func (e *emitter) bindPatternName(nm *ast.Node, v, src string, idx int, pos *ast.Node) {
+	_ = src
+	_ = idx
+	if nm.Kind == ast.KindIdentifier {
+		kind := "named"
+		if isTempName(v) {
+			kind = "temp"
+		}
+		e.assign(nm.Text(), v, kind, tI32, pos)
+		e.trackBinding(nm.Text(), nil, nil, tI32)
+		return
+	}
+	if nm.Kind == ast.KindArrayBindingPattern {
+		e.destructureArray(nm, v, pos)
+		return
+	}
+	if nm.Kind == ast.KindObjectBindingPattern {
+		e.destructureObject(nm, v, pos)
+		return
+	}
+	e.refuse(pos, "nested destructuring shape is not lowerable")
+}
+
+// lowerSortWithCmp sorts via insertion sort driven by an inline comparator:
+// cmp(a, b) > 0 shifts a right (reference order semantics).
+func (e *emitter) lowerSortWithCmp(recv, elem string, esz int, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	var cb *ast.Node
+	if argNodes != nil {
+		for _, a := range argNodes.Nodes {
+			if a.Kind == ast.KindArrowFunction || a.Kind == ast.KindFunctionExpression {
+				cb = a
+				break
+			}
+		}
+	}
+	if cb == nil {
+		e.refuse(pos, "sort with a comparator needs an inline arrow")
+		return "0", tUnknown, true
+	}
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, recv)
+	loadAt := func(idx string) string {
+		off := e.freshTmp()
+		e.emit("%s = mul %s, %d", off, idx, esz)
+		addr := e.freshTmp()
+		e.emit("%s = add %s, %s", addr, data, off)
+		v := e.freshTmp()
+		e.emit("%s = load %s + 0 as %s", v, addr, elem)
+		return v
+	}
+	storeAt := func(idx, v string) {
+		off := e.freshTmp()
+		e.emit("%s = mul %s, %d", off, idx, esz)
+		addr := e.freshTmp()
+		e.emit("%s = add %s, %s", addr, data, off)
+		e.emit("store %s + 0, %s as %s", addr, v, elem)
+	}
+	// cmpGt(x, y) lowers the comparator body with x/y bound, testing > 0.
+	cmpGt := func(x, y string) string {
+		v, _ := e.callbackValue(cb, []string{x, y}, true, pos)
+		c := e.freshTmp()
+		e.emit("%s = sgt %s, 0", c, v)
+		return c
+	}
+	topL := e.freshLabel("cs_top")
+	bodyL := e.freshLabel("cs_body")
+	endL := e.freshLabel("cs_end")
+	i := e.freshTmp()
+	e.emit("%s = 1", i)
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, ln)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	key := loadAt(i)
+	j := e.freshTmp()
+	e.emit("%s = sub %s, 1", j, i)
+	inTop := e.freshLabel("cs_in_top")
+	inChk := e.freshLabel("cs_in_chk")
+	inBody := e.freshLabel("cs_in_body")
+	inEnd := e.freshLabel("cs_in_end")
+	e.emitRaw("%s:", inTop)
+	c1 := e.freshTmp()
+	e.emit("%s = sge %s, 0", c1, j)
+	e.emit("br %s -> %s, %s", c1, inChk, inEnd)
+	e.emitRaw("%s:", inChk)
+	aj := loadAt(j)
+	gt := cmpGt(aj, key)
+	e.emit("br %s -> %s, %s", gt, inBody, inEnd)
+	e.emitRaw("%s:", inBody)
+	j1 := e.freshTmp()
+	e.emit("%s = add %s, 1", j1, j)
+	storeAt(j1, aj)
+	jm := e.freshTmp()
+	e.emit("%s = sub %s, 1", jm, j)
+	e.emit("%s = %s", j, jm)
+	e.emit("jmp %s", inTop)
+	e.emitRaw("%s:", inEnd)
+	k1 := e.freshTmp()
+	e.emit("%s = add %s, 1", k1, j)
+	storeAt(k1, key)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	return recv, tArray, true
+}
 // lowerMathCall dispatches Math.* per the projection table: @inline shapes,
 // @const folds (property position only; calling a const refuses), unknown
 // methods refuse (trig etc. are MathNotSupported in the reference).
@@ -1828,7 +3137,7 @@ func (e *emitter) expandSlice(h string) (string, string) {
 // lowerArrayMethod mirrors the sa_plugin_ts array idioms: grow-copy push,
 // pop (last + shrink), shift (drop 0 + slide), unshift (push-then-rotate),
 // fill (per-element stores) and no-arg numeric insertion sort.
-func (e *emitter) lowerArrayMethod(recv, method string, args []string, pos *ast.Node) (string, saType, bool) {
+func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	elem := e.arrElems[recv]
 	if elem == "" {
 		elem = "i32"
@@ -1966,6 +3275,9 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, pos *ast.
 		return recv, tArray, true
 	case "sort":
 		if len(args) != 0 {
+			if len(args) == 1 && args[0] == "@callback:" {
+				return e.lowerSortWithCmp(recv, elem, esz, argNodes, pos)
+			}
 			return "", tUnknown, false
 		}
 		if elem != "i32" && elem != "u32" {
@@ -1974,8 +3286,910 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, pos *ast.
 		}
 		e.lowerInsertionSort(recv)
 		return recv, tArray, true
+	case "indexOf":
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		from := "0"
+		if len(args) > 1 {
+			from = args[1]
+		}
+		return e.lowerArrayScan(recv, elem, esz, args[0], from, false, true, pos)
+	case "lastIndexOf":
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		from := ""
+		if len(args) > 1 {
+			from = args[1]
+		}
+		return e.lowerArrayScan(recv, elem, esz, args[0], from, true, true, pos)
+	case "includes":
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		return e.lowerArrayScan(recv, elem, esz, args[0], "0", false, false, pos)
+	case "reverse":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		e.lowerArrayReverse(recv, elem, esz)
+		return recv, tArray, true
+	case "slice":
+		start := "0"
+		end := ""
+		if len(args) > 0 {
+			start = args[0]
+		}
+		if len(args) > 1 {
+			end = args[1]
+		}
+		return e.lowerArraySlice(recv, elem, esz, start, end, pos), tArray, true
+	case "at":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		return e.lowerArrayAt(recv, args[0], pos)
+	case "join":
+		sep := ""
+		if len(args) > 0 {
+			sep = args[0]
+		}
+		return e.lowerArrayJoin(recv, elem, sep, pos), tString, true
+	case "copyWithin":
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		start, end := "0", ""
+		if len(args) > 1 {
+			start = args[1]
+		}
+		if len(args) > 2 {
+			end = args[2]
+		}
+		e.lowerCopyWithin(recv, elem, esz, args[0], start, end)
+		return recv, tArray, true
+	case "toReversed":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		return e.lowerToReversed(recv, elem, esz), tArray, true
+	case "toSorted":
+		if len(args) == 0 {
+			if elem != "i32" && elem != "u32" {
+				e.refuse(pos, "Array.toSorted without a comparator only lowers for numeric arrays")
+				return "0", tUnknown, false
+			}
+			cp := e.lowerArraySlice(recv, elem, esz, "0", "", pos)
+			e.lowerInsertionSort(cp)
+			return cp, tArray, true
+		}
+		if len(args) == 1 && args[0] == "@callback:" {
+			cp := e.lowerArraySlice(recv, elem, esz, "0", "", pos)
+			return e.lowerSortWithCmp(cp, elem, esz, argNodes, pos)
+		}
+		return "", tUnknown, false
+	case "with":
+		if len(args) != 2 {
+			return "", tUnknown, false
+		}
+		return e.lowerArrayWith(recv, elem, esz, args[0], args[1], pos), tArray, true
+	case "toSpliced":
+		return e.lowerToSpliced(recv, elem, esz, args, pos), tArray, true
+	case "concat":
+		return e.lowerArrayConcat(recv, elem, esz, args, types, pos), tArray, true
+	}
+	// Array.from shape (static call: recv is the Array constructor).
+	if recv == "Array" && method == "from" {
+		return e.lowerArrayFrom(args, argNodes, pos)
 	}
 	return "", tUnknown, false
+}
+
+// arrayClampLen normalizes an index against len: negatives count from the
+// end, results clamp to [0, len] (reference clampToLen shape).
+func (e *emitter) arrayClampLen(v, ln string) string {
+	adj := e.freshTmp()
+	out := e.freshTmp()
+	nL := e.freshLabel("cx_neg")
+	nN := e.freshLabel("cx_nneg")
+	nE := e.freshLabel("cx_end")
+	neg := e.freshTmp()
+	e.emit("%s = slt %s, 0", neg, v)
+	e.emit("br %s -> %s, %s", neg, nL, nN)
+	e.emitRaw("%s:", nL)
+	e.emit("%s = add %s, %s", adj, ln, v)
+	e.emit("jmp %s", nE)
+	e.emitRaw("%s:", nN)
+	e.emit("%s = add %s, 0", adj, v)
+	e.emit("jmp %s", nE)
+	e.emitRaw("%s:", nE)
+	lo := e.freshTmp()
+	loT := e.freshLabel("cx_lot")
+	loF := e.freshLabel("cx_lof")
+	loE := e.freshLabel("cx_loe")
+	e.emit("%s = slt %s, 0", lo, adj)
+	e.emit("br %s -> %s, %s", lo, loT, loF)
+	e.emitRaw("%s:", loT)
+	e.emit("%s = 0", out)
+	e.emit("jmp %s", loE)
+	e.emitRaw("%s:", loF)
+	hi := e.freshTmp()
+	hiT := e.freshLabel("cx_hit")
+	hiF := e.freshLabel("cx_hif")
+	e.emit("%s = sgt %s, %s", hi, adj, ln)
+	e.emit("br %s -> %s, %s", hi, hiT, hiF)
+	e.emitRaw("%s:", hiT)
+	e.emit("%s = add %s, 0", out, ln)
+	e.emit("jmp %s", loE)
+	e.emitRaw("%s:", hiF)
+	e.emit("%s = add %s, 0", out, adj)
+	e.emit("jmp %s", loE)
+	e.emitRaw("%s:", loE)
+	return out
+}
+
+// lowerArrayScan emits equality scans: index forms return the position or
+// -1, includes forms return 1/0 (reference equality-scan shape).
+func (e *emitter) lowerArrayScan(recv, elem string, esz int, want, from string, reverse, wantIndex bool, pos *ast.Node) (string, saType, bool) {
+	_ = pos
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, recv)
+	start := e.freshTmp()
+	if reverse && from == "" {
+		e.emit("%s = sub %s, 1", start, ln)
+	} else if from == "" {
+		e.emit("%s = 0", start)
+	} else {
+		e.emit("%s = add %s, 0", start, e.arrayClampLen(from, ln))
+	}
+	res := e.freshTmp()
+	if wantIndex {
+		e.emit("%s = -1", res)
+	} else {
+		e.emit("%s = 0", res)
+	}
+	i := e.freshTmp()
+	e.emit("%s = add %s, 0", i, start)
+	topL := e.freshLabel("sc_top")
+	bodyL := e.freshLabel("sc_body")
+	nextL := e.freshLabel("sc_next")
+	endL := e.freshLabel("sc_end")
+	hitL := e.freshLabel("sc_hit")
+	if !reverse {
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = slt %s, %s", c, i, ln)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+	} else {
+		e.emitRaw("%s:", topL)
+		c := e.freshTmp()
+		e.emit("%s = sge %s, 0", c, i)
+		e.emit("br %s -> %s, %s", c, bodyL, endL)
+	}
+	e.emitRaw("%s:", bodyL)
+	off := e.freshTmp()
+	e.emit("%s = mul %s, %d", off, i, esz)
+	addr := e.freshTmp()
+	e.emit("%s = add %s, %s", addr, data, off)
+	cur := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", cur, addr, elem)
+	eq := e.freshTmp()
+	e.emit("%s = eq %s, %s", eq, cur, want)
+	e.emit("br %s -> %s, %s", eq, hitL, nextL)
+	e.emitRaw("%s:", hitL)
+	if wantIndex {
+		e.emit("%s = add %s, 0", res, i)
+	} else {
+		e.emit("%s = 1", res)
+	}
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", nextL)
+	step := e.freshTmp()
+	if !reverse {
+		e.emit("%s = add %s, 1", step, i)
+	} else {
+		e.emit("%s = sub %s, 1", step, i)
+	}
+	e.emit("%s = %s", i, step)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	if wantIndex {
+		return res, tI32, true
+	}
+	return res, tBool, true
+}
+
+// lowerArrayReverse swaps in place (reference shape), returning the array.
+func (e *emitter) lowerArrayReverse(recv, elem string, esz int) {
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, recv)
+	half := e.freshTmp()
+	e.emit("%s = div %s, 2", half, ln)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	topL := e.freshLabel("rv_top")
+	bodyL := e.freshLabel("rv_body")
+	endL := e.freshLabel("rv_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, half)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	j := e.freshTmp()
+	e.emit("%s = sub %s, 1", j, ln)
+	j2 := e.freshTmp()
+	e.emit("%s = sub %s, %s", j2, j, i)
+	ao := e.freshTmp()
+	e.emit("%s = mul %s, %d", ao, i, esz)
+	aa := e.freshTmp()
+	e.emit("%s = add %s, %s", aa, data, ao)
+	bo := e.freshTmp()
+	e.emit("%s = mul %s, %d", bo, j2, esz)
+	ba := e.freshTmp()
+	e.emit("%s = add %s, %s", ba, data, bo)
+	a := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", a, aa, elem)
+	b := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", b, ba, elem)
+	e.emit("store %s + 0, %s as %s", aa, b, elem)
+	e.emit("store %s + 0, %s as %s", ba, a, elem)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+}
+
+// lowerArraySlice copies [start, end) into a fresh array (clamped).
+func (e *emitter) lowerArraySlice(recv, elem string, esz int, start, end string, pos *ast.Node) string {
+	_ = pos
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	sdata := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", sdata, recv)
+	s := e.arrayClampLen(start, ln)
+	f := ln
+	if end != "" {
+		f = e.arrayClampLen(end, ln)
+	}
+	n := e.freshTmp()
+	e.emit("%s = sub %s, %s", n, f, s)
+	// Empty/negative ranges yield an empty array (no branch: zero alloc).
+	neg := e.freshTmp()
+	zL := e.freshLabel("sl_z")
+	nzL := e.freshLabel("sl_nz")
+	doneL := e.freshLabel("sl_done")
+	e.emit("%s = sle %s, 0", neg, n)
+	e.emit("br %s -> %s, %s", neg, zL, nzL)
+	e.emitRaw("%s:", zL)
+	zh := e.freshTmp()
+	e.emit("%s = alloc 16", zh)
+	e.emit("store %s + 0, 0 as ptr", zh)
+	e.emit("store %s + 8, 0 as u64", zh)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", nzL)
+	nby := e.freshTmp()
+	e.emit("%s = mul %s, %d", nby, n, esz)
+	ddata := e.freshTmp()
+	e.emit("%s = alloc %s", ddata, nby)
+	dh := e.freshTmp()
+	e.emit("%s = alloc 16", dh)
+	e.emit("store %s + 0, %s as ptr", dh, ddata)
+	e.emit("store %s + 8, %s as u64", dh, n)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	topL := e.freshLabel("sl_top")
+	bodyL := e.freshLabel("sl_body")
+	cendL := e.freshLabel("sl_cend")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, n)
+	e.emit("br %s -> %s, %s", c, bodyL, cendL)
+	e.emitRaw("%s:", bodyL)
+	si := e.freshTmp()
+	e.emit("%s = add %s, %s", si, s, i)
+	so := e.freshTmp()
+	e.emit("%s = mul %s, %d", so, si, esz)
+	sa := e.freshTmp()
+	e.emit("%s = add %s, %s", sa, sdata, so)
+	cv := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", cv, sa, elem)
+	do := e.freshTmp()
+	e.emit("%s = mul %s, %d", do, i, esz)
+	da := e.freshTmp()
+	e.emit("%s = add %s, %s", da, ddata, do)
+	e.emit("store %s + 0, %s as %s", da, cv, elem)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", cendL)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", doneL)
+	// Join the empty/non-empty arms via checked selection: reload by
+	// length (empty arm has len 0). Both arms wrote distinct headers;
+	// select on n<=0 guard recomputed.
+	out := e.freshTmp()
+	e.emit("%s = add %s, 0", out, dh)
+	isZ := e.freshTmp()
+	e.emit("%s = sle %s, 0", isZ, n)
+	fixL := e.freshLabel("sl_fix")
+	keepL := e.freshLabel("sl_keep")
+	finL := e.freshLabel("sl_fin")
+	e.emit("br %s -> %s, %s", isZ, fixL, keepL)
+	e.emitRaw("%s:", fixL)
+	e.emit("%s = %s", out, zh)
+	e.emit("jmp %s", finL)
+	e.emitRaw("%s:", keepL)
+	e.emit("jmp %s", finL)
+	e.emitRaw("%s:", finL)
+	e.declareOwned(out)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrVars[out] = true
+	e.arrElems[out] = elem
+	return out
+}
+
+// lowerArrayAt normalizes negative indices, then uses the checked-index
+// join (OOB yields 0, matching the subset rule).
+func (e *emitter) lowerArrayAt(recv, idx string, pos *ast.Node) (string, saType, bool) {
+	_ = pos
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	sel := e.freshTmp()
+	e.emit("%s = add %s, 0", sel, idx)
+	isneg := e.freshTmp()
+	e.emit("%s = slt %s, 0", isneg, idx)
+	fixL := e.freshLabel("aat_fix")
+	keepL := e.freshLabel("aat_keep")
+	doneL := e.freshLabel("aat_done")
+	e.emit("br %s -> %s, %s", isneg, fixL, keepL)
+	e.emitRaw("%s:", fixL)
+	fv := e.freshTmp()
+	e.emit("%s = add %s, %s", fv, ln, idx)
+	e.emit("%s = %s", sel, fv)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", keepL)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", doneL)
+	return e.lowerCheckedIndex(recv, sel, false), tI32, true
+}
+
+// lowerArrayJoin folds elements with the separator via string concat
+// (elements render through the shared sa_fmt path; string elements pass).
+func (e *emitter) lowerArrayJoin(recv, elem, sep string, pos *ast.Node) string {
+	_ = pos
+	e.needImport("sa_std/string.sai")
+	e.needImport("sa_std/fmt.sai")
+	sepslice := e.lowerStringLiteral(",")
+	if sep != "" {
+		sepslice = sep
+	}
+	acc := e.lowerStringLiteral("")
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, recv)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	topL := e.freshLabel("jn_top")
+	bodyL := e.freshLabel("jn_body")
+	endL := e.freshLabel("jn_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, ln)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	// Separator before every element except the first.
+	first := e.freshTmp()
+	fl := e.freshLabel("jn_fl")
+	fe := e.freshLabel("jn_fe")
+	e.emit("%s = ne %s, 0", first, i)
+	e.emit("br %s -> %s, %s", first, fl, fe)
+	e.emitRaw("%s:", fl)
+	acc = e.concatSlices(acc, sepslice)
+	e.emit("jmp %s", fe)
+	e.emitRaw("%s:", fe)
+	off := e.freshTmp()
+	e.emit("%s = mul %s, 4", off, i)
+	addr := e.freshTmp()
+	e.emit("%s = add %s, %s", addr, data, off)
+	raw := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", raw, addr, elem)
+	part := raw
+	if elem != "ptr" {
+		var ok bool
+		part, ok = e.renderInterpValue(raw, tI32, pos)
+		if !ok {
+			return acc
+		}
+	}
+	acc = e.concatSlices(acc, part)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	return acc
+}
+
+// lowerCopyWithin ports the reference algorithm: clamp, count =
+// min(end-start, len-target), no-op when non-positive, overlap-safe
+// direction (forward when target < start, else backward).
+func (e *emitter) lowerCopyWithin(recv, elem string, esz int, target, start, end string) {
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, recv)
+	t := e.arrayClampLen(target, ln)
+	s := e.arrayClampLen(start, ln)
+	f := ln
+	if end != "" {
+		f = e.arrayClampLen(end, ln)
+	}
+	span := e.freshTmp()
+	e.emit("%s = sub %s, %s", span, f, s)
+	room := e.freshTmp()
+	e.emit("%s = sub %s, %s", room, ln, t)
+	count := e.freshTmp()
+	pick := e.freshTmp()
+	minS := e.freshLabel("cw_minspan")
+	minR := e.freshLabel("cw_minroom")
+	cntL := e.freshLabel("cw_cnt")
+	e.emit("%s = slt %s, %s", pick, span, room)
+	e.emit("br %s -> %s, %s", pick, minS, minR)
+	e.emitRaw("%s:", minS)
+	e.emit("%s = add %s, 0", count, span)
+	e.emit("jmp %s", cntL)
+	e.emitRaw("%s:", minR)
+	e.emit("%s = add %s, 0", count, room)
+	e.emit("jmp %s", cntL)
+	e.emitRaw("%s:", cntL)
+	goT := e.freshTmp()
+	runL := e.freshLabel("cw_run")
+	skipL := e.freshLabel("cw_skip")
+	e.emit("%s = sgt %s, 0", goT, count)
+	e.emit("br %s -> %s, %s", goT, runL, skipL)
+	e.emitRaw("%s:", runL)
+	fwd := e.freshTmp()
+	fInit := e.freshLabel("cw_finit")
+	bTop := e.freshLabel("cw_btop")
+	e.emit("%s = slt %s, %s", fwd, t, s)
+	e.emit("br %s -> %s, %s", fwd, fInit, bTop)
+	// Forward loop.
+	e.emitRaw("%s:", fInit)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	fTop := e.freshLabel("cw_ftop")
+	fBody := e.freshLabel("cw_fbody")
+	fEnd := e.freshLabel("cw_fend")
+	e.emit("jmp %s", fTop)
+	e.emitRaw("%s:", fTop)
+	fc := e.freshTmp()
+	e.emit("%s = slt %s, %s", fc, i, count)
+	e.emit("br %s -> %s, %s", fc, fBody, fEnd)
+	e.emitRaw("%s:", fBody)
+	e.lowerCopyWithinStep(data, esz, elem, t, s, i)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", fTop)
+	e.emitRaw("%s:", fEnd)
+	e.emit("jmp %s", skipL)
+	// Backward loop.
+	e.emitRaw("%s:", bTop)
+	j := e.freshTmp()
+	e.emit("%s = sub %s, 1", j, count)
+	bCond := e.freshLabel("cw_bcond")
+	bBody := e.freshLabel("cw_bbody")
+	bEnd := e.freshLabel("cw_bend")
+	e.emit("jmp %s", bCond)
+	e.emitRaw("%s:", bCond)
+	bc := e.freshTmp()
+	e.emit("%s = sge %s, 0", bc, j)
+	e.emit("br %s -> %s, %s", bc, bBody, bEnd)
+	e.emitRaw("%s:", bBody)
+	e.lowerCopyWithinStep(data, esz, elem, t, s, j)
+	jnext := e.freshTmp()
+	e.emit("%s = sub %s, 1", jnext, j)
+	e.emit("%s = %s", j, jnext)
+	e.emit("jmp %s", bCond)
+	e.emitRaw("%s:", bEnd)
+	e.emit("jmp %s", skipL)
+	e.emitRaw("%s:", skipL)
+}
+
+// lowerCopyWithinStep copies src[s+k] to dst[t+k] for one offset k.
+func (e *emitter) lowerCopyWithinStep(data string, esz int, elem, t, s, k string) {
+	si := e.freshTmp()
+	e.emit("%s = add %s, %s", si, s, k)
+	so := e.freshTmp()
+	e.emit("%s = mul %s, %d", so, si, esz)
+	sa := e.freshTmp()
+	e.emit("%s = add %s, %s", sa, data, so)
+	cur := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", cur, sa, elem)
+	di := e.freshTmp()
+	e.emit("%s = add %s, %s", di, t, k)
+	dof := e.freshTmp()
+	e.emit("%s = mul %s, %d", dof, di, esz)
+	da := e.freshTmp()
+	e.emit("%s = add %s, %s", da, data, dof)
+	e.emit("store %s + 0, %s as %s", da, cur, elem)
+}
+
+// lowerToReversed copies reversed into a fresh array.
+func (e *emitter) lowerToReversed(recv, elem string, esz int) string {
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	sdata := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", sdata, recv)
+	nby := e.freshTmp()
+	e.emit("%s = mul %s, %d", nby, ln, esz)
+	ddata := e.freshTmp()
+	zL := e.freshLabel("rv_z")
+	nzL := e.freshLabel("rv_nz")
+	isz := e.freshTmp()
+	e.emit("%s = eq %s, 0", isz, nby)
+	e.emit("br %s -> %s, %s", isz, zL, nzL)
+	e.emitRaw("%s:", zL)
+	e.emit("%s = alloc 4", ddata)
+	e.emit("jmp %s", nzL)
+	e.emitRaw("%s:", nzL)
+	dd := e.freshTmp()
+	e.emit("%s = add %s, 0", dd, nby)
+	dd2 := e.freshTmp()
+	e.emit("%s = alloc %s", dd2, dd)
+	e.emit("%s = %s", ddata, dd2)
+	dest := e.freshTmp()
+	e.emit("%s = alloc 16", dest)
+	e.emit("store %s + 0, %s as ptr", dest, ddata)
+	e.emit("store %s + 8, %s as u64", dest, ln)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	topL := e.freshLabel("tr_top")
+	bodyL := e.freshLabel("tr_body")
+	endL := e.freshLabel("tr_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, ln)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	si := e.freshTmp()
+	e.emit("%s = sub %s, 1", si, ln)
+	si2 := e.freshTmp()
+	e.emit("%s = sub %s, %s", si2, si, i)
+	so := e.freshTmp()
+	e.emit("%s = mul %s, %d", so, si2, esz)
+	sa := e.freshTmp()
+	e.emit("%s = add %s, %s", sa, sdata, so)
+	cv := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", cv, sa, elem)
+	dof := e.freshTmp()
+	e.emit("%s = mul %s, %d", dof, i, esz)
+	da := e.freshTmp()
+	e.emit("%s = add %s, %s", da, ddata, dof)
+	e.emit("store %s + 0, %s as %s", da, cv, elem)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	e.declareOwned(dest)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrVars[dest] = true
+	e.arrElems[dest] = elem
+	return dest
+}
+
+// lowerArrayWith copies, replacing index i (negative counts from end;
+// out-of-range refuses loudly like a RangeError).
+func (e *emitter) lowerArrayWith(recv, elem string, esz int, idx, val string, pos *ast.Node) string {
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	norm := e.freshTmp()
+	e.emit("%s = add %s, 0", norm, idx)
+	isneg := e.freshTmp()
+	e.emit("%s = slt %s, 0", isneg, idx)
+	fixL := e.freshLabel("w_fix")
+	keepL := e.freshLabel("w_keep")
+	doneL := e.freshLabel("w_done")
+	e.emit("br %s -> %s, %s", isneg, fixL, keepL)
+	e.emitRaw("%s:", fixL)
+	fv := e.freshTmp()
+	e.emit("%s = add %s, %s", fv, ln, idx)
+	e.emit("%s = %s", norm, fv)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", keepL)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", doneL)
+	// One copy up front; the store runs only when 0 <= norm < len
+	// (RangeError has no SA-ASM edge, so out-of-range passes the copy
+	// through unchanged).
+	cp := e.lowerArraySlice(recv, elem, esz, "0", "", pos)
+	lo := e.freshTmp()
+	hi := e.freshTmp()
+	e.emit("%s = slt %s, 0", lo, norm)
+	e.emit("%s = sge %s, %s", hi, norm, ln)
+	bad := e.freshTmp()
+	e.emit("%s = or %s, %s", bad, lo, hi)
+	badL := e.freshLabel("w_bad")
+	okL := e.freshLabel("w_ok")
+	finL := e.freshLabel("w_fin")
+	e.emit("br %s -> %s, %s", bad, badL, okL)
+	e.emitRaw("%s:", badL)
+	e.emit("jmp %s", finL)
+	e.emitRaw("%s:", okL)
+	cdata := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", cdata, cp)
+	off := e.freshTmp()
+	e.emit("%s = mul %s, %d", off, norm, esz)
+	addr := e.freshTmp()
+	e.emit("%s = add %s, %s", addr, cdata, off)
+	e.emit("store %s + 0, %s as %s", addr, val, elem)
+	e.emit("jmp %s", finL)
+	e.emitRaw("%s:", finL)
+	return cp
+}
+
+// lowerToSpliced returns a fresh array with [start, start+delete) removed
+// and items inserted (JS semantics with clamped bounds).
+func (e *emitter) lowerToSpliced(recv, elem string, esz int, args []string, pos *ast.Node) string {
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, recv)
+	sdata := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", sdata, recv)
+	start := "0"
+	del := ln
+	items := []string{}
+	if len(args) > 0 {
+		start = args[0]
+	}
+	if len(args) > 1 {
+		del = args[1]
+	}
+	if len(args) > 2 {
+		items = args[2:]
+		for _, it := range items {
+			if strings.HasPrefix(it, "@spread:") || strings.HasPrefix(it, "@callback:") {
+				e.refuse(pos, "toSpliced items must be plain values")
+				return recv
+			}
+		}
+	}
+	s := e.arrayClampLen(start, ln)
+	// Clamp delete count to [0, len - s].
+	maxdel := e.freshTmp()
+	e.emit("%s = sub %s, %s", maxdel, ln, s)
+	d := e.freshTmp()
+	e.emit("%s = add %s, 0", d, del)
+	neg := e.freshTmp()
+	negL := e.freshLabel("ts_neg")
+	negE := e.freshLabel("ts_nege")
+	e.emit("%s = slt %s, 0", neg, d)
+	e.emit("br %s -> %s, %s", neg, negL, negE)
+	e.emitRaw("%s:", negL)
+	e.emit("%s = 0", d)
+	e.emit("jmp %s", negE)
+	e.emitRaw("%s:", negE)
+	over := e.freshTmp()
+	overL := e.freshLabel("ts_over")
+	overE := e.freshLabel("ts_overe")
+	e.emit("%s = sgt %s, %s", over, d, maxdel)
+	e.emit("br %s -> %s, %s", over, overL, overE)
+	e.emitRaw("%s:", overL)
+	nd := e.freshTmp()
+	e.emit("%s = add %s, 0", nd, maxdel)
+	e.emit("%s = %s", d, nd)
+	e.emit("jmp %s", overE)
+	e.emitRaw("%s:", overE)
+	// newlen = len - d + nitems; copy head, items, tail.
+	ni := fmt.Sprintf("%d", len(items))
+	kept := e.freshTmp()
+	e.emit("%s = sub %s, %s", kept, ln, d)
+	nlen := e.freshTmp()
+	e.emit("%s = add %s, %s", nlen, kept, ni)
+	return e.spliceCopy(recv, elem, esz, sdata, ln, s, d, items, nlen)
+}
+
+// spliceCopy builds the toSpliced result: head [0,s), items, tail [s+d, len).
+func (e *emitter) spliceCopy(recv, elem string, esz int, sdata, ln, s, d string, items []string, nlen string) string {
+	_ = recv
+	nby := e.freshTmp()
+	e.emit("%s = mul %s, %d", nby, nlen, esz)
+	ddata := e.freshTmp()
+	zL := e.freshLabel("sp_z")
+	nzL := e.freshLabel("sp_nz")
+	isz := e.freshTmp()
+	e.emit("%s = eq %s, 0", isz, nby)
+	e.emit("br %s -> %s, %s", isz, zL, nzL)
+	e.emitRaw("%s:", zL)
+	e.emit("%s = alloc 4", ddata)
+	e.emit("jmp %s", nzL)
+	e.emitRaw("%s:", nzL)
+	dd := e.freshTmp()
+	e.emit("%s = add %s, 0", dd, nby)
+	dd2 := e.freshTmp()
+	e.emit("%s = alloc %s", dd2, dd)
+	e.emit("%s = %s", ddata, dd2)
+	dest := e.freshTmp()
+	e.emit("%s = alloc 16", dest)
+	e.emit("store %s + 0, %s as ptr", dest, ddata)
+	e.emit("store %s + 8, %s as u64", dest, nlen)
+	// Head [0, s).
+	e.copyRange(sdata, ddata, esz, elem, "0", s, "0")
+	// Items at s.
+	for k, it := range items {
+		di := e.freshTmp()
+		e.emit("%s = add %s, %d", di, s, k)
+		dof := e.freshTmp()
+		e.emit("%s = mul %s, %d", dof, di, esz)
+		da := e.freshTmp()
+		e.emit("%s = add %s, %s", da, ddata, dof)
+		e.emit("store %s + 0, %s as %s", da, it, elem)
+	}
+	// Tail [s+d, len) at s+nitems.
+	ni := fmt.Sprintf("%d", len(items))
+	tailStart := e.freshTmp()
+	e.emit("%s = add %s, %s", tailStart, s, d)
+	dstOff := e.freshTmp()
+	e.emit("%s = add %s, %s", dstOff, s, ni)
+	e.copyRange(sdata, ddata, esz, elem, tailStart, ln, dstOff)
+	e.declareOwned(dest)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrVars[dest] = true
+	e.arrElems[dest] = elem
+	_ = ln
+	return dest
+}
+
+// copyRange copies src[s0, s1) to dst[d0, d0 + (s1-s0)).
+func (e *emitter) copyRange(sdata, ddata string, esz int, elem, s0, s1, d0 string) {
+	i := e.freshTmp()
+	e.emit("%s = add %s, 0", i, s0)
+	topL := e.freshLabel("cr_top")
+	bodyL := e.freshLabel("cr_body")
+	endL := e.freshLabel("cr_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, s1)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	rel := e.freshTmp()
+	e.emit("%s = sub %s, %s", rel, i, s0)
+	so := e.freshTmp()
+	e.emit("%s = mul %s, %d", so, i, esz)
+	sa := e.freshTmp()
+	e.emit("%s = add %s, %s", sa, sdata, so)
+	cv := e.freshTmp()
+	e.emit("%s = load %s + 0 as %s", cv, sa, elem)
+	di := e.freshTmp()
+	e.emit("%s = add %s, %s", di, d0, rel)
+	dof := e.freshTmp()
+	e.emit("%s = mul %s, %d", dof, di, esz)
+	da := e.freshTmp()
+	e.emit("%s = add %s, %s", da, ddata, dof)
+	e.emit("store %s + 0, %s as %s", da, cv, elem)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+}
+
+// lowerArrayConcat returns a fresh array joining the receiver with each
+// argument (arrays append element-wise, scalars push).
+func (e *emitter) lowerArrayConcat(recv, elem string, esz int, args []string, types []saType, pos *ast.Node) string {
+	_ = pos
+	h := e.newEmptyArray()
+	e.appendSlice(h, recv)
+	for i, a := range args {
+		isArr := false
+		if i < len(types) && types[i] == tArray {
+			isArr = true
+		}
+		if e.arrVars[a] {
+			isArr = true
+		}
+		if strings.HasPrefix(a, "@spread:") {
+			e.appendSlice(h, strings.TrimPrefix(a, "@spread:"))
+			continue
+		}
+		if strings.HasPrefix(a, "@callback:") {
+			e.refuse(pos, "callbacks are not concat values")
+			continue
+		}
+		if isArr {
+			e.appendSlice(h, a)
+			continue
+		}
+		e.lowerArrayPush(h, a, "i32", 4)
+	}
+	_ = elem
+	_ = esz
+	return h
+}
+
+// lowerArrayFrom lowers Array.from: object literals with length allocate
+// zero arrays; slices clone (mappers route to the higher-order path).
+func (e *emitter) lowerArrayFrom(args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	if len(args) < 1 {
+		return "", tUnknown, false
+	}
+	if len(args) > 1 && args[1] == "@callback:" {
+		e.refuse(pos, "Array.from with a mapper needs callback inlining (Phase 2)")
+		return "0", tUnknown, true
+	}
+	if argNodes != nil && len(argNodes.Nodes) > 0 {
+		if argNodes.Nodes[0].Kind == ast.KindObjectLiteralExpression {
+			n := e.freshTmp()
+			e.emit("%s = 0", n)
+			for _, p := range argNodes.Nodes[0].AsObjectLiteralExpression().Properties.Nodes {
+				if p.Kind == ast.KindPropertyAssignment {
+					pa := p.AsPropertyAssignment()
+					if pa.Name().Kind == ast.KindIdentifier && pa.Name().Text() == "length" {
+						v, _ := e.lowerExpr(pa.Initializer)
+						e.emit("%s = %s", n, v)
+					}
+				}
+			}
+			h := e.freshTmp()
+			e.emit("%s = alloc 16", h)
+			nby := e.freshTmp()
+			e.emit("%s = mul %s, 4", nby, n)
+			buf := e.freshTmp()
+			zL := e.freshLabel("af_z")
+			nzL := e.freshLabel("af_nz")
+			isz := e.freshTmp()
+			e.emit("%s = eq %s, 0", isz, nby)
+			e.emit("br %s -> %s, %s", isz, zL, nzL)
+			e.emitRaw("%s:", zL)
+			e.emit("%s = alloc 4", buf)
+			e.emit("jmp %s", nzL)
+			e.emitRaw("%s:", nzL)
+			b2 := e.freshTmp()
+			e.emit("%s = add %s, 0", b2, nby)
+			b3 := e.freshTmp()
+			e.emit("%s = alloc %s", b3, b2)
+			e.emit("%s = %s", buf, b3)
+			e.emit("store %s + 0, %s as ptr", h, buf)
+			e.emit("store %s + 8, %s as u64", h, n)
+			e.declareOwned(h)
+			if e.arrVars == nil {
+				e.arrVars = map[string]bool{}
+			}
+			if e.arrElems == nil {
+				e.arrElems = map[string]string{}
+			}
+			e.arrVars[h] = true
+			e.arrElems[h] = "i32"
+			return h, tArray, true
+		}
+	}
+	// Slice input clones element-wise.
+	h := e.newEmptyArray()
+	e.appendSlice(h, args[0])
+	return h, tArray, true
 }
 
 // lowerStringMethod projects string methods onto sa_std/string.sai.
@@ -2068,8 +4282,581 @@ func (e *emitter) lowerStringMethod(recv, method string, args []string, pos *ast
 		}
 		v, t := callStr("sa_string_replace", np, nl, rp, rl, all)
 		return v, t, true
+	case "replaceAll":
+		// Same sci primitive as replace with all=1 (contract carries it).
+		if len(args) != 2 {
+			return "", tUnknown, false
+		}
+		np, nl := e.expandSlice(args[0])
+		rp, rl := e.expandSlice(args[1])
+		v, t := callStr("sa_string_replace", np, nl, rp, rl, "1")
+		return v, t, true
+	case "includes":
+		// Desugars over indexOf: present iff index != -1.
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		np, nl := e.expandSlice(args[0])
+		from := "0"
+		if len(args) > 1 {
+			from = args[1]
+		}
+		idx, _ := call1("sa_string_index_of", np, nl, from)
+		out := e.freshTmp()
+		e.emit("%s = ne %s, -1", out, idx)
+		return out, tBool, true
+	case "charAt":
+		// 1-byte slice at data+index (reference lowerStringCharAt shape).
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		addr := e.freshTmp()
+		e.emit("%s = add %s, %s", addr, bp, args[0])
+		out := e.freshTmp()
+		e.emit("%s = alloc 16", out)
+		e.emit("store %s + 0, %s as ptr", out, addr)
+		e.emit("store %s + 8, 1 as u64", out)
+		e.declareOwned(out)
+		return out, tString, true
+	case "at":
+		// Negative indices count from the end (then same as charAt).
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		// Select via a branch: negative counts from the end.
+		sel := e.freshTmp()
+		e.emit("%s = add %s, 0", sel, args[0])
+		isneg := e.freshTmp()
+		e.emit("%s = slt %s, 0", isneg, args[0])
+		fixL := e.freshLabel("at_fix")
+		keepL := e.freshLabel("at_keep")
+		doneL := e.freshLabel("at_done")
+		e.emit("br %s -> %s, %s", isneg, fixL, keepL)
+		e.emitRaw("%s:", fixL)
+		fv := e.freshTmp()
+		e.emit("%s = add %s, %s", fv, bl, args[0])
+		e.emit("%s = %s", sel, fv)
+		e.emit("jmp %s", doneL)
+		e.emitRaw("%s:", keepL)
+		e.emit("jmp %s", doneL)
+		e.emitRaw("%s:", doneL)
+		addr := e.freshTmp()
+		e.emit("%s = add %s, %s", addr, bp, sel)
+		out := e.freshTmp()
+		e.emit("%s = alloc 16", out)
+		e.emit("store %s + 0, %s as ptr", out, addr)
+		e.emit("store %s + 8, 1 as u64", out)
+		e.declareOwned(out)
+		return out, tString, true
+	case "trim", "trimStart", "trimEnd":
+		// Compose the sci trim primitives (ascii subset).
+		start := e.freshTmp()
+		e.emit("%s = call @sa_str_trim_ascii_start_index(%s, %s)", start, bp, bl)
+		full := e.freshTmp()
+		e.emit("%s = call @sa_str_trim_ascii_end_len(%s, %s)", full, bp, bl)
+		s, l := start, full
+		if method == "trimStart" {
+			rest := e.freshTmp()
+			e.emit("%s = sub %s, %s", rest, bl, start)
+			l = rest
+		} else if method == "trimEnd" {
+			s = "0"
+		} else {
+			rest := e.freshTmp()
+			e.emit("%s = sub %s, %s", rest, full, start)
+			l = rest
+		}
+		nptr := e.freshTmp()
+		if s == "0" {
+			nptr = bp
+		} else {
+			e.emit("%s = add %s, %s", nptr, bp, s)
+		}
+		out := e.freshTmp()
+		e.emit("%s = alloc 16", out)
+		e.emit("store %s + 0, %s as ptr", out, nptr)
+		e.emit("store %s + 8, %s as u64", out, l)
+		e.declareOwned(out)
+		return out, tString, true
+	case "concat":
+		// Fold sa_string_concat pairwise (sci primitive, never simulated).
+		acc := recv
+		for _, a := range args {
+			np, nl := e.expandSlice(a)
+			abp, abl := e.expandSlice(acc)
+			t := e.freshTmp()
+			e.emit("%s = call @sa_string_concat(%s, %s, %s, %s)", t, abp, abl, np, nl)
+			e.declareOwned(t)
+			acc = t
+		}
+		return acc, tString, true
+	case "slice", "substring", "substr":
+		// Clamped sub-slice sharing the data pointer (reference shape).
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		end := bl
+		if len(args) > 1 {
+			end = args[1]
+		}
+		if method == "substr" {
+			// substr(start, length): end = start + length.
+			nend := e.freshTmp()
+			e.emit("%s = add %s, %s", nend, args[0], end)
+			end = nend
+		}
+		s, l := e.clampRange(bp, bl, args[0], end, method == "substring")
+		out := e.freshTmp()
+		e.emit("%s = alloc 16", out)
+		e.emit("store %s + 0, %s as ptr", out, s)
+		e.emit("store %s + 8, %s as u64", out, l)
+		e.declareOwned(out)
+		return out, tString, true
+	case "split":
+		// Scan with indexOf, pushing each part (i32-slot array model).
+		if len(args) < 1 {
+			return "", tUnknown, false
+		}
+		return e.lowerStringSplit(recv, bp, bl, args[0], pos), tArray, true
+	case "toString":
+		return recv, tString, true
+	case "codePointAt":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @sa_string_code_point_at(%s, %s, %s)", t, bp, bl, args[0])
+		return t, tI32, true
 	}
 	return "", tUnknown, false
+}
+
+// clampRange normalizes [start, end) against len: negatives count from the
+// end, values clamp to [0, len]; substring additionally swaps inverted
+// bounds and maps negatives to 0 (JS semantics).
+func (e *emitter) clampRange(bp, bl, start, end string, substring bool) (string, string) {
+	norm := func(v string, isEnd bool) string {
+		neg := e.freshTmp()
+		adj := e.freshTmp()
+		out := e.freshTmp()
+		nL := e.freshLabel("cl_neg")
+		nN := e.freshLabel("cl_nneg")
+		nE := e.freshLabel("cl_end")
+		e.emit("%s = slt %s, 0", neg, v)
+		e.emit("br %s -> %s, %s", neg, nL, nN)
+		e.emitRaw("%s:", nL)
+		if substring {
+			e.emit("%s = 0", adj)
+		} else {
+			e.emit("%s = add %s, %s", adj, bl, v)
+		}
+		e.emit("jmp %s", nE)
+		e.emitRaw("%s:", nN)
+		e.emit("%s = add %s, 0", adj, v)
+		e.emit("jmp %s", nE)
+		e.emitRaw("%s:", nE)
+		// Clamp adj to [0, bl].
+		lo := e.freshTmp()
+		loT := e.freshLabel("cl_lot")
+		loF := e.freshLabel("cl_lof")
+		loE := e.freshLabel("cl_loe")
+		e.emit("%s = slt %s, 0", lo, adj)
+		e.emit("br %s -> %s, %s", lo, loT, loF)
+		e.emitRaw("%s:", loT)
+		e.emit("%s = 0", out)
+		e.emit("jmp %s", loE)
+		e.emitRaw("%s:", loF)
+		hi := e.freshTmp()
+		hiT := e.freshLabel("cl_hit")
+		hiF := e.freshLabel("cl_hif")
+		e.emit("%s = sgt %s, %s", hi, adj, bl)
+		e.emit("br %s -> %s, %s", hi, hiT, hiF)
+		e.emitRaw("%s:", hiT)
+		e.emit("%s = add %s, 0", out, bl)
+		e.emit("jmp %s", loE)
+		e.emitRaw("%s:", hiF)
+		e.emit("%s = add %s, 0", out, adj)
+		e.emit("jmp %s", loE)
+		e.emitRaw("%s:", loE)
+		_ = isEnd
+		return out
+	}
+	s := norm(start, false)
+	f := norm(end, true)
+	if substring {
+		// Swap when s > f.
+		sw := e.freshTmp()
+		c := e.freshTmp()
+		tL := e.freshLabel("cl_swap")
+		kL := e.freshLabel("cl_keep")
+		dL := e.freshLabel("cl_done")
+		e.emit("%s = sgt %s, %s", c, s, f)
+		e.emit("br %s -> %s, %s", c, tL, kL)
+		e.emitRaw("%s:", tL)
+		e.emit("%s = add %s, 0", sw, s)
+		e.emit("%s = %s", s, f)
+		e.emit("%s = %s", f, sw)
+		e.emit("jmp %s", dL)
+		e.emitRaw("%s:", kL)
+		e.emit("jmp %s", dL)
+		e.emitRaw("%s:", dL)
+	}
+	nptr := e.freshTmp()
+	e.emit("%s = add %s, %s", nptr, bp, s)
+	nlen := e.freshTmp()
+	e.emit("%s = sub %s, %s", nlen, f, s)
+	return nptr, nlen
+}
+
+// lowerStringSplit scans with indexOf and pushes each part into a fresh
+// i32-slot array (same element model as array literals).
+func (e *emitter) lowerStringSplit(recv, bp, bl, sepArg string, pos *ast.Node) string {
+	_ = recv
+	_ = pos
+	sp, sl := e.expandSlice(sepArg)
+	h := e.freshTmp()
+	e.emit("%s = alloc 16", h)
+	e.emit("store %s + 0, 0 as ptr", h)
+	e.emit("store %s + 8, 0 as u64", h)
+	e.declareOwned(h)
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrElems[h] = "ptr"
+	start := e.freshTmp()
+	e.emit("%s = 0", start)
+	topL := e.freshLabel("sp_top")
+	bodyL := e.freshLabel("sp_body")
+	endL := e.freshLabel("sp_end")
+	e.emitRaw("%s:", topL)
+	idx := e.freshTmp()
+	e.emit("%s = call @sa_string_index_of(%s, %s, %s, %s, %s)", idx, bp, bl, sp, sl, start)
+	found := e.freshTmp()
+	e.emit("%s = ne %s, -1", found, idx)
+	e.emit("br %s -> %s, %s", found, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	// part = [start, idx): wrap and push.
+	pp := e.freshTmp()
+	e.emit("%s = add %s, %s", pp, bp, start)
+	pl := e.freshTmp()
+	e.emit("%s = sub %s, %s", pl, idx, start)
+	part := e.freshTmp()
+	e.emit("%s = alloc 16", part)
+	e.emit("store %s + 0, %s as ptr", part, pp)
+	e.emit("store %s + 8, %s as u64", part, pl)
+	e.declareOwned(part)
+	e.lowerArrayPush(h, part, "i32", 4)
+	nstart := e.freshTmp()
+	e.emit("%s = add %s, %s", nstart, idx, sl)
+	e.emit("%s = %s", start, nstart)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	// Tail part [start, len).
+	pp2 := e.freshTmp()
+	e.emit("%s = add %s, %s", pp2, bp, start)
+	pl2 := e.freshTmp()
+	e.emit("%s = sub %s, %s", pl2, bl, start)
+	tail := e.freshTmp()
+	e.emit("%s = alloc 16", tail)
+	e.emit("store %s + 0, %s as ptr", tail, pp2)
+	e.emit("store %s + 8, %s as u64", tail, pl2)
+	e.declareOwned(tail)
+	e.lowerArrayPush(h, tail, "i32", 4)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	e.arrVars[h] = true
+	return h
+}
+
+// lowerParseIntCall ports the reference lowerParseInt decimal scan: stops
+// at the first non-digit, a leading `-` negates (JS semantics).
+func (e *emitter) lowerParseIntCall(s string, pos *ast.Node) string {
+	_ = pos
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, s)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, s)
+	acc := e.freshTmp()
+	e.emit("%s = 0", acc)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	neg := e.freshTmp()
+	e.emit("%s = 0", neg)
+	signL := e.freshLabel("pi_sign")
+	topL := e.freshLabel("pi_top")
+	bodyL := e.freshLabel("pi_body")
+	digL := e.freshLabel("pi_digit")
+	nextL := e.freshLabel("pi_next")
+	endL := e.freshLabel("pi_end")
+	negL := e.freshLabel("pi_neg")
+	doneL := e.freshLabel("pi_done")
+	nonempty := e.freshTmp()
+	e.emit("%s = ne %s, 0", nonempty, ln)
+	e.emit("br %s -> %s, %s", nonempty, signL, topL)
+	e.emitRaw("%s:", signL)
+	b0a := e.freshTmp()
+	e.emit("%s = add %s, 0", b0a, data)
+	b0 := e.freshTmp()
+	e.emit("%s = load %s + 0 as u8", b0, b0a)
+	ism := e.freshTmp()
+	e.emit("%s = eq %s, 45", ism, b0)
+	e.emit("br %s -> %s, %s", ism, negL, topL)
+	e.emitRaw("%s:", negL)
+	e.emit("%s = 1", neg)
+	i1 := e.freshTmp()
+	e.emit("%s = add %s, 1", i1, i)
+	e.emit("%s = %s", i, i1)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, ln)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	off := e.freshTmp()
+	e.emit("%s = add %s, %s", off, data, i)
+	b := e.freshTmp()
+	e.emit("%s = load %s + 0 as u8", b, off)
+	d := e.freshTmp()
+	e.emit("%s = sub %s, 48", d, b)
+	ok := e.freshTmp()
+	e.emit("%s = sle %s, 9", ok, d)
+	// d in [0,9] iff byte was a digit (sle is signed, negatives fail).
+	nn := e.freshTmp()
+	e.emit("%s = sge %s, 0", nn, d)
+	both := e.freshTmp()
+	e.emit("%s = and %s, %s", both, ok, nn)
+	e.emit("br %s -> %s, %s", both, digL, endL)
+	e.emitRaw("%s:", digL)
+	mul := e.freshTmp()
+	e.emit("%s = mul %s, 10", mul, acc)
+	nacc := e.freshTmp()
+	e.emit("%s = add %s, %s", nacc, mul, d)
+	e.emit("%s = %s", acc, nacc)
+	e.emit("jmp %s", nextL)
+	e.emitRaw("%s:", nextL)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	// Apply sign.
+	isn := e.freshTmp()
+	e.emit("%s = ne %s, 0", isn, neg)
+	negB := e.freshLabel("pi_negb")
+	doneB := e.freshLabel("pi_doneb")
+	e.emit("br %s -> %s, %s", isn, negB, doneL)
+	e.emitRaw("%s:", negB)
+	nv := e.freshTmp()
+	e.emit("%s = sub 0, %s", nv, acc)
+	e.emit("%s = %s", acc, nv)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", doneB)
+	e.emit("jmp %s", doneL)
+	e.emitRaw("%s:", doneL)
+	return acc
+}
+
+// lowerDeepClone ports sa_plugin_ts lowerDeepClone: scalars snapshot,
+// slices copy element-wise, recursing into nested slices (by the static
+// arrElems record; unknown temps default to scalar elements).
+func (e *emitter) lowerDeepClone(src string, st saType, pos *ast.Node) string {
+	_ = pos
+	if st != tArray {
+		cp := e.freshTmp()
+		e.emit("%s = add %s, 0", cp, src)
+		return cp
+	}
+	elemIsSlice := e.arrElems[src] == "ptr"
+	esz := 4
+	saElem := "i32"
+	if elemIsSlice {
+		saElem = "ptr"
+	}
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, src)
+	sdata := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", sdata, src)
+	dest := e.freshTmp()
+	e.emit("%s = alloc 16", dest)
+	nby := e.freshTmp()
+	e.emit("%s = mul %s, %d", nby, ln, esz)
+	ddata := e.freshTmp()
+	zL := e.freshLabel("dc_z")
+	nzL := e.freshLabel("dc_nz")
+	isz := e.freshTmp()
+	e.emit("%s = eq %s, 0", isz, nby)
+	e.emit("br %s -> %s, %s", isz, zL, nzL)
+	e.emitRaw("%s:", zL)
+	e.emit("%s = alloc 4", ddata)
+	e.emit("jmp %s", nzL)
+	e.emitRaw("%s:", nzL)
+	nb2 := e.freshTmp()
+	e.emit("%s = add %s, 0", nb2, nby)
+	dd2 := e.freshTmp()
+	e.emit("%s = alloc %s", dd2, nb2)
+	e.emit("%s = %s", ddata, dd2)
+	e.emit("store %s + 0, %s as ptr", dest, ddata)
+	e.emit("store %s + 8, %s as u64", dest, ln)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	topL := e.freshLabel("dc_top")
+	bodyL := e.freshLabel("dc_body")
+	endL := e.freshLabel("dc_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, ln)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	so := e.freshTmp()
+	e.emit("%s = mul %s, %d", so, i, esz)
+	saddr := e.freshTmp()
+	e.emit("%s = add %s, %s", saddr, sdata, so)
+	daddr := e.freshTmp()
+	e.emit("%s = add %s, %s", daddr, ddata, so)
+	if elemIsSlice {
+		inner := e.freshTmp()
+		e.emit("%s = load %s + 0 as %s", inner, saddr, saElem)
+		inew := e.lowerDeepClone(inner, tArray, pos)
+		// Nested elements default to scalars (two-level shapes cover
+		// the demo corpus; deeper nests copy the inner slice headers).
+		e.emit("store %s + 0, %s as %s", daddr, inew, saElem)
+	} else {
+		cv := e.freshTmp()
+		e.emit("%s = load %s + 0 as %s", cv, saddr, saElem)
+		e.emit("store %s + 0, %s as %s", daddr, cv, saElem)
+	}
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
+	e.declareOwned(dest)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrVars[dest] = true
+	if elemIsSlice {
+		e.arrElems[dest] = "ptr"
+	} else {
+		e.arrElems[dest] = "i32"
+	}
+	return dest
+}
+
+// resolveSpreadCall expands `@spread:` markers for a known callee
+// (mirrors sa_plugin_ts spread-call handling):
+//   - rest callees pack every argument (spreads appended element-wise)
+//     into one fresh slice;
+//   - fixed-arity callees expand one trailing spread by indexed loads
+//     (OOB yields 0 via the checked-index join).
+// Calls without markers pass through untouched.
+func (e *emitter) resolveSpreadCall(fname string, args []string, types []saType, pos *ast.Node) ([]string, []saType) {
+	hasSpread := false
+	for _, a := range args {
+		if strings.HasPrefix(a, "@spread:") {
+			hasSpread = true
+			break
+		}
+	}
+	if !hasSpread {
+		return args, types
+	}
+	if e.funcHasRest[fname] {
+		h := e.newEmptyArray()
+		for i, a := range args {
+			_ = types[i]
+			if strings.HasPrefix(a, "@spread:") {
+				e.appendSlice(h, strings.TrimPrefix(a, "@spread:"))
+				continue
+			}
+			e.lowerArrayPush(h, a, "i32", 4)
+		}
+		return []string{h}, []saType{tArray}
+	}
+	arity, ok := e.funcParams[fname]
+	if !ok {
+		e.refuse(pos, "spread call to %s needs a known callee arity", fname)
+		return args, types
+	}
+	nStatic := 0
+	nSpread := 0
+	for _, a := range args {
+		if strings.HasPrefix(a, "@spread:") {
+			nSpread++
+		} else {
+			nStatic++
+		}
+	}
+	if nSpread != 1 || nStatic+1 != len(args) || args[len(args)-1][:8] != "@spread:" {
+		// Only a single trailing spread is supported (all demo shapes).
+		e.refuse(pos, "spread call to %s supports only one trailing spread", fname)
+		return args, types
+	}
+	if nStatic > arity {
+		e.refuse(pos, "too many arguments in call to %s", fname)
+		return args, types
+	}
+	arr := strings.TrimPrefix(args[len(args)-1], "@spread:")
+	out := append([]string{}, args[:nStatic]...)
+	ot := append([]saType{}, types[:nStatic]...)
+	for j := nStatic; j < arity; j++ {
+		idx := fmt.Sprintf("%d", j-nStatic)
+		out = append(out, e.lowerCheckedIndex(arr, idx, false))
+		ot = append(ot, tI32)
+	}
+	return out, ot
+}
+
+// newEmptyArray materializes a zero-length i32 array header.
+func (e *emitter) newEmptyArray() string {
+	h := e.freshTmp()
+	e.emit("%s = alloc 16", h)
+	e.emit("store %s + 0, 0 as ptr", h)
+	e.emit("store %s + 8, 0 as u64", h)
+	e.declareOwned(h)
+	if e.arrVars == nil {
+		e.arrVars = map[string]bool{}
+	}
+	if e.arrElems == nil {
+		e.arrElems = map[string]string{}
+	}
+	e.arrVars[h] = true
+	e.arrElems[h] = "i32"
+	return h
+}
+
+// appendSlice copies every 4-byte element of src into dst (push loop).
+func (e *emitter) appendSlice(dst, src string) {
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, src)
+	data := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", data, src)
+	i := e.freshTmp()
+	e.emit("%s = 0", i)
+	topL := e.freshLabel("ap_top")
+	bodyL := e.freshLabel("ap_body")
+	endL := e.freshLabel("ap_end")
+	e.emitRaw("%s:", topL)
+	c := e.freshTmp()
+	e.emit("%s = slt %s, %s", c, i, ln)
+	e.emit("br %s -> %s, %s", c, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	off := e.freshTmp()
+	e.emit("%s = mul %s, 4", off, i)
+	addr := e.freshTmp()
+	e.emit("%s = add %s, %s", addr, data, off)
+	elem := e.freshTmp()
+	e.emit("%s = load %s + 0 as i32", elem, addr)
+	e.lowerArrayPush(dst, elem, "i32", 4)
+	inext := e.freshTmp()
+	e.emit("%s = add %s, 1", inext, i)
+	e.emit("%s = %s", i, inext)
+	e.emit("jmp %s", topL)
+	e.emitRaw("%s:", endL)
 }
 
 func isConsoleLog(fn *ast.Node) bool {
@@ -2141,9 +4928,15 @@ func (e *emitter) lowerMemberChain(n *ast.Node) (string, saType, bool) {
 		cur = pa.Expression
 	}
 	if cur.Kind != ast.KindIdentifier {
-		return "", tUnknown, false
+		// `this.f` chains resolve to the current method receiver.
+		if cur.Kind == ast.KindThisKeyword && e.thisSelf != "" {
+			segs = append([]string{e.thisSelf}, segs...)
+		} else {
+			return "", tUnknown, false
+		}
+	} else {
+		segs = append([]string{cur.Text()}, segs...)
 	}
-	segs = append([]string{cur.Text()}, segs...)
 	l := e.layoutOfVar(segs[0])
 	if l == nil {
 		return "", tUnknown, false
@@ -2182,9 +4975,15 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 		cur = pa.Expression
 	}
 	if cur.Kind != ast.KindIdentifier {
-		return false
+		// `this.f = v` stores resolve to the current method receiver.
+		if cur.Kind == ast.KindThisKeyword && e.thisSelf != "" {
+			segs = append([]string{e.thisSelf}, segs...)
+		} else {
+			return false
+		}
+	} else {
+		segs = append([]string{cur.Text()}, segs...)
 	}
-	segs = append([]string{cur.Text()}, segs...)
 	l := e.layoutOfVar(segs[0])
 	if l == nil {
 		return false
@@ -2341,6 +5140,9 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 	nw := n.AsNewExpression()
 	if nw.Expression.Kind == ast.KindIdentifier {
 		name := nw.Expression.Text()
+		if _, ok := e.classDefs[name]; ok {
+			return e.lowerNewClass(name, nw, n)
+		}
 		if name == "Map" {
 			e.needImport("sa_std/btree_map.sa")
 			t := e.freshTmp()
@@ -2371,6 +5173,28 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 
 func (e *emitter) lowerArrayLiteral(n *ast.Node) (string, saType) {
 	al := n.AsArrayLiteralExpression()
+	// Spread literals (`[...a, 3]`) build element-wise via push loops
+	// (mirrors sa_plugin_ts lowerSpreadLiteral concatenation).
+	hasSpread := false
+	for _, el := range al.Elements.Nodes {
+		if el.Kind == ast.KindSpreadElement {
+			hasSpread = true
+			break
+		}
+	}
+	if hasSpread {
+		h := e.newEmptyArray()
+		for _, el := range al.Elements.Nodes {
+			if el.Kind == ast.KindSpreadElement {
+				sv, _ := e.lowerExpr(el.AsSpreadElement().Expression)
+				e.appendSlice(h, sv)
+				continue
+			}
+			v, _ := e.lowerExpr(el)
+			e.lowerArrayPush(h, v, "i32", 4)
+		}
+		return h, tArray
+	}
 	elems := []string{}
 	for _, el := range al.Elements.Nodes {
 		v, _ := e.lowerExpr(el)
@@ -2652,6 +5476,291 @@ func (e *emitter) recordLayout(st *ast.Node) {
 
 // matchLayout finds a recorded interface whose field set exactly matches the
 // literal's property names (order-insensitive).
+// classDef is one recorded class: static layout plus constructor and
+// method bodies for call-site inlining (no vtables exist in SA-ASM;
+// function-typed fields devirtualize per instance via instFnFields).
+type classDef struct {
+	name    string
+	layout  *layout
+	methods map[string]*ast.Node
+	ctor    *ast.Node
+}
+
+// recordClass registers a class shape. Only data fields contribute layout;
+// extends/implements, accessors and static blocks refuse loudly.
+func (e *emitter) recordClass(st *ast.Node) {
+	cd := st.AsClassDeclaration()
+	name := "<anon>"
+	if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+		name = st.Name().Text()
+	}
+	if cd.HeritageClauses != nil && len(cd.HeritageClauses.Nodes) > 0 {
+		e.refuse(st, "class %s with extends/implements is not lowerable", name)
+		return
+	}
+	def := &classDef{name: name, methods: map[string]*ast.Node{}}
+	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
+	off := 0
+	for _, m := range cd.Members.Nodes {
+		switch m.Kind {
+		case ast.KindPropertyDeclaration:
+			pd := m.AsPropertyDeclaration()
+			fname := ""
+			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+				fname = m.Name().Text()
+			} else {
+				e.refuse(m, "computed field names are not lowerable")
+				continue
+			}
+			saname := "ptr"
+			if pd.Type != nil {
+				saname = saNameOfType(pd.Type)
+			}
+			size, align := widthOf(saname)
+			off = alignTo(off, align)
+			l.fields = append(l.fields, fname)
+			l.types[fname] = saname
+			if pd.Type != nil {
+				l.ftypes[fname] = rawTypeName(pd.Type)
+			}
+			l.offsets[fname] = off
+			off += size
+		case ast.KindConstructor:
+			def.ctor = m
+		case ast.KindMethodDeclaration:
+			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+				def.methods[m.Name().Text()] = m
+			}
+		case ast.KindSemicolonClassElement:
+			// no-op separator
+		default:
+			e.refuse(m, "class member %s is not lowerable", m.Kind.String())
+		}
+	}
+	l.size = off
+	def.layout = l
+	if e.layouts == nil {
+		e.layouts = map[string]*layout{}
+	}
+	e.layouts[name] = l
+	if e.classDefs == nil {
+		e.classDefs = map[string]*classDef{}
+	}
+	e.classDefs[name] = def
+}
+
+// lowerNewClass materializes `new Box(...)`: allocates the static layout,
+// then interprets the constructor (`this.f = param` wirings; function-typed
+// fields capture inline arrows per instance).
+func (e *emitter) lowerNewClass(name string, nw *ast.NewExpression, pos *ast.Node) (string, saType) {
+	def := e.classDefs[name]
+	l := def.layout
+	h := e.freshTmp()
+	if l.size == 0 {
+		e.emit("%s = alloc 4", h)
+	} else {
+		e.emit("%s = alloc %d", h, l.size)
+	}
+	e.declareOwned(h)
+	if e.varLayouts == nil {
+		e.varLayouts = map[string]*layout{}
+	}
+	e.varLayouts[h] = l
+	if def.ctor != nil {
+		params := def.ctor.Parameters()
+		var argNodes []*ast.Node
+		if nw.Arguments != nil {
+			argNodes = nw.Arguments.Nodes
+		}
+		if len(argNodes) != len(params) {
+			e.refuse(pos, "new %s takes %d arguments (%d given)", name, len(params), len(argNodes))
+			return h, tArray
+		}
+		// Map constructor params to their argument nodes for this wirings.
+		paramArg := map[string]*ast.Node{}
+		paramVal := map[string]string{}
+		for i, p := range params {
+			pname, ok := bindingNameText(p.AsNode())
+			if !ok {
+				e.refuse(p.AsNode(), "destructured constructor parameters are not lowerable")
+				return h, tArray
+			}
+			a := argNodes[i]
+			paramArg[pname] = a
+			if a.Kind != ast.KindArrowFunction && a.Kind != ast.KindFunctionExpression {
+				v, _ := e.lowerExpr(a)
+				paramVal[pname] = v
+			}
+		}
+		body := def.ctor.Body()
+		if body != nil {
+			for _, s := range body.Statements() {
+				if !e.wireCtorStatement(h, name, s, paramArg, paramVal, pos) {
+					return h, tArray
+				}
+			}
+		}
+	}
+	return h, tArray
+}
+
+// wireCtorStatement interprets one `this.f = <param>` constructor wiring.
+// Reports false after refusing.
+func (e *emitter) wireCtorStatement(h, className string, s *ast.Node, paramArg map[string]*ast.Node, paramVal map[string]string, pos *ast.Node) bool {
+	_ = pos
+	if s.Kind != ast.KindExpressionStatement {
+		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
+		return false
+	}
+	ex := s.AsExpressionStatement().Expression
+	if ex.Kind != ast.KindBinaryExpression {
+		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
+		return false
+	}
+	bin := ex.AsBinaryExpression()
+	if bin.OperatorToken.Kind != ast.KindEqualsToken {
+		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
+		return false
+	}
+	if bin.Left.Kind != ast.KindPropertyAccessExpression {
+		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
+		return false
+	}
+	pa := bin.Left.AsPropertyAccessExpression()
+	if pa.Expression.Kind != ast.KindThisKeyword {
+		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
+		return false
+	}
+	field := pa.Name().Text()
+	def := e.classDefs[className]
+	off, ok := def.layout.offsets[field]
+	if !ok {
+		e.refuse(s, "field %s is not in the %s layout", field, className)
+		return false
+	}
+	saname := def.layout.types[field]
+	if bin.Right.Kind != ast.KindIdentifier {
+		e.refuse(s, "constructor wiring right side must be a parameter name")
+		return false
+	}
+	pname := bin.Right.Text()
+	if anode, ok := paramArg[pname]; ok && (anode.Kind == ast.KindArrowFunction || anode.Kind == ast.KindFunctionExpression) {
+		// Function-typed field captures the inline arrow per instance.
+		if e.instFnFields == nil {
+			e.instFnFields = map[string]map[string]*ast.Node{}
+		}
+		if e.instFnFields[h] == nil {
+			e.instFnFields[h] = map[string]*ast.Node{}
+		}
+		e.instFnFields[h][field] = anode
+		zero := e.freshTmp()
+		e.emit("%s = 0", zero)
+		e.emit("store %s + %d, %s as %s", h, off, zero, saname)
+		return true
+	}
+	v, ok := paramVal[pname]
+	if !ok {
+		e.refuse(s, "constructor parameter %s has no value", pname)
+		return false
+	}
+	e.emit("store %s + %d, %s as %s", h, off, v, saname)
+	return true
+}
+
+// lowerClassMethodCall inlines `inst.method(args)`: parameters bind (generic
+// params inherit the argument layout), this aliases the instance, and the
+// body joins through a value slot.
+func (e *emitter) lowerClassMethodCall(recv, className, method string, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	def := e.classDefs[className]
+	mn, ok := def.methods[method]
+	if !ok {
+		return "", tUnknown, false
+	}
+	params := mn.Parameters()
+	var anodeList []*ast.Node
+	if argNodes != nil {
+		anodeList = argNodes.Nodes
+	}
+	// Arity counts lowered args (arrows arrive as markers with nodes).
+	nArgs := len(args)
+	if len(anodeList) != len(params) || nArgs != len(params) {
+		e.refuse(pos, "%s.%s takes %d arguments", className, method, len(params))
+		return "0", tUnknown, true
+	}
+	e.pushScope()
+	savedSelf := e.thisSelf
+	e.thisSelf = recv
+	for i, p := range params {
+		pname, ok := bindingNameText(p.AsNode())
+		if !ok {
+			e.refuse(p.AsNode(), "destructured method parameters are not lowerable")
+			e.thisSelf = savedSelf
+			e.popScope()
+			return "0", tUnknown, true
+		}
+		// Handles alias (never copy); scalars snapshot. Generic params
+		// inherit the argument struct layout (e.g. T <- Item).
+		if l := e.layoutOfVar(args[i]); l != nil {
+			e.declareAlias(pname, args[i])
+			if e.varLayouts == nil {
+				e.varLayouts = map[string]*layout{}
+			}
+			e.varLayouts[pname] = l
+		} else if e.arrVars[args[i]] || e.strVars[args[i]] {
+			e.declareAlias(pname, args[i])
+			if e.arrVars[args[i]] {
+				if e.arrVars == nil {
+					e.arrVars = map[string]bool{}
+				}
+				e.arrVars[pname] = true
+				if e.arrElems == nil {
+					e.arrElems = map[string]string{}
+				}
+				e.arrElems[pname] = e.arrElems[args[i]]
+			}
+			if e.strVars[args[i]] {
+				if e.strVars == nil {
+					e.strVars = map[string]bool{}
+				}
+				e.strVars[pname] = true
+			}
+		} else {
+			kind := "named"
+			if isTempName(args[i]) {
+				kind = "temp"
+			}
+			e.assign(pname, args[i], kind, tI32, pos)
+		}
+	}
+	slot := e.freshTmp()
+	e.emit("%s = alloc 8", slot)
+	e.ownTemp(slot)
+	e.emit("store %s + 0, 0 as ptr", slot)
+	endL := e.freshLabel("m_end")
+	saved := e.inlineRet
+	e.inlineRet = &inlineRetState{active: true, slot: slot, end: endL, saname: "i32"}
+	e.terminated = false
+	body := mn.Body()
+	if body != nil {
+		for _, s := range body.Statements() {
+			e.lowerBlockStatement(s)
+			if e.refused {
+				break
+			}
+		}
+	}
+	e.inlineRet = saved
+	e.thisSelf = savedSelf
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+	out := e.freshTmp()
+	e.emit("%s = load %s + 0 as i32", out, slot)
+	e.releaseIfOwnedTemp(slot)
+	e.popScope()
+	_ = anodeList
+	return out, tI32, true
+}
+
 func (e *emitter) matchLayout(names []string) *layout {
 	set := map[string]bool{}
 	for _, n := range names {
@@ -2822,9 +5931,10 @@ func projectionByTS(ts string) (StdProjection, bool) {
 // ---------------------------------------------------------------------------
 
 type binding struct {
-	heap     bool // owned: needs release/move/return
-	consumed bool // moved-from
-	released bool // `!` already emitted
+	heap     bool   // owned: needs release/move/return
+	consumed bool   // moved-from
+	released bool   // `!` already emitted
+	alias    string // handle alias: reads resolve to this register (no copy)
 }
 
 func (e *emitter) pushScope() {
@@ -2857,6 +5967,22 @@ func (e *emitter) declareOwned(name string) {
 		e.owned = append(e.owned, name)
 	} else {
 		top[name].heap = true
+	}
+}
+
+// declareAlias binds a name to an existing handle register without
+// copying (inlined struct/array/string params; the owner still releases).
+func (e *emitter) declareAlias(name, target string) {
+	if len(e.scopes) == 0 {
+		e.pushScope()
+	}
+	top := e.scopes[len(e.scopes)-1]
+	if _, ok := top[name]; !ok {
+		top[name] = &binding{heap: false, alias: target}
+		e.owned = append(e.owned, name)
+	} else {
+		top[name].alias = target
+		top[name].heap = false
 	}
 }
 
@@ -2912,6 +6038,10 @@ func (e *emitter) rebindRelease(dst string) {
 // srcType guides the snapshot op for named sources (f64 uses fadd).
 // pos supplies diagnostic context for handle-copy refusals.
 func (e *emitter) assign(dst, src, srcKind string, srcType saType, pos *ast.Node) {
+	// Rebinding an alias drops the alias (the name becomes a fresh value).
+	if b := e.lookupBinding(dst); b != nil && b.alias != "" {
+		b.alias = ""
+	}
 	fresh := e.lookupBinding(dst) == nil
 	if srcKind == "named" {
 		if _, ok := e.handleNamed(src); ok {

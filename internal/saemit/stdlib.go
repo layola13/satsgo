@@ -187,6 +187,16 @@ func isStringFromCharCode(fn *ast.Node) bool {
 		pa.Name().Text() == "fromCharCode"
 }
 
+// isNumberIsInteger matches Number.isInteger(x).
+func isNumberIsInteger(fn *ast.Node) bool {
+	if fn.Kind != ast.KindPropertyAccessExpression {
+		return false
+	}
+	pa := fn.AsPropertyAccessExpression()
+	return pa.Expression.Kind == ast.KindIdentifier && pa.Expression.Text() == "Number" &&
+		pa.Name().Text() == "isInteger"
+}
+
 // globalFnProjection resolves bare global calls (none projected yet;
 // user functions take this path).
 func globalFnProjection(fname string) (StdProjection, bool) {

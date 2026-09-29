@@ -21,7 +21,7 @@ BR = re.compile(r"^br\s+(\S+)\s+->\s*(\S+)\s*,\s*(\S+)\s*$")
 JMP = re.compile(r"^jmp\s+(\S+)\s*$")
 LOAD = re.compile(r"^(?:\S+\s*=\s*)?load\s+(\S+)\s*\+\s*(\d+)\s+as\s+(\w+)\s*$")
 STORE = re.compile(r"^store\s+(\S+)\s*\+\s*(\d+)\s*,\s*(\S+)\s+as\s+(\w+)\s*$")
-RET = re.compile(r"^ret(?:\s+(\S+))?\s*$")
+RET = re.compile(r"^(?:ret|return)(?:\s+(\S+))?\s*$")
 
 errors = []
 
