@@ -109,6 +109,7 @@
 - ✅ 透传导出：`export {x} from` / `export {x as y} from` / `export * from`
   （qualified 直达定义、rets/arity/默认透传、环带链拒；`export *` 不含 default；
   default 透传经 defQualified）。单测 1 项（命名/star/环）。286 扫测 + `sa check` 全过。
+  透传 + 默认导入混合程序真机 23 对数。
 
 ### Phase 4：tsx→SAX（进行中，见 todo/04_tsx.md）
 
