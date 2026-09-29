@@ -342,6 +342,9 @@ type emitter struct {
 	// tcx is the shared binder/checker context (nil-safe: syntax-only
 	// fallback preserves exact legacy behavior).
 	tcx *typeCtx
+	// mapVars/setVars mark Map/Set handles for backend dispatch.
+	mapVars map[string]bool
+	setVars map[string]bool
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -1029,6 +1032,23 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	if init != nil && init.Kind == ast.KindObjectLiteralExpression {
 		if l := e.layoutOfLiteral(init); l != nil {
 			e.varLayouts[name] = l
+		}
+	}
+	// new Map()/new Set() handles remember their kind for method dispatch.
+	if init != nil && init.Kind == ast.KindNewExpression {
+		if nw := init.AsNewExpression(); nw.Expression.Kind == ast.KindIdentifier {
+			switch nw.Expression.Text() {
+			case "Map":
+				if e.mapVars == nil {
+					e.mapVars = map[string]bool{}
+				}
+				e.mapVars[name] = true
+			case "Set":
+				if e.setVars == nil {
+					e.setVars = map[string]bool{}
+				}
+				e.setVars[name] = true
+			}
 		}
 	}
 	if annot != nil && annot.Kind == ast.KindArrayType {
@@ -2322,6 +2342,20 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 		// Unknown method: fall through to array/string surfaces, then refuse.
 	}
+	// Map/Set handles dispatch to the sa_std btree backends (never
+	// simulated; keys encode via mapKeySlice).
+	if e.mapVars[recv] {
+		if v, t, ok := e.lowerMapMethod(recv, method, args, types, pos); ok {
+			return v, t, true
+		}
+		return "", tUnknown, false
+	}
+	if e.setVars[recv] {
+		if v, t, ok := e.lowerSetMethod(recv, method, args, types, pos); ok {
+			return v, t, true
+		}
+		return "", tUnknown, false
+	}
 	// Higher-order array sites inline the callback body (no function
 	// pointers; captures resolve in the caller scope).
 	if isHigherOrderMethod(method) {
@@ -2368,6 +2402,150 @@ func (e *emitter) inlineInstanceCallback(recv string, anode *ast.Node, args []st
 		return "0", tUnknown, false
 	}
 	return v, t, true
+}
+
+// mapKeySlice encodes a key operand as a {ptr,len} slice: strings pass
+// through, integers box into a fresh 8-byte cell (reference shape).
+func (e *emitter) mapKeySlice(key string, kt saType) string {
+	if kt == tString {
+		return key
+	}
+	cell := e.freshTmp()
+	e.emit("%s = alloc 8", cell)
+	e.emit("store %s + 0, %s as i32", cell, key)
+	slice := e.freshTmp()
+	e.emit("%s = alloc 16", slice)
+	e.emit("store %s + 0, %s as ptr", slice, cell)
+	e.emit("store %s + 8, 4 as u64", slice)
+	e.declareOwned(slice)
+	return slice
+}
+
+// lowerMapMethod projects Map methods onto sa_std/btree_map.sa.
+func (e *emitter) lowerMapMethod(recv, method string, args []string, types []saType, pos *ast.Node) (string, saType, bool) {
+	e.needImport("sa_std/btree_map.sa")
+	kt := tI32
+	if len(types) > 0 {
+		kt = types[0]
+	}
+	switch method {
+	case "set":
+		if len(args) != 2 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		e.emit("call @sa_btree_map_insert(&%s, &%s, %s)", recv, ks, args[1])
+		return "0", tI32, true
+	case "get":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_map_get(&%s, &%s)", t, recv, ks)
+		return t, tI32, true
+	case "has":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_map_contains_key(&%s, &%s)", t, recv, ks)
+		return t, tBool, true
+	case "delete":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		// Probe presence first so a stored 0 still reports true.
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_map_contains_key(&%s, &%s)", t, recv, ks)
+		drop := e.freshTmp()
+		e.emit("%s = call @sa_btree_map_remove(&%s, &%s)", drop, recv, ks)
+		return t, tBool, true
+	case "clear":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		e.emit("call @sa_btree_map_clear(&%s)", recv)
+		return "0", tI32, true
+	case "size", "getSize":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_map_len(&%s)", t, recv)
+		return t, tI32, true
+	case "keys", "values", "entries":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		sym := "sa_btree_map_keys_set"
+		if method == "values" {
+			sym = "sa_btree_map_values_vec"
+		} else if method == "entries" {
+			sym = "sa_btree_map_iter_vec"
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(&%s)", t, sym, recv)
+		e.declareOwned(t)
+		return t, tArray, true
+	default:
+		e.refuse(pos, "Map.%s is not a projected surface", method)
+		return "0", tUnknown, true
+	}
+}
+
+// lowerSetMethod projects Set methods onto sa_std/btree_set.sa.
+func (e *emitter) lowerSetMethod(recv, method string, args []string, types []saType, pos *ast.Node) (string, saType, bool) {
+	e.needImport("sa_std/btree_set.sa")
+	kt := tI32
+	if len(types) > 0 {
+		kt = types[0]
+	}
+	switch method {
+	case "add":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		e.emit("call @sa_btree_set_insert(&%s, &%s)", recv, ks)
+		return "0", tI32, true
+	case "has":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_set_contains(&%s, &%s)", t, recv, ks)
+		return t, tBool, true
+	case "delete":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		ks := e.mapKeySlice(args[0], kt)
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_set_contains(&%s, &%s)", t, recv, ks)
+		drop := e.freshTmp()
+		e.emit("%s = call @sa_btree_set_remove(&%s, &%s)", drop, recv, ks)
+		return t, tBool, true
+	case "clear":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		e.emit("call @sa_btree_set_clear(&%s)", recv)
+		return "0", tI32, true
+	case "size":
+		if len(args) != 0 {
+			return "", tUnknown, false
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @sa_btree_set_len(&%s)", t, recv)
+		return t, tI32, true
+	default:
+		e.refuse(pos, "Set.%s is not a projected surface", method)
+		return "0", tUnknown, true
+	}
 }
 
 // isHigherOrderMethod reports array methods taking a callback (inlined at
@@ -5447,6 +5625,21 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 			t := e.freshTmp()
 			e.emit("%s = call @sa_btree_map_new()", t)
 			e.declareOwned(t)
+			if e.mapVars == nil {
+				e.mapVars = map[string]bool{}
+			}
+			e.mapVars[t] = true
+			return t, tArray
+		}
+		if name == "Set" {
+			e.needImport("sa_std/btree_set.sa")
+			t := e.freshTmp()
+			e.emit("%s = call @sa_btree_set_new()", t)
+			e.declareOwned(t)
+			if e.setVars == nil {
+				e.setVars = map[string]bool{}
+			}
+			e.setVars[t] = true
 			return t, tArray
 		}
 		if name == "Array" && nw.Arguments != nil && len(nw.Arguments.Nodes) == 1 {

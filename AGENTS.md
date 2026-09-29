@@ -39,3 +39,6 @@
 - 286 单文件扫测零回退 + 形状全过；单测 2 项（可空守卫/非空直调）。
 - ✅ 解构声明：`const [a,b] = arr` / `const {x,y} = obj`（init 单次求值 + 安全索引/布局偏移）+
   `for (const [a,b] of pairs)`；for-of 对象模式缺元素布局仍大声拒。286 零回退；单测 1 项。
+- ✅ Map/Set 方法直连 `sa_std` btree 后端（`new Map/Set` 句柄标记 + 方法路由优先于数组面）：
+  set/get/has/delete（presence 探针保真）/clear/size/getSize/keys/values/entries；
+  add/has/delete/clear/size；key 经 mapKeySlice（string 直通/int 装箱）。286 零回退；单测 1 项。

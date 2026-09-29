@@ -197,6 +197,33 @@ func TestLowerDestructuring(t *testing.T) {
 	}
 }
 
+func TestLowerMapSet(t *testing.T) {
+	mapSrc := "function main(): i32 {\n  const m = new Map();\n  m.set(1, 100);\n  m.set(\"k\", 7);\n  const v = m.get(1);\n  const h = m.has(2);\n  const d = m.delete(2);\n  return v + h + d;\n}\n"
+	res := mustLower(t, "m.ts", mapSrc)
+	for _, want := range []string{
+		"call @sa_btree_map_insert",
+		"call @sa_btree_map_get",
+		"call @sa_btree_map_contains_key",
+		"call @sa_btree_map_remove",
+		"@import \"sa_std/btree_map.sa\"",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	setSrc := "function main(): i32 {\n  const s = new Set();\n  s.add(7);\n  return s.has(7) + s.size();\n}\n"
+	res = mustLower(t, "s.ts", setSrc)
+	for _, want := range []string{
+		"call @sa_btree_set_insert",
+		"call @sa_btree_set_contains",
+		"call @sa_btree_set_len",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+}
+
 func TestLowerRefusesClassExtends(t *testing.T) {
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
