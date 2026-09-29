@@ -59,10 +59,20 @@ checker 回退在真实 JS 上成立）。
 7. [ ] 转译失败的依赖在 `subset-report.txt` 按包聚合报错（不淹没在文件级 diagnostic 里）。
 7. [ ] 拉取/审计不管（`sa pkg` 的事），只生成声明。
 
-### A 通道：SA 原生库（按实测数字立项）
+### A 通道：SA 原生库（2026-09-29 复用盘点qv）
 
-8. [ ] `sa_std` 缺口盘点（http client / date / 校验各缺什么原语）。
-9. [ ] 按常用度逐个用 SA 重写，走 `sa pkg` 分发 + 审计。
+| 需求 | sa_std | node 插件（408 符号） | 结论 |
+|---|---|---|---|
+| env/args/cwd | env.sai/process.sai（args/env/cwd/home/tmp） | 同等覆盖 | 直接投影，无需重写 |
+| crypto/hash/uuid | 无（仅附带） | hash/hmac/pbkdf2/random_uuid/cipher 全套 | 投影 node 符号，无需重写 |
+| http client/server | ws_client/tls_client/http2 碎片 | http client/server/websocket bridge 全套 | 投影 node 符号，无需重写 |
+| path/url/querystring | 无 | join/resolve/basename/parse/format 全套 | 投影 node 符号，无需重写 |
+| 日期格式化 | time.sai（待查明细） | 无 date 格式化 | **候选重写 #1**（无后端） |
+| 校验（zod 子集） | 无 | 无 | 候选重写 #2（排期靠后） |
+| lodash 纯函数 | — | — | B 通道转译，不重写 |
+
+立项结论：先把 node 现成面投影完（os/path/crypto/url/http 按 pilot 模式逐批），
+`date` 单独立项（SA 原生），校验延后。收缩判定仍待 program + 真 d.ts 口径。
 
 ## 交付数字
 
