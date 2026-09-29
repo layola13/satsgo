@@ -13,9 +13,9 @@
 
 ### 路一：tsx → SAX 资源（先行）
 
-1. [ ] tsgo 解析 tsx（JSX 节点现成），新 emitter 把 JSX 脱糖成 `.sax` 组件源。
-2. [ ] 语义子集：props/state 初始化、条件渲染、列表渲染；其余（spread props、复杂 children 透传）逐个关或拒。
-3. [ ] 复用整条 `sa react build`（airlock、事件桥、lifecycle）。
+1. [x] tsgo 解析 tsx（ScriptKindTSX，JSX AST 直读）（JSX 节点现成），新 emitter 把 JSX 脱糖成 `.sax` 组件源。
+2. [x] 语义子集：静态模板切片落地（`tsx.go` + `LowerTSX`）；动态（hooks/处理器/表达式/组合/spread）大声拒props/state 初始化、条件渲染、列表渲染；其余（spread props、复杂 children 透传）逐个关或拒。
+3. [ ] 复用整条 `sa react build`（待：插件 .so 未构建，先结构单测）（airlock、事件桥、lifecycle）。
 4. [ ] 交付：counter 级组件 `sa react build` 跑通（含 Chromium verifier，若有）。
 
 ### 路二：hooks / DOM（子集推进）

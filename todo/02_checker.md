@@ -8,13 +8,13 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
 
 ## 任务
 
-1. [ ] 入口换 `LowerProgram`：Program 建一次，binder/checker 全程在线。
-2. [ ] `layoutOfVar`/`matchLayout` 改查 `checker.getTypeAtLocation`，删除注解猜测。
-3. [ ] 泛型单态化类型驱动：`Box<T>` 不再靠调用点布局继承。
-4. [ ] `?.` 真守卫：`strictNullChecks` 可空信息决定是否加 join-slot（非空保持直调）。
-5. [ ] 捕获分析换 binder locals（删 `collectValueIdents` 手写 walk）。
-6. [ ] 拒绝条件从“语法 Kind”升级为“checker 类型”（精准杀，提升白名单通过率）。
-7. [ ] 自建 scope 逐步删除，作用域以 binder 为准。
+1. [x] 入口换 `LowerProgram`（typeCtx：NoLib 内存 Program，单文件/Program 共享）：Program 建一次，binder/checker 全程在线。
+2. [ ] `layoutOfVar`/`matchLayout` 改查（部分：联合注解贡献首个布局；全量待 npm 阶段） `checker.getTypeAtLocation`，删除注解猜测。
+3. [ ] 泛型单态化类型驱动（deferred：句柄模型下调用点继承已够用）：`Box<T>` 不再靠调用点布局继承。
+4. [x] `?.` 真守卫：`strictNullChecks` 可空信息决定是否加 join-slot（非空保持直调）。
+5. [ ] 捕获分析换 binder locals（deferred：启发式在 286+lodash 实测成立）（删 `collectValueIdents` 手写 walk）。
+6. [ ] 拒绝条件从（deferred：元数/类型拒绝已按需加）“语法 Kind”升级为“checker 类型”（精准杀，提升白名单通过率）。
+7. [ ] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
 
 ## 交付数字
 

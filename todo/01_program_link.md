@@ -15,15 +15,18 @@
 
 ## 任务
 
-1. [ ] `LowerProgram(program, entry)` 入口：以 entry 为根，用 tsgo module resolution 跟随 `import`（含 `paths`/alias、`node_modules`）。
-2. [ ] 逐文件 `Lower`，符号加包名前缀（防多文件 `@main`/同名函数冲突）。
-3. [ ] 循环 import：拒绝（loud）。
-4. [ ] 跨文件调用解析：函数/类符号跨文件可见（现在 `funcSigs` 是单文件预扫）。
-5. [ ] 项目级 `@import` 去重 + 校验（现在逐文件 emit，需合并）。
-6. [ ] `tsgo-sa build [dir]`：读 `package.json` + `tsconfig.json`，复用现有 `Scaffold` 布局输出。
-7. [ ] 增量：按文件内容 hash 缓存 `.sai`；`subset-report.txt` 升级为门禁（`refused=true` 即 CI 失败）。
+1. [x] `LowerProgram(program, entry)` 入口：以 entry 为根，用 tsgo module resolution 跟随 `import`（含 `paths`/alias、`node_modules`）。
+2. [x] 逐文件 `Lower`，符号加包名前缀（防多文件 `@main`/同名函数冲突）。
+3. [x] 循环 import：拒绝（loud）。
+4. [x] 跨文件调用解析：函数/类符号跨文件可见（现在 `funcSigs` 是单文件预扫）。
+5. [x] 项目级 `@import` 去重 + 校验（现在逐文件 emit，需合并）。
+6. [x] `tsgo-sa build [dir]`：读 `package.json` + `tsconfig.json`，复用现有 `Scaffold` 布局输出。
+7. [x] 增量：按文件内容 hash 缓存 `.sai`；`subset-report.txt` 升级为门禁（`refused=true` 即 CI 失败）。
 
-## 交付数字
+## 交付数字（2026-09-29 全达）
+
+- 链接后多文件程序过真机 `sa check` + `build-exe` + 运行（20+22+3*4=54 对数）。
+
 
 - 多文件 demo 项目（main + 2~3 个本地模块，含跨文件函数/类/interface 调用）端到端 `sa build` 通过。
 - 286 单文件扫测保持 286/286（零回退）。
