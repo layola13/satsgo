@@ -658,6 +658,43 @@ func TestLowerArrowCaptureSharedWalk(t *testing.T) {
 	}
 }
 
+func TestLowerAccessorRefuse(t *testing.T) {
+	// Classes carrying unread getters lower; reads refuse precisely.
+	cls := "class C {\n  v: i32;\n  get g(): i32 { return this.v; }\n}\nfunction main(): i32 {\n  const c = new C();\n  return 1;\n}\n"
+	res := mustLower(t, "ac1.ts", cls)
+	_ = res
+	// Getter reads refuse with the accessor diagnostic (not generic).
+	rd := "class C {\n  v: i32;\n  get g(): i32 { return this.v; }\n}\nfunction main(): i32 {\n  const c = new C();\n  return c.g;\n}\n"
+	r := Lower("ac2.ts", rd)
+	if !r.Refused {
+		t.Fatalf("expected getter refusal, got:\n%s", r.SAI)
+	}
+	hit := false
+	for _, d := range r.Diagnostics {
+		if strings.Contains(d.Error(), "getter") {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("want getter diagnostic, got %v", r.Diagnostics)
+	}
+	// Setter writes refuse precisely.
+	wr := "class C {\n  v: i32;\n  set s(x: i32) { }\n}\nfunction main(): i32 {\n  const c = new C();\n  c.s = 1;\n  return 1;\n}\n"
+	r = Lower("ac3.ts", wr)
+	if !r.Refused {
+		t.Fatalf("expected setter refusal, got:\n%s", r.SAI)
+	}
+	hit = false
+	for _, d := range r.Diagnostics {
+		if strings.Contains(d.Error(), "setter") {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("want setter diagnostic, got %v", r.Diagnostics)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

@@ -6308,6 +6308,16 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 			return v, tI32
 		}
 	}
+	// Accessor reads refuse precisely (inlining with `this` binding and
+	// side-effect ordering is a later slice).
+	if pa.Expression.Kind == ast.KindIdentifier {
+		if cd := e.classDefOf(pa.Expression.Text()); cd != nil {
+			if _, ok := cd.getters[pa.Name().Text()]; ok {
+				e.refuse(n, "getter %s.%s needs inline support (not yet)", pa.Expression.Text(), pa.Name().Text())
+				return "0", tUnknown
+			}
+		}
+	}
 	// DOM handle reads claim their receivers first (a .length load on a
 	// handle would be garbage; see dom_proj.go).
 	if pa.Expression.Kind == ast.KindIdentifier && e.domVars[pa.Expression.Text()] {
@@ -6414,6 +6424,13 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 		}
 	} else {
 		segs = append([]string{cur.Text()}, segs...)
+	}
+	// Accessor writes refuse precisely (same inline-support reason).
+	if cd := e.classDefOf(segs[0]); cd != nil {
+		if _, ok := cd.setters[segs[len(segs)-1]]; ok {
+			e.refuse(cur, "setter %s.%s needs inline support (not yet)", segs[0], segs[len(segs)-1])
+			return true
+		}
 	}
 	l := e.layoutOfVar(segs[0])
 	if l == nil {
@@ -7026,6 +7043,32 @@ type classDef struct {
 	layout  *layout
 	methods map[string]*ast.Node
 	ctor    *ast.Node
+	// getters/setters record accessor bodies (reads/writes refuse
+	// precisely until inline support lands; the class itself lowers).
+	getters map[string]*ast.Node
+	setters map[string]*ast.Node
+}
+
+// classDefOf resolves a base name to its class definition through
+// instance bindings, this-receivers and direct class names (nil when
+// none applies; map reads stay nil-safe).
+func (e *emitter) classDefOf(base string) *classDef {
+	if c, ok := e.varClass[base]; ok {
+		if d, ok := e.classDefs[c]; ok {
+			return d
+		}
+	}
+	if base == e.thisSelf && e.thisSelf != "" {
+		if c, ok := e.varClass[e.thisSelf]; ok {
+			if d, ok := e.classDefs[c]; ok {
+				return d
+			}
+		}
+		if d, ok := e.classDefs[e.thisSelf]; ok {
+			return d
+		}
+	}
+	return e.classDefs[base]
 }
 
 // recordClass registers a class shape. Only data fields contribute layout;
@@ -7071,7 +7114,26 @@ func (e *emitter) recordClass(st *ast.Node) {
 			def.ctor = m
 		case ast.KindMethodDeclaration:
 			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+				if def.methods == nil {
+					def.methods = map[string]*ast.Node{}
+				}
 				def.methods[m.Name().Text()] = m
+			}
+		case ast.KindGetAccessor, ast.KindSetAccessor:
+			// Accessors record bodies for precise read/write refusal;
+			// inlining them is a later slice (side effects live inside).
+			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+				if m.Kind == ast.KindGetAccessor {
+					if def.getters == nil {
+						def.getters = map[string]*ast.Node{}
+					}
+					def.getters[m.Name().Text()] = m
+				} else {
+					if def.setters == nil {
+						def.setters = map[string]*ast.Node{}
+					}
+					def.setters[m.Name().Text()] = m
+				}
 			}
 		case ast.KindSemicolonClassElement:
 			// no-op separator

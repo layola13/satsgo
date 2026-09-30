@@ -181,6 +181,11 @@
   boolean/symbol/void/undefined/null→object/function/object 联合一致才折叠，
   any/unknown/exotic 大声拒；方言原语（`i32` 注解 NoLib 下本就是 Any，
   只认真实 TS 类型）。单测扩展 2 项（number 折叠 + any 拒绝）；planck 持平。
+- ✅ 访问器记录 + 精确拒（`classDef.getters/setters`，读经
+  `lowerPropertyAccessInner`，写经 `lowerFieldStore`，`classDefOf` 三路解析）：
+  未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，
+  另立项）。planck diag 613→584（正好是 getter 簇）；单测 1 项
+  （放行 + 读写专属诊断）。
 - ✅ checker#7 首刀 binder 可见性（`typeCtx.declaredAt`，GetSymbolAtLocation）：
   typeof 尾部分支改走“scope 无 → binder 不可见才 unknown global”；
   所有权/别名仍归自建 scope（binder 无所有权概念，边界注明）。
