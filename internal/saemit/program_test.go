@@ -254,3 +254,32 @@ func TestLowerProgramMissingExportRefuses(t *testing.T) {
 		t.Fatalf("expected missing-export refusal, got:\n%s", res.SAI)
 	}
 }
+
+// Star/named re-exports bind no local: same-file calls refuse loudly
+// (previously emitted the own prefix, failing only at `sa check`).
+func TestLowerProgramReexpSameFileRefuses(t *testing.T) {
+	star := map[string]string{
+		"main.ts": "import { callAdd } from \"./mid\";\nfunction main(): i32 {\n  return callAdd();\n}\n",
+		"mid.ts":  "export * from \"./lib\";\nexport function callAdd(): i32 {\n  return add(1, 2);\n}\n",
+		"lib.ts":  "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\n",
+	}
+	r := LowerProgram("main.ts", star)
+	if !r.Refused {
+		t.Fatalf("expected star same-file refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(strings.Join(r.Diagnostics, "\n"), "import it first") {
+		t.Errorf("missing import-it-first diagnostic: %v", r.Diagnostics)
+	}
+	named := map[string]string{
+		"main.ts": "import { callY } from \"./mid\";\nfunction main(): i32 {\n  return callY();\n}\n",
+		"mid.ts":  "export { y } from \"./u\";\nexport function callY(): i32 {\n  return y(1);\n}\n",
+		"u.ts":    "export function y(a: i32): i32 {\n  return a;\n}\n",
+	}
+	r = LowerProgram("main.ts", named)
+	if !r.Refused {
+		t.Fatalf("expected named-reexport same-file refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(strings.Join(r.Diagnostics, "\n"), "import it first") {
+		t.Errorf("missing import-it-first diagnostic: %v", r.Diagnostics)
+	}
+}

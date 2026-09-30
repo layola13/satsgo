@@ -423,3 +423,12 @@
   与改名无关、`sa check` 响亮，记序列缺口另立项（linker 手术，不混入 entry）。
   全套件绿、286 sweep 零回退、程序真机 check 过。
   JEV blast-radius local_only 100%。
+- ✅ 星号重导出同文件调用错位（`program.go` 3 处）：`export *`/`export-from`
+  不引入本地绑定，但星拷贝进 `globalRets` 后被播种成 localDefs，同文件调用
+  走本文件前缀（`@mid__add` vs `@lib__add` 定义），产物恒 check-trap。
+  修：`fileExports.starProvided` 域 + resolve 星分支成功标记（直定义/命名
+  重导出早返故精确）+ 播种 localDefs 排除重导出名；funcSigs/arity/qual 不动，
+  错位调用落既有 import-it-first 大声拒（TS 语义：重导出名须先 import）。
+  单测 1 项（星 + 命名双拒形）；全套件绿、286 sweep 零回退；
+  planck program 口径 56 文件两边一致、诊断 519→491（早拒收敛级联噪声，
+  零新增坏点）。JEV consistency 4/4 先行、blast-radius safe_to_apply 86%。

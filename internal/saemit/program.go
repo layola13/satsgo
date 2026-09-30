@@ -33,8 +33,12 @@ type fileExports struct {
 	defNSFrom string
 	// reexp maps a locally-exported name to "fileKey.remote" for
 	// `export {x} from` forms; starFrom lists `export * from` targets.
-	reexp    map[string]string
-	starFrom []string
+	// starProvided marks names this file provides ONLY via star fan-out
+	// (no local binding: same-file calls must import first, like named
+	// re-exports; see resolveReExports + the localDefs seeding below).
+	reexp        map[string]string
+	starFrom     []string
+	starProvided map[string]bool
 	// reexpQualified maps every export to its linked @name (filled by
 	// resolveReExports).
 	reexpQualified map[string]string
@@ -283,7 +287,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
 	for _, p := range reachable {
-		expOf[p] = &fileExports{exports: map[string]bool{}, rets: map[string]saType{}, reexp: map[string]string{}}
+		expOf[p] = &fileExports{exports: map[string]bool{}, rets: map[string]saType{}, reexp: map[string]string{}, starProvided: map[string]bool{}}
 		globalRets[p] = map[string]saType{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
@@ -530,10 +534,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		e.funcHasRest = map[string]bool{}
 		e.localDefs = map[string]bool{}
 		// Seed signatures: own file unprefixed + qualified names for
-		// spread-arity lookups of imported callees.
+		// spread-arity lookups of imported callees. Re-exported names
+		// (named or star) bind no local: they seed signatures for the
+		// "import it first" diagnostic but never localDefs, so same-file
+		// calls refuse instead of emitting the own prefix.
 		for name, ret := range globalRets[p] {
 			e.funcSigs[name] = ret
-			e.localDefs[name] = true
+			if _, isReexp := expOf[p].reexp[name]; !isReexp && !expOf[p].starProvided[name] {
+				e.localDefs[name] = true
+			}
 		}
 		for name, n := range globalArity[p] {
 			e.funcParams[name] = n
@@ -759,6 +768,10 @@ func resolveReExports(reachable []string, expOf map[string]*fileExports, prefixO
 			if _, ok := names[name]; ok {
 				if q, ok := resolve(tgt, name, stack); ok {
 					qual[p][name] = q
+					// Star-provided (no local binding): direct defs and
+					// named re-exports returned above, so reaching here
+					// marks the name for the localDefs seeding below.
+					ex.starProvided[name] = true
 					if r, ok := rets[tgt][name]; ok {
 						rets[p][name] = r
 						ex.rets[name] = r
