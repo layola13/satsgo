@@ -20,7 +20,7 @@
 
 ### 路二：hooks / DOM（子集推进）
 
-5. [ ] `useState` → SAX state slot。
+5. [x] `useState` → SAX state slot（`const [x, setX] = useState(数字/布尔字面量)`，模板 `{x}` 插值；字符串初值/setter 使用/计算表达式/杂语句大声拒；单测 1 项；286 零回退）。
 6. [ ] 挂载期 `useEffect` → `@onMount`；其余 hooks（deps/cleanup）gate 拒绝。
 7. [ ] DOM 投影表（`createElement/appendChild/setAttribute` → airlock extern），相当于给浏览器环境再做一套投影。
 8. [ ] JSX → 直接 SA 调用（`createElement` 内联），绕过 `.sax` 中间态（可选优化，不阻塞）。

@@ -11,6 +11,7 @@ package saemit
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/microsoft/typescript-go/internal/ast"
@@ -46,6 +47,10 @@ type tsxEmitter struct {
 	out     strings.Builder
 	diags   []Diagnostic
 	refused bool
+	// stateVars maps state name -> SAX literal; stateSetters marks
+	// setter names (any use refuses: setters have no render shape).
+	stateVars    map[string]string
+	stateSetters map[string]bool
 }
 
 func (x *tsxEmitter) refuse(n *ast.Node, format string, args ...any) {
@@ -88,24 +93,130 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 		x.refuse(fn, "component %s has no body", name)
 		return
 	}
-	// Single-return JSX shape only.
-	if len(body.Statements()) != 1 || body.Statements()[0].Kind != ast.KindReturnStatement {
-		x.refuse(fn, "component %s must be a single return of JSX (hooks/state are later slices)", name)
+	// Leading statements must be useState declarations; the tail is a
+	// single return of JSX. Anything else (effects, handlers as
+	// statements, arbitrary code) refuses loudly.
+	stmts := body.Statements()
+	if len(stmts) == 0 {
+		x.refuse(fn, "component %s must be a single return of JSX", name)
 		return
 	}
-	ret := body.Statements()[0].AsReturnStatement()
-	if ret.Expression == nil {
-		x.refuse(ret.AsNode(), "component %s returns nothing", name)
+	x.stateVars = map[string]string{}
+	x.stateSetters = map[string]bool{}
+	for _, st := range stmts[:len(stmts)-1] {
+		if !x.lowerUseState(st) {
+			return
+		}
+	}
+	ret := stmts[len(stmts)-1]
+	if ret.Kind != ast.KindReturnStatement {
+		x.refuse(fn, "component %s must end with a single return of JSX", name)
+		return
+	}
+	rs := ret.AsReturnStatement()
+	if rs.Expression == nil {
+		x.refuse(ret, "component %s returns nothing", name)
 		return
 	}
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("<Component name=\"%s\">\n", name))
-	b.WriteString("  <state>\n  </state>\n\n")
-	if !x.lowerJSXNode(ret.Expression, &b, "  ") {
+	b.WriteString("  <state>\n")
+	names := make([]string, 0, len(x.stateVars))
+	for n := range x.stateVars {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		b.WriteString("    " + n + " = " + x.stateVars[n] + "\n")
+	}
+	b.WriteString("  </state>\n\n")
+	if !x.lowerJSXNode(rs.Expression, &b, "  ") {
 		return
 	}
 	b.WriteString("\n</Component>\n")
 	x.out.WriteString(b.String())
+}
+
+// lowerUseState lowers `const [x, setX] = useState(lit)` into a state slot.
+// Only numeric/boolean literals lower (buffers for strings belong to a
+// later slice); the setter name is recorded for refusal on use.
+func (x *tsxEmitter) lowerUseState(st *ast.Node) bool {
+	if st.Kind != ast.KindVariableStatement {
+		x.refuse(st, "component statements before return must be useState declarations")
+		return false
+	}
+	dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) != 1 {
+		x.refuse(st, "component statements before return must be useState declarations")
+		return false
+	}
+	d := dl.Declarations.Nodes[0]
+	nm := d.Name()
+	if nm == nil || nm.Kind != ast.KindArrayBindingPattern {
+		x.refuse(st, "component state must be const [x, setX] = useState(lit)")
+		return false
+	}
+	els := nm.AsNode().AsBindingPattern().Elements.Nodes
+	if len(els) != 2 {
+		x.refuse(st, "component state must be const [x, setX] = useState(lit)")
+		return false
+	}
+	sv, ok1 := bindingIdentText(els[0])
+	ss, ok2 := bindingIdentText(els[1])
+	if !ok1 || !ok2 {
+		x.refuse(st, "component state must be const [x, setX] = useState(lit)")
+		return false
+	}
+	init := d.Initializer()
+	if init == nil || init.Kind != ast.KindCallExpression {
+		x.refuse(st, "component state must be const [x, setX] = useState(lit)")
+		return false
+	}
+	ce := init.AsCallExpression()
+	if ce.Expression.Kind != ast.KindIdentifier || ce.Expression.Text() != "useState" {
+		x.refuse(st, "component state must be const [x, setX] = useState(lit)")
+		return false
+	}
+	if ce.Arguments == nil || len(ce.Arguments.Nodes) != 1 {
+		x.refuse(st, "useState takes exactly 1 literal argument")
+		return false
+	}
+	lit := ce.Arguments.Nodes[0]
+	var text string
+	switch lit.Kind {
+	case ast.KindNumericLiteral:
+		text = lit.Text()
+		if strings.ContainsAny(text, ".eE") {
+			// Float text passes through verbatim (SAX numeric slot).
+		}
+	case ast.KindTrueKeyword:
+		text = "1 as i1"
+	case ast.KindFalseKeyword:
+		text = "0 as i1"
+	default:
+		x.refuse(lit, "useState initializers must be numeric/boolean literals (strings need the buffer slice)")
+		return false
+	}
+	if _, dup := x.stateVars[sv]; dup {
+		x.refuse(st, "duplicate state variable %s", sv)
+		return false
+	}
+	x.stateVars[sv] = text
+	x.stateSetters[ss] = true
+	return true
+}
+
+// bindingIdentText reads a plain identifier out of a binding element.
+func bindingIdentText(el *ast.Node) (string, bool) {
+	be := el.AsBindingElement()
+	if be.PropertyName != nil {
+		return "", false
+	}
+	nm := be.Name()
+	if nm == nil || nm.Kind != ast.KindIdentifier {
+		return "", false
+	}
+	return nm.Text(), true
 }
 
 // lowerJSXNode renders static JSX into the template builder.
@@ -169,6 +280,22 @@ func (x *tsxEmitter) lowerJSXChild(n *ast.Node, b *strings.Builder, indent strin
 			}
 		}
 		return true
+	case ast.KindJsxExpression:
+		// `{stateVar}` interpolates a state slot (counter shape);
+		// setters and computed expressions refuse loudly.
+		ex := n.AsJsxExpression().Expression
+		if ex != nil && ex.Kind == ast.KindIdentifier {
+			if _, ok := x.stateVars[ex.Text()]; ok {
+				b.WriteString(indent + "{" + ex.Text() + "}\n")
+				return true
+			}
+			if x.stateSetters[ex.Text()] {
+				x.refuse(n, "setter %s has no render shape", ex.Text())
+				return false
+			}
+		}
+		x.refuse(n, "dynamic JSX expression is not in the state slice (only {stateVar})")
+		return false
 	default:
 		x.refuse(n, "dynamic JSX child %s is not in the static slice (see todo/04_tsx.md)", n.Kind.String())
 		return false

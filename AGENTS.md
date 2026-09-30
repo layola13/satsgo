@@ -164,6 +164,10 @@
   挂钩）：`type X={...}` 对象别名建布局，嵌套经既有 ftypes 下沉；
   planck program 口径 diag 649→617（累计 686→617）。单测扩展 1 项；
   全量单测过。
+- ✅ tsx `useState`（路二任务 5，`tsx.go` 内）：前导语句仅限
+  `const [x, setX] = useState(数字/布尔)`，state 块发射字面量，
+  模板 `{x}` 插值；字符串初值/setter 引用/计算表达式/杂语句大声拒
+  （handler 仍拒，旧单测保持）。单测 1 项（成功 + 4 拒绝）；全量单测过。
 - ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
   log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
   缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`
