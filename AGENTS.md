@@ -503,3 +503,12 @@
   全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 纯形对数，
   unicode 与子集字节语义一致（子集长度即字节，既有语义）。
   JEV blast-radius safe_to_apply 78%（首审 24%，切片回归加固后翻转）。
+- ✅ 命名空间合并重开（延迟 lowering + 全量 prescan 记录）：重开合并
+  （scope 注册一次）；成员延迟到 pending 队列（定义遍后排空 + 各顶层语句
+  前 eager 排空保源序，发射序无关 @label）；节点身份去重（同节点重预扫
+  幂等，不同节点同名拒）；类型空间/const 折叠/let 槽/嵌套名/类/布局/枚举
+  全量 prescan 记录（跨 body 前向引用；函数/箭头体 drain 期发射保后见签名）。
+  旧 merging 拒测转正。单测 1 项（合并 + 跨 body const/let 读 + 双拒形 +
+  嵌套合并）；全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 41；
+  planck 零移动（零 demo 用命名空间，48 文件、零干净新增）。
+  JEV blast-radius safe_to_apply 89%。

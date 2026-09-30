@@ -149,12 +149,9 @@ func (e *emitter) lowerNamespace(st *ast.Node, topLevel bool) {
 	if p := e.nsPath(); p != "" {
 		full = p + "_" + name
 	}
-	// Merging (reopening an existing namespace) stays loud: duplicate
-	// @labels would collide at assembly.
-	if e.namespaces[full] {
-		e.refuse(st, "namespace %s is already declared (merging is not lowerable yet)", full)
-		return
-	}
+	// Reopening merges: the scope registers once, every body prescans
+	// (duplicate members refuse), and member lowering drains after the
+	// whole file prescans — so cross-body forward references resolve.
 	if e.namespaces == nil {
 		e.namespaces = map[string]bool{}
 	}
@@ -171,13 +168,48 @@ func (e *emitter) lowerNamespace(st *ast.Node, topLevel bool) {
 		e.nsStack = e.nsStack[:len(e.nsStack)-1]
 		return
 	}
-	for _, m := range members {
-		e.lowerNamespaceMember(m)
+	e.pendingNs = append(e.pendingNs, pendingNsBody{
+		path:    append([]string{}, e.nsStack...),
+		members: members,
+	})
+	e.nsStack = e.nsStack[:len(e.nsStack)-1]
+}
+
+// pendingNsBody is one namespace body's deferred member lowering: the
+// path active at prescan plus its members, drained after the file's
+// definition pass (see lowerPendingNamespaces).
+type pendingNsBody struct {
+	path    []string
+	members []*ast.Node
+}
+
+// lowerPendingNamespaces drains deferred namespace member lowering in
+// source order (emission order is irrelevant: @labels resolve file-wide).
+// Each body lowers under its prescan path; a refusal stops the drain and
+// drops the rest (their diagnostics would cascade). Re-entrant: members
+// that declare nested namespaces append during the drain and are picked
+// up by the same loop.
+func (e *emitter) lowerPendingNamespaces() {
+	if len(e.pendingNs) == 0 {
+		return
+	}
+	saved := e.nsStack
+	for len(e.pendingNs) > 0 {
+		b := e.pendingNs[0]
+		e.pendingNs = e.pendingNs[1:]
+		e.nsStack = append([]string{}, b.path...)
+		for _, m := range b.members {
+			e.lowerNamespaceMember(m)
+			if e.refused {
+				break
+			}
+		}
 		if e.refused {
+			e.pendingNs = nil
 			break
 		}
 	}
-	e.nsStack = e.nsStack[:len(e.nsStack)-1]
+	e.nsStack = saved
 }
 
 // memberExported reports an `export`-modified member (namespace-private
@@ -201,6 +233,12 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 			saved := e.nsStack
 			e.nsStack = sub
 			subPath := e.nsPath()
+			// Register the nested scope name at prescan (member bodies
+			// lower deferred; routing needs the name before any lowering).
+			if e.namespaces == nil {
+				e.namespaces = map[string]bool{}
+			}
+			e.namespaces[subPath] = true
 			if e.nsExports == nil {
 				e.nsExports = map[string]map[string]bool{}
 			}
@@ -286,24 +324,132 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 			continue
 		}
 		q := e.nsDefName(raw)
-		// Nested bodies pre-scan twice (outer recursion + own pass);
-		// re-registration is idempotent, but fresh collisions with
-		// outside definitions still refuse.
-		if _, ok := e.nsMembers[q]; !ok && e.nsNameTaken(q) {
+		// Nested bodies pre-scan twice (outer recursion + own pass):
+		// same-node re-registration is idempotent. A DIFFERENT node
+		// under an occupied member name is a duplicate (reopening or
+		// not, TS rejects it); fresh collisions with outside
+		// definitions refuse as before.
+		if prev, ok := e.nsMemberNodes[q]; ok {
+			if prev != m {
+				e.refuse(m, "namespace member %s is already declared (duplicates are not lowerable)", q)
+				return
+			}
+		} else if e.nsNameTaken(q) {
 			e.refuse(m, "namespace member %s collides with an existing definition", q)
 			return
 		}
 		if e.nsMembers == nil {
 			e.nsMembers = map[string]string{}
 		}
+		if e.nsMemberNodes == nil {
+			e.nsMemberNodes = map[string]*ast.Node{}
+		}
 		e.nsMembers[q] = kind
+		e.nsMemberNodes[q] = m
 		if memberExported(m) {
 			e.nsExports[e.nsPath()][raw] = true
 		}
 		if kind == nsKindFunc {
 			e.registerNsFuncSig(m, q)
 		}
+		// Value recording lives in prescan (not drain): consts fold and
+		// lets register slots now, so cross-body member reads and later
+		// top-level code resolve. Both are pure recording (literal inits
+		// only); the drain replays idempotently (see lowerNamespaceMember).
+		if kind == nsKindConst {
+			e.foldNsConstMember(m, q)
+		}
+		if kind == nsKindLet {
+			e.registerNsLetMember(m, q)
+		}
+		// Type-space recording lives in prescan (not drain): layouts,
+		// enums and classes resolve for code lowered before the drain
+		// (e.g. a top-level main calling N.f, or N.f itself). Same-node
+		// re-prescan overwrites identically; drain skips re-recording.
+		switch kind {
+		case nsKindClass:
+			if _, ok := e.classDefs[q]; !ok {
+				e.recordClass(m)
+				if e.refused {
+					return
+				}
+			}
+		case nsKindInterface, nsKindEnum, nsKindType:
+			e.lowerTypeDecl(m)
+			if e.refused {
+				return
+			}
+		}
 	}
+}
+
+// foldNsConstMember folds one literal const member (mirrors the literal
+// arms of tryTopLevelConst; arrow members stay callees for the drain).
+// Recording-only: no code emits, so prescan order never matters.
+func (e *emitter) foldNsConstMember(m *ast.Node, q string) {
+	dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) != 1 {
+		return
+	}
+	d := dl.Declarations.Nodes[0]
+	init := d.Initializer()
+	if init == nil {
+		return
+	}
+	switch init.Kind {
+	case ast.KindNumericLiteral, ast.KindTrueKeyword, ast.KindFalseKeyword:
+		if e.constVals == nil {
+			e.constVals = map[string]string{}
+		}
+		if init.Kind == ast.KindTrueKeyword {
+			e.constVals[q] = "1"
+		} else if init.Kind == ast.KindFalseKeyword {
+			e.constVals[q] = "0"
+		} else {
+			e.constVals[q] = init.Text()
+		}
+	case ast.KindStringLiteral:
+		s, ok := stringLiteralText(init)
+		if !ok {
+			return
+		}
+		if e.constVals == nil {
+			e.constVals = map[string]string{}
+		}
+		if e.constIsStr == nil {
+			e.constIsStr = map[string]bool{}
+		}
+		e.constVals[q] = s
+		e.constIsStr[q] = true
+	case ast.KindPropertyAccessExpression:
+		pa := init.AsPropertyAccessExpression()
+		if pa.Expression.Kind == ast.KindIdentifier && pa.Expression.Text() == "Math" {
+			if _, ok := projectionByTS("Math." + pa.Name().Text()); ok {
+				if e.mathAliases == nil {
+					e.mathAliases = map[string]string{}
+				}
+				e.mathAliases[q] = pa.Name().Text()
+			}
+		}
+	}
+}
+
+// registerNsLetMember registers one mutable scalar member slot (pure
+// recording; declarations emit no code). Refusals (exotic inits) surface
+// here at prescan with the same diagnostics as the drain path.
+func (e *emitter) registerNsLetMember(m *ast.Node, q string) {
+	dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) != 1 {
+		return
+	}
+	d := dl.Declarations.Nodes[0]
+	if _, ok := bindingNameText(d); !ok {
+		return
+	}
+	if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+		return
+	}
+	e.registerModDeclarator(d, q)
 }
 
 // nsNameTaken reports qualified-name collisions against every definition
@@ -427,6 +573,12 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 				e.refuse(m, "arrow mutable namespace state is not lowerable (use const for callees)")
 				return
 			}
+			// Already registered at prescan (cross-body reads resolve);
+			// the drain replays only if prescan was bypassed. A present
+			// slot is always ours: prescan refused genuine collisions.
+			if _, ok := e.modVars[e.nsDefName(nm)]; ok {
+				return
+			}
 			// Declarations emit no code; use sites call the registry.
 			e.registerModDeclarator(d, e.nsDefName(nm))
 			return
@@ -442,8 +594,22 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 		}
 		e.refuse(m, "namespace const initializers must be pure literals or arrows")
 	case ast.KindClassDeclaration:
-		e.recordClass(m)
+		// Recorded at prescan (layouts resolve before the drain);
+		// re-record only if something else claimed the name first
+		// (then the prescan collision rule already refused). Nameless
+		// members skipped prescan and record here as before.
+		needsRecord := true
+		if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+			if _, ok := e.classDefs[e.nsDefName(m.Name().Text())]; ok {
+				needsRecord = false
+			}
+		}
+		if needsRecord {
+			e.recordClass(m)
+		}
 	case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindEnumDeclaration:
+		// Layouts/enums record at prescan; the drain replays
+		// idempotently for passes that bypass prescan.
 		e.lowerTypeDecl(m)
 	case ast.KindModuleDeclaration:
 		if isAmbientModule(m) {

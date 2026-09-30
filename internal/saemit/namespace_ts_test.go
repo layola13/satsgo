@@ -174,7 +174,8 @@ func TestLowerNamespaceRefusals(t *testing.T) {
 	}{
 		// "mutable state" turned positive: namespace `export let` lowers
 		// to module-state slots (see TestModStateNamespaceLet).
-		{"merging", "namespace M {\n export const a = 1;\n}\nnamespace M {\n export const b = 2;\n}\nfunction main(): i32 { return 0; }\n"},
+		// "merging" turned positive: reopened bodies merge (see
+		// TestLowerNamespaceReopen).
 		{"import equals", "namespace N {\n export const x = 1;\n}\nimport y = N.x;\nfunction main(): i32 { return 0; }\n"},
 		{"unknown member", "namespace N {\n export const x = 1;\n}\nfunction main(): i32 {\n return N.y;\n}\n"},
 		{"function nested", "function f(): i32 {\n namespace N {\n export const x = 1;\n }\n return 0;\n}\nfunction main(): i32 { return f(); }\n"},
@@ -183,5 +184,92 @@ func TestLowerNamespaceRefusals(t *testing.T) {
 		if r := Lower("nsr.ts", c.src); !r.Refused {
 			t.Errorf("%s: expected refusal, got:\n%s", c.name, r.SAI)
 		}
+	}
+}
+
+// Reopening merges bodies: members accumulate, cross-body forward
+// references resolve, duplicates refuse.
+func TestLowerNamespaceReopen(t *testing.T) {
+	src := `namespace M {
+  export const a = 1;
+  export function f(): i32 {
+    return a + g();
+  }
+}
+namespace M {
+  export const b = 2;
+  export function g(): i32 {
+    return b * 10;
+  }
+}
+function main(): i32 {
+  return M.f() + M.g();
+}
+`
+	res := mustLower(t, "reopen.ts", src)
+	for _, want := range []string{"call @M_f()", "call @M_g()", "@M_f() -> i32:", "@M_g() -> i32:"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Cross-body value reads resolve through prescan recording (const
+	// folds and let slots register before any member lowers).
+	cross := `namespace M {
+  export function f(): i32 {
+    return K + counter;
+  }
+}
+namespace M {
+  export const K = 3;
+  export let counter = 4;
+  export function bump(): i32 {
+    counter = counter + 1;
+    return counter;
+  }
+}
+function main(): i32 {
+  M.bump();
+  return M.f();
+}
+`
+	res = mustLower(t, "reopencross.ts", cross)
+	for _, want := range []string{
+		`@import "sa_std/modstate.sai"`,
+		"call @M_f()",
+		"call @M_bump()",
+		"add 3, ",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Duplicates refuse whether split across bodies or within one.
+	dups := []struct {
+		name string
+		src  string
+	}{
+		{"across bodies", "namespace M {\n export const a = 1;\n}\nnamespace M {\n export const a = 2;\n}\nfunction main(): i32 { return 0; }\n"},
+		{"within body", "namespace M {\n export const a = 1;\n export function a(): i32 { return 1; }\n}\nfunction main(): i32 { return 0; }\n"},
+		{"nested reopen", "namespace A {\n export namespace B {\n export function x(): i32 { return 1; }\n }\n}\nnamespace A {\n export namespace B {\n export function y(): i32 { return 2; }\n }\n}\nfunction main(): i32 { return A.B.x() + A.B.y(); }\n"},
+	}
+	for _, tc := range dups {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "nested reopen" {
+				res := mustLower(t, "nestedreopen.ts", tc.src)
+				for _, want := range []string{"call @A_B_x()", "call @A_B_y()"} {
+					if !strings.Contains(res.SAI, want) {
+						t.Errorf("missing %q in output:\n%s", want, res.SAI)
+					}
+				}
+				return
+			}
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), "already declared") {
+				t.Errorf("missing duplicate diagnostic:\n%s", diagText(res))
+			}
+		})
 	}
 }

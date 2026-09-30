@@ -367,6 +367,12 @@ type emitter struct {
 	namespaces map[string]bool
 	nsMembers  map[string]string
 	nsExports  map[string]map[string]bool
+	// nsMemberNodes records the declaring node per qualified member
+	// (duplicate detection across reopened bodies; same-node re-prescan
+	// stays idempotent). pendingNs defers member lowering until the
+	// file's definition pass completes (see namespace_ts.go).
+	nsMemberNodes map[string]*ast.Node
+	pendingNs     []pendingNsBody
 	// staticDefs holds statics-only shells from heritage-refused classes
 	// (fold reads only; never instantiation; see recordClass).
 	staticDefs   map[string]*classDef
@@ -642,20 +648,31 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 		}
 	}
 	// Two-pass lowering: definitions first (executables skipped), then
-	// the entry body (see entry_top.go). Files without executables keep
-	// exact single-pass order.
+	// deferred namespace members (cross-body forward refs resolved),
+	// then the entry body (see entry_top.go). Files without executables
+	// keep exact single-pass order. Pending namespace bodies drain
+	// eagerly before each non-namespace top-level statement (source
+	// order preserved: a main after its namespace sees lowered members)
+	// and unconditionally at end of pass (accumulate-style diagnostics).
 	for _, st := range stmts {
 		if e.isEntryStmt(st) {
 			continue
 		}
 		e.lowerStatement(st, true)
 	}
+	e.lowerPendingNamespaces()
 	if len(e.entryStmts) > 0 && !e.refused {
 		e.lowerEntry()
 	}
 }
 
 func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
+	// lowerStatement runs only at file scope (bodies go through
+	// lowerBlockStatement), so draining here always emits to the file
+	// builder. Namespace statements append instead of draining.
+	if topLevel && st.Kind != ast.KindModuleDeclaration && len(e.pendingNs) > 0 {
+		e.lowerPendingNamespaces()
+	}
 	switch st.Kind {
 	case ast.KindClassDeclaration:
 		// Classes record layouts + bodies for call-site inlining
