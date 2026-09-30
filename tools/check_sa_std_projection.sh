@@ -107,6 +107,10 @@ node_symbols=(
   sa_node_plugin_url_format
   sa_node_plugin_url_resolve
   sa_node_plugin_util_strip_vt_control_characters
+  sa_node_plugin_console_error
+  sa_node_plugin_console_time
+  sa_node_plugin_console_time_end
+  sa_node_plugin_console_clear
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

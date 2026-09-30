@@ -58,8 +58,9 @@ type StdProjection struct {
 	// a 16-byte {ptr,len} array passed as (argv, argc); "sized" takes
 	// one u64 size and wraps a bare &ptr out whose length is the
 	// requested size (e.g. randomBytes); "string2"/"string3" expand
-	// two/three leading string slices ahead of the outs. Nonzero status
-	// panics (loud).
+	// two/three leading string slices ahead of the outs; "fire" passes
+	// all string args by value with no outs; "fireF64" adds one f64 out.
+	// Nonzero status panics (loud).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
@@ -289,6 +290,17 @@ var StdProjectionTable = []StdProjection{
 	// list; all four stay loudly refused until those land.
 	{TS: "util.stripVTControlCharacters", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_util_strip_vt_control_characters", Ret: tString,
 		NodeOut: "string1", Note: "one string arg; status-checked"},
+	// console (log stays on sa_std print): error folds multi-arg itself
+	// in node_console.go; time/timeEnd pair natively; timers stay refused
+	// (async, Phase 2).
+	{TS: "console.error", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_console_error", Ret: tVoid,
+		NodeOut: "fire", Note: "folded slice by value; status-checked"},
+	{TS: "console.time", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_console_time", Ret: tVoid,
+		NodeOut: "fire", Note: "label defaults to default"},
+	{TS: "console.timeEnd", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_console_time_end", Ret: tF64,
+		NodeOut: "fireF64", Note: "f64 millis out; missing timer panics"},
+	{TS: "console.clear", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_console_clear", Ret: tVoid,
+		NodeOut: "fire", Note: "zero-arg"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

@@ -2306,6 +2306,16 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	if isConsoleLog(call.Expression) {
 		return e.lowerConsoleLog(args, argTypes, n), tVoid
 	}
+	// console.error/time/timeEnd/clear → node plugin (node_console.go);
+	// timers stay refused (async, Phase 2).
+	for _, m := range []string{"error", "time", "timeEnd", "clear"} {
+		if isConsoleMethod(call.Expression, m) {
+			if m == "error" {
+				return e.lowerConsoleError(args, argTypes, n)
+			}
+			return e.lowerConsoleTime(m, args, n)
+		}
+	}
 	// Math.* inline idioms (reference math_surface; trig etc. refuse).
 	if name, ok := mathMethod(call.Expression); ok {
 		if v, t, ok := e.lowerMathCall(name, args, argTypes, call.Arguments, n); ok {
@@ -7427,8 +7437,47 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// panic on nonzero status (loud), then wrap outs per NodeOut.
 	// "string" takes no arguments; "string1"/"string2"/"string3" take
 	// one/two/three string slices expanded to (&ptr, len) in-params
-	// ahead of the outs.
-	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized") {
+	// ahead of the outs; "fire" passes slices by value with no outs;
+	// "fireF64" adds one f64 out slot.
+	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64") {
+		if proj.NodeOut == "fire" || proj.NodeOut == "fireF64" {
+			if proj.NodeOut == "fireF64" && len(args) != 1 {
+				e.refuse(pos, "%s takes exactly 1 argument", proj.TS)
+				return "0", tUnknown
+			}
+			ins := []string{}
+			for _, a := range args {
+				ap, al := e.expandSlice(a)
+				ins = append(ins, ap, al)
+			}
+			fslot := ""
+			if proj.NodeOut == "fireF64" {
+				fslot = e.freshTmp()
+				e.emit("%s = alloc 8", fslot)
+				e.ownTemp(fslot)
+				ins = append(ins, "&"+fslot)
+			}
+			st := e.freshTmp()
+			e.emit("%s = call @%s(%s)", st, proj.Symbol, strings.Join(ins, ", "))
+			e.ownTemp(st)
+			badL := e.freshLabel("node_bad")
+			okL := e.freshLabel("node_ok")
+			bad := e.freshTmp()
+			e.emit("%s = ne %s, 0", bad, st)
+			e.emit("br %s -> %s, %s", bad, badL, okL)
+			e.emitRaw("%s:", badL)
+			e.emit("panic")
+			e.terminated = true
+			e.emitRaw("%s:", okL)
+			e.terminated = false
+			if proj.NodeOut == "fireF64" {
+				fout := e.freshTmp()
+				e.emit("%s = load %s + 0 as f64", fout, fslot)
+				e.releaseIfOwnedTemp(fslot)
+				return fout, tF64
+			}
+			return "0", tVoid
+		}
 		if proj.NodeOut == "sized" {
 			// size in, bare &ptr out whose length echoes the request.
 			if len(args) != 1 {

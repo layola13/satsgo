@@ -154,6 +154,12 @@
   排序读出（dev 排除、版本原文），`sa.mod` 注释 require 行（`#` 为合法注释，
   hash 缺位故不输出有效行）+ subset-report 独立 section；CLI build 链透传，
   单文件口径不涉及。单测 2 项；全量单测过。
+- ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
+  log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
+  缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`
+  （值传 slice + 状态检查，前者无出参后者 f64 出参）；timers 保持大声拒
+  （async，Phase 2）。node 契约 35/35；形状校验通过；单测 1 项
+  （4 调用形状 + 3 拒绝：timeEnd/clear 元数 + 未知方法）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
