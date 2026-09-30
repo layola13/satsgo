@@ -171,6 +171,10 @@
   （双向、否定式）降为 `eq/ne v, 0`（子集 null/undefined→0，故精确）；
   非标识操作数大声拒；planck `typeof min/max` 4 项消除（diag 617→613）。
   单测 1 项（肯定/否定/非标识拒）；全量单测过。
+- ✅ checker#7 首刀 binder 可见性（`typeCtx.declaredAt`，GetSymbolAtLocation）：
+  typeof 尾部分支改走“scope 无 → binder 不可见才 unknown global”；
+  所有权/别名仍归自建 scope（binder 无所有权概念，边界注明）。
+  单测扩展 2 项（单文件 unknown 锁定 + program 导入可见性翻转）；全量单测过。
 - ✅ tsx `useState`（路二任务 5，`tsx.go` 内）：前导语句仅限
   `const [x, setX] = useState(数字/布尔)`，state 块发射字面量，
   模板 `{x}` 插值；字符串初值/setter 引用/计算表达式/杂语句大声拒

@@ -86,3 +86,24 @@ func (t *typeCtx) nullable(n *ast.Node) bool {
 func isNullish(f checker.TypeFlags) bool {
 	return f&checker.TypeFlagsNullable != 0 || f&checker.TypeFlagsUndefined != 0
 }
+
+// declaredAt reports whether the binder resolves a name reference at its
+// location (any meaning: values, types, imports). It answers scope
+// VISIBILITY, not shape: custom scope maps stay authoritative for
+// ownership and aliasing, which the binder cannot see (todo/02#7
+// boundary). Unknown without a context.
+func (t *typeCtx) declaredAt(n *ast.Node) bool {
+	if t == nil || t.check == nil || n == nil {
+		return false
+	}
+	found := false
+	func() {
+		defer func() {
+			_ = recover()
+		}()
+		if sym := t.check.GetSymbolAtLocation(n); sym != nil {
+			found = true
+		}
+	}()
+	return found
+}

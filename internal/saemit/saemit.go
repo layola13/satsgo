@@ -6859,7 +6859,7 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 				kind = "function"
 			} else if _, ok := e.constVals[name]; ok && !e.constIsStr[name] {
 				kind = "number"
-			} else if e.lookupBinding(name) == nil {
+			} else if e.lookupBinding(name) == nil && !e.tcx.declaredAt(op) {
 				e.refuse(n, "typeof unknown global %s is not lowerable", name)
 				return "0", tUnknown
 			} else {

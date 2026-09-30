@@ -20,7 +20,9 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
 6. [~] 拒绝条件从“语法 Kind”升级为“checker 类型”（精准杀，提升白名单通过率）。
    首刀：`typeof v === "undefined"` 比较级守卫（`eq/ne v, 0`，planck 617→613）；
    其余形态（已知 kind 常量折叠等）另立项。元数/类型拒绝已按需加（既有）。
-7. [ ] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
+7. [~] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
+   首刀：`declaredAt` 可见性 helper + typeof 尾部分支；所有权/别名不可删
+   （152 处引用，binder 无所有权概念，边界已注明）；单测 2 项。
 
 ## 交付数字
 
