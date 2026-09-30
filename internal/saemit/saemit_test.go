@@ -1022,3 +1022,35 @@ function main(): i32 {
 		t.Fatalf("expected refusal for non-slot member target, lowered:\n%s", bad.SAI)
 	}
 }
+
+// Angle assertions erase exactly like `as` (type-only, no runtime).
+func TestAngleAssertionErasure(t *testing.T) {
+	src := `interface P {
+  x: i32;
+}
+function main(): i32 {
+  const a = <number>41;
+  const o = <P>{ x: 1 };
+  const s = { x: 2 } satisfies P;
+  return a + o.x + s.x;
+}
+`
+	res := mustLower(t, "angle.ts", src)
+	for _, want := range []string{"a = 41", "return "} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Chained assertions fold through statics as well.
+	st := `class C {
+  static K = <number>7;
+}
+function main(): i32 {
+  return C.K;
+}
+`
+	res = mustLower(t, "angle2.ts", st)
+	if !strings.Contains(res.SAI, "return 7") {
+		t.Errorf("missing folded static in output:\n%s", res.SAI)
+	}
+}

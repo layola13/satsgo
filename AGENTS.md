@@ -446,5 +446,10 @@
   （否则模块名先折叠后拒）。途中抓到 assign 臂极性反转（`||=` 测真进 skip）
   与发射 fallthrough（alloc 在 br 后），真机对数锁定。
   单测 1 项（三臂形状 + 单次调用 + 串 len + 模块槽 + 坏目标拒）；
-  全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 六形 31 对数。
+  全套件绿、286 sweep 零回退 + check 全过；  真机 `sa run` 六形 31 对数。
   JEV blast-radius local_only 98%。
+- ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
+  `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
+  （静态折叠同步，`static K = <number>7` 照折）。
+  单测 1 项（值/对象/satisfies 擦除 + 静态折叠）；全套件绿、286 零回退；
+  真机 `sa run` exit 41 对数。

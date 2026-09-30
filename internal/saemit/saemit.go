@@ -1918,7 +1918,10 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		// runtime (async lowers to direct calls; sa_std async.sla
 		// drivers are Phase 2), so await v ≡ v when v is a value.
 		return e.lowerExpr(n.AsAwaitExpression().Expression)
-	case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression:
+	case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression, ast.KindTypeAssertionExpression:
+		// Type-only assertions erase (angle `<T>x` included: same
+		// erasure as `as`; the parser already rejects angle assertions
+		// in expression positions where they would ambiguate).
 		return e.lowerExpr(n.Expression())
 	default:
 		e.refuse(n, "expression %s is not in the SA-lowerable subset", n.Kind.String())
@@ -7688,12 +7691,12 @@ func hasModifier(m *ast.Node, kind ast.Kind) bool {
 	return false
 }
 
-// staticLiteralText unwraps as/satisfies/non-null chains to a static
-// literal value (text, type, ok). Anything else is not foldable.
+// staticLiteralText unwraps as/satisfies/non-null/angle-assert chains
+// to a static literal value (text, type, ok). Anything else is not foldable.
 func staticLiteralText(n *ast.Node) (string, saType, bool) {
 	for n != nil {
 		switch n.Kind {
-		case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression:
+		case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression, ast.KindTypeAssertionExpression:
 			n = n.Expression()
 		case ast.KindNumericLiteral:
 			return n.Text(), tI32, true
