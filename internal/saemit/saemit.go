@@ -2762,8 +2762,18 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 	}
 	// process/crypto globals lower through the node backend without an
 	// import (Node exposes them globally; same zero-arg string shape).
+	// Deno.* globals lower through the deno backend the same way.
 	if (recv == "process" || recv == "crypto") && len(args) == 0 {
-		if proj, ok := projectionByTS(recv + "." + method); ok && proj.Backend == "node" {
+		if proj, ok := projectionByTS(recv + "." + method); ok && isPluginBackend(proj) {
+			v, t := e.emitProjCall(proj, args, pos)
+			if e.refused {
+				return "0", tUnknown, true
+			}
+			return v, t, true
+		}
+	}
+	if recv == "Deno" {
+		if proj, ok := projectionByTS("Deno." + method); ok && isPluginBackend(proj) {
 			v, t := e.emitProjCall(proj, args, pos)
 			if e.refused {
 				return "0", tUnknown, true
@@ -7472,7 +7482,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// one/two/three string slices expanded to (&ptr, len) in-params
 	// ahead of the outs; "fire" passes slices by value with no outs;
 	// "fireF64" adds one f64 out slot.
-	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64") {
+	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64") {
 		if proj.NodeOut == "fire" || proj.NodeOut == "fireF64" {
 			if proj.NodeOut == "fireF64" && len(args) != 1 {
 				e.refuse(pos, "%s takes exactly 1 argument", proj.TS)
@@ -7711,6 +7721,12 @@ func (e *emitter) emitStatusCheckedI64(proj StdProjection, arg string, pos *ast.
 	e.emit("%s = load %s + 0 as i64", out, ms)
 	e.releaseIfOwnedTemp(ms)
 	return out, tI64
+}
+
+// isPluginBackend reports native-plugin backends sharing the u32-status
+// out-param shape (node.sai, deno.sai; bun has no plugin yet).
+func isPluginBackend(proj StdProjection) bool {
+	return proj.Backend == "node" || proj.Backend == "deno"
 }
 
 // projectionByTS finds a projection table entry by its TS surface name.

@@ -301,6 +301,13 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "fireF64", Note: "f64 millis out; missing timer panics"},
 	{TS: "console.clear", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_console_clear", Ret: tVoid,
 		NodeOut: "fire", Note: "zero-arg"},
+	// ---- deno plugin backend (pilot): same u32-status shape as node ----
+	// No exported-symbols list exists; deno.sai + Zig source impls are the
+	// contract (both verified for these two). TS keys use Deno.* globals.
+	{TS: "Deno.hostname", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_hostname", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "Deno.osRelease", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_os_release", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

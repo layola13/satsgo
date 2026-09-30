@@ -554,6 +554,25 @@ func TestLowerDate(t *testing.T) {
 	}
 }
 
+func TestLowerDeno(t *testing.T) {
+	src := "function main(): i32 {\n  const h: string = Deno.hostname();\n  const r: string = Deno.osRelease();\n  return h.length + r.length;\n}\n"
+	res := mustLower(t, "dn1.ts", src)
+	for _, want := range []string{
+		"call @sa_deno_plugin_hostname",
+		"call @sa_deno_plugin_os_release",
+		`@import "deno.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Unknown Deno members refuse loudly (no silent sink).
+	bad := "function main(): i32 {\n  const x = Deno.serveHttp();\n  return 1;\n}\n"
+	if r := Lower("dn2.ts", bad); !r.Refused {
+		t.Fatalf("expected unknown-member refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

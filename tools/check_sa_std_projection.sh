@@ -137,3 +137,33 @@ if [[ ${#node_symbols[@]} -gt 0 ]]; then
     echo "PASS: all ${#node_symbols[@]} node symbols resolve"
   fi
 fi
+
+# Deno backend: no exported-symbols list exists upstream, so deno.sai is
+# the contract (Zig source impls verified by hand for each listed symbol).
+deno_symbols=(
+  sa_deno_plugin_hostname
+  sa_deno_plugin_os_release
+)
+
+if [[ ${#deno_symbols[@]} -gt 0 ]]; then
+  PLUGINS_ROOT="${SA_PLUGINS_ROOT:-}"
+  if [[ -z "$PLUGINS_ROOT" ]]; then
+    echo "SKIP: deno backend check needs SA_PLUGINS_ROOT (sa_plugin_deno checkout)" >&2
+  else
+    DENO="$PLUGINS_ROOT/sa_plugin_deno"
+    dfail=0
+    for sym in "${deno_symbols[@]}"; do
+      if grep -rq --include='*.sai' -e "@extern $sym(" "$DENO"; then
+        echo "ok: $sym (deno)"
+      else
+        echo "MISSING: $sym (no extern in sa_plugin_deno)"
+        dfail=$((dfail + 1))
+      fi
+    done
+    if [[ "$dfail" -ne 0 ]]; then
+      echo "FAIL: $dfail deno symbol(s) missing" >&2
+      exit 1
+    fi
+    echo "PASS: all ${#deno_symbols[@]} deno symbols resolve"
+  fi
+fi
