@@ -9207,6 +9207,24 @@ func (e *emitter) lowerImport(st *ast.Node) {
 					if e.link != nil && e.link.valueUsed != nil && !e.link.valueUsed[local] {
 						continue
 					}
+					// Exported literal consts fold by value (same shapes
+					// tryTopLevelConst accepts): no importEnv binding, no
+					// call signature; every consumer (folds, typeof,
+					// arithmetic, const-reassign guard) reuses the
+					// single-file const machinery untouched.
+					if lit, ok := res.consts[remote]; ok {
+						if e.constVals == nil {
+							e.constVals = map[string]string{}
+						}
+						if e.constIsStr == nil {
+							e.constIsStr = map[string]bool{}
+						}
+						e.constVals[local] = lit
+						if res.constStr[remote] {
+							e.constIsStr[local] = true
+						}
+						continue
+					}
 					if _, ok := res.exports[remote]; !ok {
 						e.refuse(el, "%s is not exported by %s", remote, mod)
 						continue

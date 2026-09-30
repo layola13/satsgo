@@ -135,3 +135,9 @@ backlog：基于用法的擦除（binder 查值位引用，无则消边），独
   planck program 口径 567→538（first-class 135→97；新增皆大声，
   内联体成员真缺口为主）；单测 1 项（7 子项）；286 零 diff；
   真机 check + run 差分一致（40==40）。
+- ✅ 跨文件 const 值导入（2026-09-30，`globalConsts`/`modResolution.consts`/
+  进口商 const 优先）：`export const` 字标量直折进口商 constVals
+  （`let`/模板/对象/桶链恒拒；旧三连拒一次全消）。
+  planck program 口径 538→522（-16 全为 EPSILON 簇，零新增）；
+  单测 1 项（折叠 + 对象/桶/私有恒拒）；286 零 diff；
+  真机 check + run 差分一致（7==7）。

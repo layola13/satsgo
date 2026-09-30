@@ -249,6 +249,17 @@
   planck 567→538（first-class 135→97；新增皆大声：内联体成员真缺口
   + 跨文件内联环境提示，失配静态提示为既有文案问题另记）；
   真机 `sa check` 过 + `sa run` exit 40 与 node 差分一致。
+- ✅ 跨文件 const 值导入（`globalConsts` + `modResolution.consts` +
+  进口商 const 优先分支，planck EPSILON 簇；单测 1 项）。
+  导出扫描对 `export const` 字标量记录文本（模板/对象恒拒；`let` 恒禁：
+  重赋值会污染进口商折叠，而进口商 const 重赋卫恒设不可变）；
+  进口商直接折进既有 constVals/constIsStr（f64 经 isFloatLiteral 同形），
+  桶转口与重导出链 v1 恒拒（不进 star/reexp 枚举）。
+  附带修出：`export const` 此前三连拒（not-exported + not-known +
+  value-gap），现一次折叠全消；旧 typeof 守卫单测期望同步翻转
+  （另加 `export let` 无值对照锁）。
+  全套件绿、286 sweep 零 diff；planck 538→522（-16 全为 EPSILON，
+  零新增-kind）；真机 check + run 差分一致（7==7）。
 - ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
   整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
   `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。

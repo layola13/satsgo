@@ -67,6 +67,11 @@ type modResolution struct {
 	prefix   string
 	exports  map[string]bool
 	rets     map[string]saType
+	// consts maps an exported literal const/let name to its fold text
+	// (constStr marks string consts); importers fold instead of binding.
+	// Direct definitions only: re-export propagation stays loud.
+	consts   map[string]string
+	constStr map[string]bool
 	// qualified maps an export name to its linked @name (direct defs and
 	// resolved re-exports alike; default imports use defQualified).
 	qualified    map[string]string
@@ -329,6 +334,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	sharedStaticDefs := map[string]*classDef{}
 	sharedEnums := map[string]map[string]int64{}
 	globalRets := map[string]map[string]saType{} // file -> name -> ret
+	globalConsts := map[string]map[string]string{} // file -> name -> literal text
+	globalConstStr := map[string]map[string]bool{} // file -> name -> string const
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
 	linkKindTmp := map[string]map[string]string{} // file -> name -> kind
@@ -338,6 +345,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		linkKindTmp[p] = map[string]string{}
 		linkExpTmp[p] = map[string]bool{}
 		globalRets[p] = map[string]saType{}
+		globalConsts[p] = map[string]string{}
+		globalConstStr[p] = map[string]bool{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
 		globalDefaults[p] = map[string][]bool{}
@@ -399,6 +408,32 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 							ast.KindNoSubstitutionTemplateLiteral:
 							if name, ok := bindingNameText(d); ok {
 								linkKindTmp[p][name] = "value"
+								// Exported CONST scalars link by value (let
+								// stays out: reassignment would stale the
+								// importer's fold, and the importer's const
+								// reassign guard assumes immutability).
+								// Shapes mirror tryTopLevelConst; templates
+								// stay loud (no constVals form).
+								isConst := st.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst != 0
+								if isConst && hasExportModifier(st) {
+									switch init.Kind {
+									case ast.KindNumericLiteral:
+										expOf[p].exports[name] = true
+										globalConsts[p][name] = init.Text()
+									case ast.KindStringLiteral:
+										if s, ok := stringLiteralText(init); ok {
+											expOf[p].exports[name] = true
+											globalConsts[p][name] = s
+											globalConstStr[p][name] = true
+										}
+									case ast.KindTrueKeyword:
+										expOf[p].exports[name] = true
+										globalConsts[p][name] = "1"
+									case ast.KindFalseKeyword:
+										expOf[p].exports[name] = true
+										globalConsts[p][name] = "0"
+									}
+								}
 							}
 						}
 					}
@@ -614,6 +649,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				prefix:       prefixOf[tgt],
 				exports:      expOf[tgt].exports,
 				rets:         expOf[tgt].rets,
+				consts:       globalConsts[tgt],
+				constStr:     globalConstStr[tgt],
 				qualified:    expOf[tgt].reexpQualified,
 				defLocal:     expOf[tgt].defLocal,
 				defQualified: defQ,

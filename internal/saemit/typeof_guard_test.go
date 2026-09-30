@@ -52,26 +52,42 @@ func TestLowerTypeofGuard(t *testing.T) {
 		t.Errorf("want unknown-global diagnostic, got %v", r.Diagnostics)
 	}
 	// Binder-visible imports are declared (not unknown globals), even
-	// though no scope binding records them.
+	// though no scope binding records them. Since cross-file consts
+	// fold by value, an imported literal const lowers outright.
 	files := map[string]string{
 		"main.ts": "import { y } from \"./u\";\nfunction main(): i32 {\n  if (typeof y === \"number\") {\n    return y;\n  }\n  return 0;\n}\n",
 		"u.ts":    "export const y: i32 = 1;\n",
 	}
 	rp := LowerProgram("main.ts", files)
-	if !rp.Refused {
-		t.Fatalf("expected not-known refusal, got:\n%s", rp.SAI)
+	if rp.Refused {
+		t.Fatalf("imported literal const must lower, got: %v", rp.Diagnostics)
 	}
-	known := false
 	for _, d := range rp.Diagnostics {
-		if strings.Contains(d, "not statically known") {
-			known = true
-		}
 		if strings.Contains(d, "unknown global") {
 			t.Errorf("binder-visible import must not be unknown: %v", rp.Diagnostics)
 		}
 	}
+	// A binder-visible import WITHOUT a const value still refuses as
+	// not-known (never unknown-global).
+	files2 := map[string]string{
+		"main.ts": "import { y } from \"./u\";\nfunction main(): i32 {\n  if (typeof y === \"number\") {\n    return y;\n  }\n  return 0;\n}\n",
+		"u.ts":    "export let y: i32;\n",
+	}
+	rp2 := LowerProgram("main.ts", files2)
+	if !rp2.Refused {
+		t.Fatalf("expected not-known refusal, got:\n%s", rp2.SAI)
+	}
+	known := false
+	for _, d := range rp2.Diagnostics {
+		if strings.Contains(d, "not statically known") {
+			known = true
+		}
+		if strings.Contains(d, "unknown global") {
+			t.Errorf("binder-visible import must not be unknown: %v", rp2.Diagnostics)
+		}
+	}
 	if !known {
-		t.Errorf("want not-known diagnostic, got %v", rp.Diagnostics)
+		t.Errorf("want not-known diagnostic, got %v", rp2.Diagnostics)
 	}
 }
 

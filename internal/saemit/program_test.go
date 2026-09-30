@@ -415,3 +415,49 @@ func TestLowerProgramTypeOnlySpecifierErasure(t *testing.T) {
 		t.Errorf("missing not-exported diagnostic: %v", r.Diagnostics)
 	}
 }
+
+// Exported literal consts link by value: the importer folds the literal
+// through the single-file const machinery (no importEnv binding). Only
+// const scalars (never let, never objects) travel; barrels stay loud.
+func TestLowerProgramConstValueImport(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { EPSILON, FLAG, NAME } from \"./c\";\nfunction main(): i32 {\n  if (FLAG) {\n    return EPSILON + 1;\n  }\n  return NAME.length;\n}\n",
+		"c.ts":    "export const EPSILON = 42;\nexport const FLAG = true;\nexport const NAME = \"hi\";\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	for _, want := range []string{"add 42, 1", "hi", "as u64"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in linked output:\n%s", want, res.SAI)
+		}
+	}
+	for _, d := range res.Diagnostics {
+		if strings.Contains(d, "not exported") || strings.Contains(d, "not lowerable") {
+			t.Errorf("const value import must lower cleanly, got: %s", d)
+		}
+	}
+	// Object consts never travel (no constVals form).
+	obj := map[string]string{
+		"main.ts": "import { O } from \"./c\";\nfunction main(): i32 {\n  return O.x;\n}\n",
+		"c.ts":    "export const O = { x: 1 };\n",
+	}
+	if r := LowerProgram("main.ts", obj); !r.Refused {
+		t.Fatalf("expected object-const refusal, got:\n%s", r.SAI)
+	}
+	// Barrel re-exports stay loud in v1 (direct definitions only).
+	barrel := map[string]string{
+		"main.ts":  "import { K } from \"./idx\";\nfunction main(): i32 {\n  return K;\n}\n",
+		"idx.ts":   "export * from \"./c\";\n",
+		"c.ts":     "export const K = 7;\n",
+	}
+	if r := LowerProgram("main.ts", barrel); !r.Refused {
+		t.Fatalf("expected barrel refusal, got:\n%s", r.SAI)
+	}
+	// Unexported consts stay loud.
+	priv := map[string]string{
+		"main.ts": "import { H } from \"./c\";\nfunction main(): i32 {\n  return H;\n}\n",
+		"c.ts":    "const H = 9;\n",
+	}
+	if r := LowerProgram("main.ts", priv); !r.Refused {
+		t.Fatalf("expected unexported-const refusal, got:\n%s", r.SAI)
+	}
+}
