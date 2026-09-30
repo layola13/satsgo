@@ -51,6 +51,13 @@ type tsxEmitter struct {
 	// setter names (any use refuses: setters have no render shape).
 	stateVars    map[string]string
 	stateSetters map[string]bool
+	// comp is the current component name (state+Comp_field stores);
+	// setterOf inverts setter -> state var; mountStores accumulates
+	// @onMount store lines; mountEmpty records an empty mount effect.
+	comp        string
+	setterOf    map[string]string
+	mountStores []string
+	mountEmpty  bool
 }
 
 func (x *tsxEmitter) refuse(n *ast.Node, format string, args ...any) {
@@ -93,18 +100,29 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 		x.refuse(fn, "component %s has no body", name)
 		return
 	}
-	// Leading statements must be useState declarations; the tail is a
-	// single return of JSX. Anything else (effects, handlers as
-	// statements, arbitrary code) refuses loudly.
+	// Leading statements must be useState declarations or mount
+	// useEffect calls; the tail is a single return of JSX. Anything
+	// else (other hooks, handlers as statements, arbitrary code)
+	// refuses loudly.
 	stmts := body.Statements()
 	if len(stmts) == 0 {
 		x.refuse(fn, "component %s must be a single return of JSX", name)
 		return
 	}
+	x.comp = name
 	x.stateVars = map[string]string{}
 	x.stateSetters = map[string]bool{}
+	x.setterOf = map[string]string{}
+	x.mountStores = nil
+	x.mountEmpty = false
 	for _, st := range stmts[:len(stmts)-1] {
-		if !x.lowerUseState(st) {
+		if st.Kind == ast.KindVariableStatement {
+			if !x.lowerUseState(st) {
+				return
+			}
+			continue
+		}
+		if !x.lowerUseEffect(st) {
 			return
 		}
 	}
@@ -133,8 +151,121 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 	if !x.lowerJSXNode(rs.Expression, &b, "  ") {
 		return
 	}
-	b.WriteString("\n</Component>\n")
+	b.WriteString("\n")
+	if len(x.mountStores) > 0 || x.mountEmpty {
+		// @onMount runs once at mount (counter-demo handler shape);
+		// an empty effect still emits the block with a bare ret.
+		b.WriteString("  @onMount:\n  L_ENTRY:\n")
+		for _, s := range x.mountStores {
+			b.WriteString("    " + s + "\n")
+		}
+		if len(x.mountStores) > 0 {
+			b.WriteString("    call @render()\n")
+		}
+		b.WriteString("    ret\n")
+	}
+	b.WriteString("</Component>\n")
 	x.out.WriteString(b.String())
+}
+
+// lowerUseEffect lowers mount-only `useEffect(fn, [])`: fn takes no
+// params, declares no cleanup (no return value), and its body holds only
+// setter calls with integer/boolean literal arguments (stored straight
+// into state slots). Non-empty deps, missing deps, cleanup returns and
+// every other hook refuse loudly.
+func (x *tsxEmitter) lowerUseEffect(st *ast.Node) bool {
+	isHook := false
+	if st.Kind == ast.KindExpressionStatement {
+		if es := st.AsExpressionStatement(); es.Expression != nil && es.Expression.Kind == ast.KindCallExpression {
+			if ce := es.Expression.AsCallExpression(); ce.Expression.Kind == ast.KindIdentifier {
+				callee := ce.Expression.Text()
+				isHook = callee == "useEffect" || (strings.HasPrefix(callee, "use") && len(callee) > 3 && callee[3] >= 'A' && callee[3] <= 'Z')
+			}
+		}
+	}
+	if !isHook {
+		x.refuse(st, "component statements before return must be useState/useEffect declarations")
+		return false
+	}
+	ce := st.AsExpressionStatement().Expression.AsCallExpression()
+	if ce.Expression.Text() != "useEffect" {
+		x.refuse(st, "hook %s is not in the subset (only mount useEffect)", ce.Expression.Text())
+		return false
+	}
+	if ce.Arguments == nil || len(ce.Arguments.Nodes) != 2 {
+		x.refuse(st, "useEffect needs (fn, []) exactly (missing deps run every render)")
+		return false
+	}
+	deps := ce.Arguments.Nodes[1]
+	if deps.Kind != ast.KindArrayLiteralExpression || len(deps.AsArrayLiteralExpression().Elements.Nodes) != 0 {
+		x.refuse(st, "only mount useEffect with [] deps is in the subset")
+		return false
+	}
+	fn := ce.Arguments.Nodes[0]
+	if fn.Kind != ast.KindArrowFunction && fn.Kind != ast.KindFunctionExpression {
+		x.refuse(st, "useEffect callback must be an inline function")
+		return false
+	}
+	if len(fn.Parameters()) != 0 {
+		x.refuse(st, "useEffect callback takes no parameters")
+		return false
+	}
+	fbody := fn.BodyData().Body
+	if fbody == nil || fbody.Kind != ast.KindBlock {
+		x.refuse(st, "useEffect callback must have a block body")
+		return false
+	}
+	for _, s := range fbody.Statements() {
+		if s.Kind == ast.KindReturnStatement {
+			x.refuse(s, "useEffect cleanup returns are not in the subset")
+			return false
+		}
+		if s.Kind != ast.KindExpressionStatement {
+			x.refuse(s, "mount effect bodies hold only setter(literal) calls")
+			return false
+		}
+		es := s.AsExpressionStatement()
+		if es.Expression == nil || es.Expression.Kind != ast.KindCallExpression {
+			x.refuse(s, "mount effect bodies hold only setter(literal) calls")
+			return false
+		}
+		sc := es.Expression.AsCallExpression()
+		if sc.Expression.Kind != ast.KindIdentifier || !x.stateSetters[sc.Expression.Text()] {
+			x.refuse(s, "mount effect bodies hold only setter(literal) calls")
+			return false
+		}
+		if sc.Arguments == nil || len(sc.Arguments.Nodes) != 1 {
+			x.refuse(s, "setter calls take exactly 1 argument")
+			return false
+		}
+		arg := sc.Arguments.Nodes[0]
+		var val, ty string
+		switch arg.Kind {
+		case ast.KindNumericLiteral:
+			if strings.ContainsAny(arg.Text(), ".eE") {
+				x.refuse(arg, "setter float arguments are not in the subset")
+				return false
+			}
+			val, ty = arg.Text(), "i64"
+		case ast.KindTrueKeyword:
+			val, ty = "1", "i1"
+		case ast.KindFalseKeyword:
+			val, ty = "0", "i1"
+		default:
+			x.refuse(arg, "setter arguments must be integer/boolean literals")
+			return false
+		}
+		// Invert the setter: the matching state var is the one whose
+		// setter name was recorded alongside it.
+		field := x.setterOf[sc.Expression.Text()]
+		if field == "" {
+			x.refuse(s, "setter %s has no state slot", sc.Expression.Text())
+			return false
+		}
+		x.mountStores = append(x.mountStores, fmt.Sprintf("store state+%s_%s, %s as %s", x.comp, field, val, ty))
+	}
+	x.mountEmpty = true
+	return true
 }
 
 // lowerUseState lowers `const [x, setX] = useState(lit)` into a state slot.
@@ -185,16 +316,19 @@ func (x *tsxEmitter) lowerUseState(st *ast.Node) bool {
 	var text string
 	switch lit.Kind {
 	case ast.KindNumericLiteral:
-		text = lit.Text()
-		if strings.ContainsAny(text, ".eE") {
-			// Float text passes through verbatim (SAX numeric slot).
+		// Integer slots lower as i64 (counter-demo shape); floats have
+		// no slot type yet and refuse loudly rather than mistruncate.
+		if strings.ContainsAny(lit.Text(), ".eE") {
+			x.refuse(lit, "useState float initializers are not in the subset (integer/boolean only)")
+			return false
 		}
+		text = lit.Text()
 	case ast.KindTrueKeyword:
 		text = "1 as i1"
 	case ast.KindFalseKeyword:
 		text = "0 as i1"
 	default:
-		x.refuse(lit, "useState initializers must be numeric/boolean literals (strings need the buffer slice)")
+		x.refuse(lit, "useState initializers must be integer/boolean literals (strings need the buffer slice)")
 		return false
 	}
 	if _, dup := x.stateVars[sv]; dup {
@@ -203,6 +337,7 @@ func (x *tsxEmitter) lowerUseState(st *ast.Node) bool {
 	}
 	x.stateVars[sv] = text
 	x.stateSetters[ss] = true
+	x.setterOf[ss] = sv
 	return true
 }
 

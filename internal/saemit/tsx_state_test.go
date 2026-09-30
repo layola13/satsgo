@@ -46,3 +46,54 @@ func TestLowerTSXUseState(t *testing.T) {
 		t.Fatalf("expected computed refusal, got:\n%s", r.SAX)
 	}
 }
+
+func TestLowerTSXMountEffect(t *testing.T) {
+	src := "function Counter() {\n  const [count, setCount] = useState(0);\n  useEffect(() => { setCount(5); }, []);\n  return <section>\n    <h1>{count}</h1>\n  </section>;\n}\n"
+	res := LowerTSX("m.tsx", src)
+	if res.Refused {
+		msgs := []string{}
+		for _, d := range res.Diagnostics {
+			msgs = append(msgs, d.Error())
+		}
+		t.Fatalf("unexpected refusal:\n%s", strings.Join(msgs, "\n"))
+	}
+	for _, want := range []string{
+		"count = 0",
+		"@onMount:",
+		"store state+Counter_count, 5 as i64",
+		"call @render()",
+	} {
+		if !strings.Contains(res.SAX, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAX)
+		}
+	}
+	// Empty mount effect emits a bare block.
+	empty := "function C() {\n  const [n, setN] = useState(0);\n  useEffect(() => {}, []);\n  return <div>{n}</div>;\n}\n"
+	res = LowerTSX("e2.tsx", empty)
+	if res.Refused {
+		t.Fatalf("empty mount effect must lower")
+	}
+	if !strings.Contains(res.SAX, "@onMount:") {
+		t.Errorf("missing onMount block:\n%s", res.SAX)
+	}
+	// Non-empty deps refuse.
+	deps := "function C() {\n  const [n, setN] = useState(0);\n  useEffect(() => {}, [n]);\n  return <div>{n}</div>;\n}\n"
+	if r := LowerTSX("d.tsx", deps); !r.Refused {
+		t.Fatalf("expected deps refusal, got:\n%s", r.SAX)
+	}
+	// Cleanup returns refuse.
+	cl := "function C() {\n  const [n, setN] = useState(0);\n  useEffect(() => { return () => {}; }, []);\n  return <div>{n}</div>;\n}\n"
+	if r := LowerTSX("c.tsx", cl); !r.Refused {
+		t.Fatalf("expected cleanup refusal, got:\n%s", r.SAX)
+	}
+	// Other hooks refuse.
+	mm := "function C() {\n  const m = useMemo(() => 1, []);\n  return <div />;\n}\n"
+	if r := LowerTSX("m2.tsx", mm); !r.Refused {
+		t.Fatalf("expected other-hook refusal, got:\n%s", r.SAX)
+	}
+	// Computed setter arguments refuse.
+	ca := "function C() {\n  const [n, setN] = useState(0);\n  useEffect(() => { setN(n + 1); }, []);\n  return <div>{n}</div>;\n}\n"
+	if r := LowerTSX("a.tsx", ca); !r.Refused {
+		t.Fatalf("expected computed-arg refusal, got:\n%s", r.SAX)
+	}
+}
