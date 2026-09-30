@@ -20,6 +20,10 @@ fi
 
 # TS surface -> sa_std symbol (must mirror StdProjectionTable in
 # internal/saemit/stdlib.go; keep the two lists in sync).
+# NOTE: Math trig/exp/log/hypot/fround are deliberately ABSENT here and in
+# the table: both frontends refuse them loudly per the reference lowerer
+# (stdlib.go documents why projecting them would assemble the wrong
+# dialect). Never re-add sa_math_* without an emitter that emits them.
 symbols=(
   sa_print_bytes
   sa_fmt_i64_into sa_fmt_f64_into
@@ -29,9 +33,6 @@ symbols=(
   sa_string_to_lower_ascii sa_string_to_upper_ascii
   sa_string_repeat sa_string_pad_start sa_string_pad_end sa_string_replace
   sa_parse_float sa_string_code_point_at
-  sa_math_sin sa_math_cos sa_math_tan sa_math_asin sa_math_acos sa_math_atan
-  sa_math_atan2 sa_math_sinh sa_math_cosh sa_math_tanh sa_math_exp sa_math_expm1
-  sa_math_log sa_math_log1p sa_math_log2 sa_math_cbrt sa_math_hypot sa_math_fround
   sa_btree_map_new
   sa_btree_map_insert sa_btree_map_get sa_btree_map_contains_key
   sa_btree_map_remove sa_btree_map_len sa_btree_map_clear

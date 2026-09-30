@@ -60,6 +60,11 @@
   `go test ./internal/saemit/` 全过；sci/sa_std 侧 31 缺失为基线预存，与本批无关）。
 - ✅ node `os.*` Batch3（version/userInfo/networkInterfaces，同 `(&out_ptr,&out_len)->u32`
   形状；TS 键从 Node 驼峰命名）；node 契约 15/15 全过，全量单测过。
+- ✅ `check_sa_std_projection.sh` 纠偏：删除 18 个从未被发射的 `sa_math_*`
+  三角/指数/对数符号（两前端一律大声拒，见 `stdlib.go` 注释；脚本必须镜像投影表，
+  不得超前）。剩余 13 个 string 符号缺失为 **sci 侧真实缺口**
+  （`sa_string_index_of` 等两前端实发、`origin/main` 亦无，`sa` 二进制无内建），
+  按“禁 tsgo 原创”立项到 sci（Zig runtime + `string.sai` extern，另起 commit）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
