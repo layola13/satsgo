@@ -54,7 +54,9 @@ type StdProjection struct {
 	// NodeOut marks node-plugin u32-status out-param calls whose shape is
 	// (status, outs...): "string" wraps (&ptr,&len) outs into a slice;
 	// "string1" additionally expands one leading string-slice argument
-	// to (&ptr, len) in-params. Nonzero status panics (loud).
+	// to (&ptr, len) in-params; "argv" packs all string arguments into
+	// a 16-byte {ptr,len} array passed as (argv, argc). Nonzero status
+	// panics (loud).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
@@ -208,6 +210,12 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string1", Note: "one string arg; status-checked"},
 	{TS: "path.extname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_extname", Ret: tString,
 		NodeOut: "string1", Note: "one string arg; status-checked"},
+	// path argv: variadic string parts packed as {ptr,len}[argc]
+	// (16-byte SA slice layout, matching SaSlice on the plugin side).
+	{TS: "path.join", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_join", Ret: tString,
+		NodeOut: "argv", Note: "variadic strings; status-checked"},
+	{TS: "path.resolve", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_resolve", Ret: tString,
+		NodeOut: "argv", Note: "variadic strings; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

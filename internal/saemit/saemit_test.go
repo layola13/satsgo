@@ -355,6 +355,18 @@ func TestLowerNodePath(t *testing.T) {
 	if !r.Refused {
 		t.Fatalf("expected arity refusal, got:\n%s", r.SAI)
 	}
+	argv := "import { join, resolve } from \"path\";\nfunction main(): i32 {\n  const j: string = join(\"a\", \"b\", \"c\");\n  const r: string = resolve(\"/x\");\n  const e: string = join();\n  return j.length + r.length + e.length;\n}\n"
+	res = mustLower(t, "p3.ts", argv)
+	for _, want := range []string{
+		"call @sa_node_plugin_path_join",
+		"call @sa_node_plugin_path_resolve",
+		"alloc 48",
+		"store ",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 }
 
 func TestLowerTopLevelConst(t *testing.T) {

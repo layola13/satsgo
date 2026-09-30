@@ -75,6 +75,10 @@
   `NodeOut "string1"`（一进一出：`&ptr+len` 进参 + u32 状态检查 + slice 包装；
   `join/resolve` 的 argv 桥另立项）。node 契约 18/18 全过；单测 2 项
   （成功形状 + 元数拒绝）；`tsgo-sa` 实测发射形与 `node.sai` 逐位对齐。
+- ✅ node `path.*` argv 桥（join/resolve）：`NodeOut "argv"` 变参打包为 16 字节
+  `{ptr,len}` 数组（SA slice 布局 = 插件 `SaSlice`；零参仍 alloc 一槽，
+  插件按 argc==0 短路，无 null 发明；argv 用后 `!` 释放）。
+  node 契约 20/20 全过；形状校验器 `check_sai_shape.py` 通过；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

@@ -87,6 +87,8 @@ node_symbols=(
   sa_node_plugin_path_normalize
   sa_node_plugin_path_dirname
   sa_node_plugin_path_extname
+  sa_node_plugin_path_join
+  sa_node_plugin_path_resolve
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

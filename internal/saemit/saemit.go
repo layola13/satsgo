@@ -7120,19 +7120,41 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// panic on nonzero status (loud), then wrap outs per NodeOut.
 	// "string" takes no arguments; "string1" takes one string slice
 	// expanded to (&ptr, len) in-params ahead of the out slots.
-	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1") {
+	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "argv") {
 		want := 0
 		if proj.NodeOut == "string1" {
 			want = 1
 		}
-		if len(args) != want {
+		if proj.NodeOut != "argv" && len(args) != want {
 			e.refuse(pos, "%s takes %d argument(s)", proj.TS, want)
 			return "0", tUnknown
 		}
 		pre := ""
+		argvRel := ""
 		if proj.NodeOut == "string1" {
 			ip, il := e.expandSlice(args[0])
 			pre = "&" + ip + ", " + il + ", "
+		}
+		if proj.NodeOut == "argv" {
+			// Pack parts as 16-byte {ptr,len} entries (SA slice layout,
+			// matching the plugin's SaSlice array). Zero parts still
+			// allocates one slot; the plugin short-circuits on argc==0
+			// before touching argv, so no null idiom is invented.
+			n := len(args)
+			slots := n
+			if slots == 0 {
+				slots = 1
+			}
+			argv := e.freshTmp()
+			e.emit("%s = alloc %d", argv, slots*16)
+			e.ownTemp(argv)
+			argvRel = argv
+			for i, a := range args {
+				ap, al := e.expandSlice(a)
+				e.emit("store %s + %d, %s as ptr", argv, i*16, ap)
+				e.emit("store %s + %d, %s as u64", argv, i*16+8, al)
+			}
+			pre = argv + ", " + fmt.Sprintf("%d", n) + ", "
 		}
 		ps := e.freshTmp()
 		ls := e.freshTmp()
@@ -7164,6 +7186,9 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		e.declareOwned(out)
 		e.releaseIfOwnedTemp(ps)
 		e.releaseIfOwnedTemp(ls)
+		if argvRel != "" {
+			e.releaseIfOwnedTemp(argvRel)
+		}
 		return out, tString
 	}
 	isStr := func(i int) bool {
