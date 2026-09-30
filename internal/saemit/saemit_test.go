@@ -741,25 +741,18 @@ func TestLowerStaticFold(t *testing.T) {
 	if !strings.Contains(res2.SAI, "circle") {
 		t.Errorf("missing cross-file static fold:\n%s", res2.SAI)
 	}
-	// Heritage classes publish statics without panicking; the declaring
-	// file itself still refuses loudly for extends (program stays refused,
-	// but with the extends diagnostic, never a crash).
+	// Heritage classes publish statics and lower (single extends flattens;
+	// empty subclasses inherit everything; see class_heritage.go).
 	her := map[string]string{
 		"main.ts": "import { CircleShape } from \"./shapes\";\nfunction main(): string {\n  return CircleShape.TYPE;\n}\n",
 		"shapes.ts": "class Shape {\n}\nexport class CircleShape extends Shape {\n  static TYPE = \"circle\" as const;\n}\n",
 	}
 	r := LowerProgram("main.ts", her)
-	if !r.Refused {
-		t.Fatalf("expected extends refusal, got:\n%s", r.SAI)
+	if r.Refused {
+		t.Fatalf("unexpected refusal:\n%v", r.Diagnostics)
 	}
-	hit := false
-	for _, d := range r.Diagnostics {
-		if strings.Contains(d, "extends/implements") {
-			hit = true
-		}
-	}
-	if !hit {
-		t.Errorf("want extends diagnostic, got %v", r.Diagnostics)
+	if !strings.Contains(r.SAI, "circle") {
+		t.Errorf("missing heritage static fold:\n%s", r.SAI)
 	}
 }
 
@@ -862,11 +855,14 @@ func TestLowerCallDesugar(t *testing.T) {
 	}
 }
 
-func TestLowerRefusesClassExtends(t *testing.T) {
+func TestLowerClassExtendsEmptyAllowed(t *testing.T) {
+	// Empty subclasses flatten (base fields/methods inherit; see
+	// class_heritage.go). Still-refused heritage shapes stay locked in
+	// TestLowerHeritageRefusals.
 	src := "class B { x: i32 = 0; }\nclass C extends B {}\nfunction main(): i32 { return 0; }\n"
 	res := Lower("cls.ts", src)
-	if !res.Refused {
-		t.Fatalf("expected refusal for extends, got:\n%s", res.SAI)
+	if res.Refused {
+		t.Fatalf("unexpected refusal:\n%s", diagText(res))
 	}
 }
 

@@ -329,6 +329,11 @@ type emitter struct {
 	// their class; instFnFields maps instance -> field -> inline arrow for
 	// function-typed fields; thisSelf is the current method receiver.
 	classDefs    map[string]*classDef
+	// classParent maps a subclass to its direct base (single inheritance;
+	// see class_heritage.go). curMethodClass is the class whose method body
+	// is being inlined (super routing context).
+	classParent    map[string]string
+	curMethodClass string
 	// staticDefs holds statics-only shells from heritage-refused classes
 	// (fold reads only; never instantiation; see recordClass).
 	staticDefs   map[string]*classDef
@@ -1756,6 +1761,18 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 			return "0", tUnknown
 		}
 		return e.thisSelf, tArray
+	case ast.KindSuperKeyword:
+		// Super shares the flattened instance (offsets identical); only
+		// valid inside a subclass method/ctor.
+		if e.thisSelf == "" {
+			e.refuse(n, "super outside a subclass method is not lowerable")
+			return "0", tUnknown
+		}
+		if _, ok := e.superBaseForRecv(e.thisSelf); !ok {
+			e.refuse(n, "super outside a subclass method is not lowerable")
+			return "0", tUnknown
+		}
+		return e.thisSelf, tArray
 	case ast.KindAwaitExpression:
 		// Await unwraps synchronously: the subset has no concurrent
 		// runtime (async lowers to direct calls; sa_std async.sla
@@ -2719,6 +2736,11 @@ func (e *emitter) unwrapFsBuffer(buf string) (string, saType) {
 func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	pa := fn.AsPropertyAccessExpression()
 	method := pa.Name().Text()
+	// `super.m(...)` routes to the base-class method on this (flattened
+	// layouts keep field offsets; see class_heritage.go).
+	if pa.Expression.Kind == ast.KindSuperKeyword {
+		return e.lowerSuperMethodCall(pa, args, argNodes, pos)
+	}
 	// Math is handled at the call site (needs argument nodes for spread).
 	// `this.m(...)` aliases the current method receiver (Text() panics on
 	// non-identifier expressions, so resolve the receiver first).
@@ -6277,7 +6299,7 @@ func (e *emitter) lowerPropertyAccess(n *ast.Node) (string, saType) {
 // across a guard join).
 func isPureBase(n *ast.Node) bool {
 	switch n.Kind {
-	case ast.KindIdentifier, ast.KindThisKeyword:
+	case ast.KindIdentifier, ast.KindThisKeyword, ast.KindSuperKeyword:
 		return true
 	case ast.KindPropertyAccessExpression:
 		pa := n.AsPropertyAccessExpression()
@@ -6412,8 +6434,14 @@ func (e *emitter) lowerMemberChain(n *ast.Node) (string, saType, bool) {
 		cur = pa.Expression
 	}
 	if cur.Kind != ast.KindIdentifier {
-		// `this.f` chains resolve to the current method receiver.
+		// `this.f` chains resolve to the current method receiver; `super.f`
+		// shares the flattened offsets (validated in class_heritage.go).
 		if cur.Kind == ast.KindThisKeyword && e.thisSelf != "" {
+			segs = append([]string{e.thisSelf}, segs...)
+		} else if cur.Kind == ast.KindSuperKeyword && e.thisSelf != "" {
+			if !e.checkSuperAccess(n, segs) {
+				return "0", tUnknown, true
+			}
 			segs = append([]string{e.thisSelf}, segs...)
 		} else {
 			return "", tUnknown, false
@@ -6461,8 +6489,15 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 		cur = pa.Expression
 	}
 	if cur.Kind != ast.KindIdentifier {
-		// `this.f = v` stores resolve to the current method receiver.
+		// `this.f = v` stores resolve to the current method receiver;
+		// `super.f = v` shares the flattened offsets (subclass only).
 		if cur.Kind == ast.KindThisKeyword && e.thisSelf != "" {
+			segs = append([]string{e.thisSelf}, segs...)
+		} else if cur.Kind == ast.KindSuperKeyword && e.thisSelf != "" {
+			if _, ok := e.superBaseForRecv(e.thisSelf); !ok {
+				e.refuse(target, "super property access is only lowerable inside a subclass method")
+				return true
+			}
 			segs = append([]string{e.thisSelf}, segs...)
 		} else {
 			return false
@@ -7045,12 +7080,15 @@ func (e *emitter) recordLayout(st *ast.Node) {
 	}
 	_ = decl
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
+	// Interface extends flattens base fields first (type-only; see
+	// class_heritage.go). Missing bases skip best-effort.
+	e.inheritInterface(st, l)
+	off := l.size
 	for _, tp := range st.TypeParameters() {
 		if nm := tp.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
 			l.tparams = append(l.tparams, nm.Text())
 		}
 	}
-	off := 0
 	for _, m := range st.AsInterfaceDeclaration().Members.Nodes {
 		if m.Kind != ast.KindPropertySignature {
 			// Method signatures declare no layout field (mirrors parseInterface).
@@ -7088,6 +7126,13 @@ type classDef struct {
 	layout  *layout
 	methods map[string]*ast.Node
 	ctor    *ast.Node
+	// ctorOwner names the class that declared ctor (a derived class without
+	// its own ctor inherits the base node; super() inside it targets the
+	// owner's parent chain).
+	ctorOwner string
+	// isAbstract refuses `new` precisely (TS fidelity; concrete subclasses
+	// still instantiate).
+	isAbstract bool
 	// getters/setters record accessor bodies (reads/writes refuse
 	// precisely until inline support lands; the class itself lowers).
 	getters map[string]*ast.Node
@@ -7165,7 +7210,8 @@ func (e *emitter) classDefOf(base string) *classDef {
 }
 
 // recordClass registers a class shape. Only data fields contribute layout;
-// extends/implements, accessors and static blocks refuse loudly.
+// single extends flattens (see class_heritage.go), implements erases;
+// accessors and static blocks refuse loudly.
 func (e *emitter) recordClass(st *ast.Node) {
 	cd := st.AsClassDeclaration()
 	name := "<anon>"
@@ -7193,20 +7239,39 @@ func (e *emitter) recordClass(st *ast.Node) {
 			def.statics[m.Name().Text()] = staticVal{text: text, typ: typ}
 		}
 	}
-	if cd.HeritageClauses != nil && len(cd.HeritageClauses.Nodes) > 0 {
-		// Statics-only shells live apart from instantiable defs so no
-		// instance path can observe a missing layout (see lowerNewClass).
-		if len(def.statics) > 0 {
-			if e.staticDefs == nil {
-				e.staticDefs = map[string]*classDef{}
-			}
-			e.staticDefs[name] = def
-		}
-		e.refuse(st, "class %s with extends/implements is not lowerable", name)
-		return
-	}
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
 	off := 0
+	if cd.HeritageClauses != nil && len(cd.HeritageClauses.Nodes) > 0 {
+		hi, ok := e.parseHeritage(cd, st)
+		if !ok {
+			if len(def.statics) > 0 {
+				if e.staticDefs == nil {
+					e.staticDefs = map[string]*classDef{}
+				}
+				e.staticDefs[name] = def
+			}
+			return
+		}
+		if !hi.hasExtends {
+			// Implements-only: type-erased, the class lowers normally.
+		} else if !e.inheritClass(name, hi.base, def, l, st) {
+			// Statics-only shells live apart from instantiable defs so no
+			// instance path can observe a missing layout (see lowerNewClass).
+			if len(def.statics) > 0 {
+				if e.staticDefs == nil {
+					e.staticDefs = map[string]*classDef{}
+				}
+				e.staticDefs[name] = def
+			}
+			return
+		} else {
+			off = e.classDefs[hi.base].layout.size
+			l.size = off
+		}
+	}
+	if hasModifier(st, ast.KindAbstractKeyword) {
+		def.isAbstract = true
+	}
 	for _, m := range cd.Members.Nodes {
 		switch m.Kind {
 		case ast.KindPropertyDeclaration:
@@ -7231,6 +7296,22 @@ func (e *emitter) recordClass(st *ast.Node) {
 			saname := "ptr"
 			if pd.Type != nil {
 				saname = saNameOfType(pd.Type)
+			}
+			if prevOff, dup := l.offsets[fname]; dup {
+				// Inherited field redeclared: keep the base offset (inherited
+				// code reads the same slot) and require the same width.
+				prevSize, _ := widthOf(l.types[fname])
+				newSize, _ := widthOf(saname)
+				if prevSize != newSize {
+					e.refuse(m, "field %s redeclared with a different width in subclass %s", fname, name)
+					continue
+				}
+				l.types[fname] = saname
+				if pd.Type != nil {
+					l.ftypes[fname] = rawTypeName(pd.Type)
+				}
+				_ = prevOff
+				continue
 			}
 			size, align := widthOf(saname)
 			off = alignTo(off, align)
@@ -7274,6 +7355,24 @@ func (e *emitter) recordClass(st *ast.Node) {
 	}
 	l.size = off
 	def.layout = l
+	// Default derived constructor: a subclass without its own ctor inherits
+	// the base node (ctorOwner keeps super() targeting the right parent).
+	if def.ctor != nil {
+		def.ctorOwner = name
+	} else if base, ok := e.classParent[name]; ok && base != "" {
+		if bdef, ok := e.classDefs[base]; ok {
+			def.ctor = bdef.ctor
+			def.ctorOwner = base
+		}
+	}
+	// A declared derived constructor must call super() (TS rule; without it
+	// base fields would silently stay zero). Checked at declaration so the
+	// gate fires even when the class is never instantiated.
+	if def.ctor != nil && def.ctorOwner == name {
+		if _, ok := e.classParent[name]; ok && !e.ctorCallsSuper(def.ctor) {
+			e.refuse(st, "constructor of %s must call super() (derived constructors delegate to the base)", name)
+		}
+	}
 	if e.layouts == nil {
 		e.layouts = map[string]*layout{}
 	}
@@ -7293,6 +7392,10 @@ func (e *emitter) lowerNewClass(name string, nw *ast.NewExpression, pos *ast.Nod
 		// Heritage/statics-only shells never instantiate (a missing
 		// layout used to panic here; hostile inputs must refuse).
 		e.refuse(pos, "class %s cannot be instantiated in the subset", name)
+		return "0", tUnknown
+	}
+	if def.isAbstract {
+		e.refuse(pos, "abstract class %s cannot be instantiated (declare a concrete subclass)", name)
 		return "0", tUnknown
 	}
 	l := def.layout
@@ -7335,8 +7438,14 @@ func (e *emitter) lowerNewClass(name string, nw *ast.NewExpression, pos *ast.Nod
 		}
 		body := def.ctor.Body()
 		if body != nil {
+			// ctorOwner keeps an inherited super() targeting the right
+			// parent (multi-level chains delegate recursively).
+			owner := name
+			if def.ctorOwner != "" {
+				owner = def.ctorOwner
+			}
 			for _, s := range body.Statements() {
-				if !e.wireCtorStatement(h, name, s, paramArg, paramVal, pos) {
+				if !e.wireCtorStatement(h, owner, s, paramArg, paramVal, pos) {
 					return h, tArray
 				}
 			}
@@ -7345,10 +7454,14 @@ func (e *emitter) lowerNewClass(name string, nw *ast.NewExpression, pos *ast.Nod
 	return h, tArray
 }
 
-// wireCtorStatement interprets one `this.f = <param>` constructor wiring.
+// wireCtorStatement interprets one `this.f = <param>` constructor wiring
+// (plus `super(...)` delegation for subclasses; see class_heritage.go).
 // Reports false after refusing.
 func (e *emitter) wireCtorStatement(h, className string, s *ast.Node, paramArg map[string]*ast.Node, paramVal map[string]string, pos *ast.Node) bool {
 	_ = pos
+	if done, ok := e.wireSuperCtorStatement(h, className, s, paramVal, pos); done {
+		return ok
+	}
 	if s.Kind != ast.KindExpressionStatement {
 		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
 		return false
@@ -7431,11 +7544,14 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	e.pushScope()
 	savedSelf := e.thisSelf
 	e.thisSelf = recv
+	savedCls := e.curMethodClass
+	e.curMethodClass = className
 	for i, p := range params {
 		pname, ok := bindingNameText(p.AsNode())
 		if !ok {
 			e.refuse(p.AsNode(), "destructured method parameters are not lowerable")
 			e.thisSelf = savedSelf
+			e.curMethodClass = savedCls
 			e.popScope()
 			return "0", tUnknown, true
 		}
@@ -7491,6 +7607,7 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	}
 	e.inlineRet = saved
 	e.thisSelf = savedSelf
+	e.curMethodClass = savedCls
 	e.emitRaw("%s:", endL)
 	e.terminated = false
 	out := e.freshTmp()

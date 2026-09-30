@@ -336,3 +336,17 @@
   下一步 program 口径 + `.d.ts` 配对后再判定（已记入 todo/03）。
 - ✅ 鲁棒性：lodash-es 644 文件 hostile 语料零 panic（checker 异常一律回退语法 lowering；
   拒绝全是定位 diagnostic）。
+
+### 全 TS 特性收敛（进行中，目标：零借口、无残缺）
+
+- ✅ 类单继承（`class_heritage.go` 模块 + `saemit.go` 薄钩子 12 处）：
+  `extends` 布局拍扁（父偏移不变、子段追加；重声明同宽复用偏移、异宽大声拒）+
+  方法/getter/setter/静态继承（子覆盖）+ 缺省派生构造（继承基构造节点）+
+  `super(n)` 构造委托（经外层调用点映射，字面量/形参直通、余者大声拒；无基构造时求值丢弃）+
+  `super.m()`/`super.f` 路由（拍扁偏移等价，getter 保持专属拒）+
+  `implements` 类型擦除 + 接口 `extends` 布局拍扁 + `abstract` 精确拒 `new`；
+  动态基/未知基/环/缺 `super()`/非法 `super` 一律大声拒。
+  286 单文件扫测零回退（基线 worktree 逐字节一致，refused 0/0）；
+  单测 9 项（7 新 + 2 旧转正：extends 空子类、heritage 静态跨文件）；
+  真机 `sa check` 过（103/24 指令），手工对数 5==5（Dog(4,1).total()）。
+  缺口政策：新增 std 原语一律立项到 sci/sa_std（禁 tsgo 原创运行时）。
