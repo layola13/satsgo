@@ -154,6 +154,12 @@
   排序读出（dev 排除、版本原文），`sa.mod` 注释 require 行（`#` 为合法注释，
   hash 缺位故不输出有效行）+ subset-report 独立 section；CLI build 链透传，
   单文件口径不涉及。单测 2 项；全量单测过。
+- ✅ checker 布局 v1（`checker_layout.go` 模块，todo/02#2 首刀）：
+  `layoutOfNode` = 记录表优先 → checker 接口/类/别名名 → 匿名形字段集
+  `matchLayout`；`lowerMemberChain` 基址改走它（嵌套下沉不动）。
+  工厂返回等推断布局首次可达；planck program 口径 diag 686→649。
+  单测 1 项（具名推断 + 匿名形 + 未知仍拒）；全量单测过。
+  已探明 v2：`a.q.c` 嵌套别名（`type TransformValue={...}` 未建布局）另立项。
 - ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
   log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
   缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`

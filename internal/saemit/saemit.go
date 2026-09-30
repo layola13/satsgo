@@ -6277,7 +6277,9 @@ func (e *emitter) lowerMemberChain(n *ast.Node) (string, saType, bool) {
 	} else {
 		segs = append([]string{cur.Text()}, segs...)
 	}
-	l := e.layoutOfVar(segs[0])
+	// Checker-backed layouts cover inferred structs (factory results)
+	// that syntax recording misses; recorded layouts keep priority.
+	l := e.layoutOfNode(segs[0], cur)
 	if l == nil {
 		return "", tUnknown, false
 	}
