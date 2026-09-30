@@ -7883,6 +7883,14 @@ func rawTypeName(tn *ast.Node) string {
 // layoutOfLiteral matches an object literal against recorded interfaces by
 // field-name set.
 func (e *emitter) layoutOfLiteral(n *ast.Node) *layout {
+	// Checker-backed names first: contextually-typed literals (and
+	// same-named shapes with different field types) resolve exactly
+	// instead of by order-insensitive name-set guess. Shorthand and
+	// computed-literal forms, which the syntactic walk skips, resolve
+	// here too when the checker names them.
+	if l := e.layoutOfCheckerName(n); l != nil {
+		return l
+	}
 	ol := n.AsObjectLiteralExpression()
 	names := []string{}
 	for _, p := range ol.Properties.Nodes {
@@ -7949,11 +7957,15 @@ func (e *emitter) lowerObjectLiteral(n *ast.Node) (string, saType) {
 	names := []string{}
 	for _, p := range ol.Properties.Nodes {
 		if p.Kind == ast.KindSpreadAssignment {
-			sv, _ := e.lowerExpr(p.AsSpreadAssignment().Expression)
+			spreadExpr := p.AsSpreadAssignment().Expression
+			sv, _ := e.lowerExpr(spreadExpr)
 			if e.refused {
 				return "0", tUnknown
 			}
-			sl := e.layoutOfVar(sv)
+			// Recorded layouts win; otherwise the checker names the
+			// source (factory results, inferred consts) where the
+			// scope map has no entry.
+			sl := e.layoutOfNode(sv, spreadExpr)
 			if sl == nil {
 				e.refuse(p, "spread source has no recorded interface layout (spread an interface-typed object)")
 				return "0", tUnknown

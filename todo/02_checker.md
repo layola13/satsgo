@@ -29,6 +29,12 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    （`trackBinding` 末位记录，`lowerTypeof`/`lowerTypeofConstFold` 双侧；
    方言标量 `i32/i64/u64/f64/boolean/bigint` 即使 checker 盲也折叠，
    无注解/any 仍大声；单测 1 项；286 零 diff；真机 check + run 差分一致）。
+   v3（2026-09-30 落地）：`layoutOfCheckerName` 抽取（`layoutOfNode`/
+   `layoutOfLiteral` 共享，精确名恒胜字段集猜测）+ spread 源走
+   `layoutOfNode`（工厂返回/推断 const 此前无记录即拒，现经 checker 命名；
+   `any` 源仍大声；外层目标键集匹配不动，错配仍拒）。
+   单测 1 项（双翻转 + 速记注解 + any 拒）；286 零 diff；
+   真机 check + run 差分一致（120==120）。
    元数/类型拒绝已按需加（既有）。
 7. [~] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
    首刀：`declaredAt` 可见性 helper + typeof 尾部分支；所有权/别名不可删

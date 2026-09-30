@@ -201,6 +201,14 @@
   用户类型名永不标记，无注解/any 仍大声。
   单测 1 项（翻转 + 5 注解形状 + 裸 typeof + 无注解拒）；全套件绿、
   286 sweep 零 diff；真机 `sa check` 过 + `sa run` exit 10 与 node 差分一致。
+- ✅ checker 布局 v3（`layoutOfCheckerName` 抽取 + spread 源接 checker，
+  `checker_layout.go` 内 + `saemit.go` 薄钩 2 处，todo/02#2 收尾）：
+  精确名恒胜字段集猜测（`layoutOfNode`/`layoutOfLiteral` 共享；
+  同名字段异类型布局此前按 map 序误配，现按 checker 真名）；
+  spread 源走 `layoutOfNode`（工厂返回/推断 const 此前无记录即拒，
+  现经 checker 命名；`any` 源仍大声；外层目标键集匹配与错配拒文不动）。
+  单测 1 项（双翻转 + 速记注解 + any 拒）；全套件绿、286 sweep 零 diff；
+  真机 `sa check` 过 + `sa run` exit 120 与 node 差分一致。
 - ✅ 访问器记录 + 精确拒（`classDef.getters/setters`，读经
   `lowerPropertyAccessInner`，写经 `lowerFieldStore`，`classDefOf` 三路解析）：
   未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，

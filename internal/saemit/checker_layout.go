@@ -354,14 +354,11 @@ func (e *emitter) layoutOfAnnotation(tn *ast.Node) *layout {
 	return e.layouts[name]
 }
 
-// layoutOfNode resolves a struct layout for a base register, consulting
-// the checker when the syntax-recorded map misses: recorded layouts win,
-// then checker interface/class/alias names, then anonymous field sets via
-// matchLayout. Nil-safe; never refuses (callers keep their diagnostics).
-func (e *emitter) layoutOfNode(base string, n *ast.Node) *layout {
-	if l := e.layoutOfVar(base); l != nil {
-		return l
-	}
+// layoutOfCheckerName resolves a struct layout from the checker's
+// apparent interface/class/alias name at a node ("", nil-safe).
+// Shared by layoutOfNode (member bases) and layoutOfLiteral (literals):
+// exact names beat order-insensitive field-set guesses.
+func (e *emitter) layoutOfCheckerName(n *ast.Node) *layout {
 	if e.tcx == nil || n == nil {
 		return nil
 	}
@@ -374,6 +371,23 @@ func (e *emitter) layoutOfNode(base string, n *ast.Node) *layout {
 		}
 		// A bare name with no recorded layout may still match by shape
 		// when the checker exposes fields (partial program views).
+	}
+	return nil
+}
+
+// layoutOfNode resolves a struct layout for a base register, consulting
+// the checker when the syntax-recorded map misses: recorded layouts win,
+// then checker interface/class/alias names, then anonymous field sets via
+// matchLayout. Nil-safe; never refuses (callers keep their diagnostics).
+func (e *emitter) layoutOfNode(base string, n *ast.Node) *layout {
+	if l := e.layoutOfVar(base); l != nil {
+		return l
+	}
+	if l := e.layoutOfCheckerName(n); l != nil {
+		return l
+	}
+	if e.tcx == nil || n == nil {
+		return nil
 	}
 	if fields, ok := e.tcx.layoutDataFields(n); ok {
 		if l := e.matchLayout(fields); l != nil {

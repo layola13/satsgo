@@ -50,3 +50,31 @@ func TestCheckerLayoutInferred(t *testing.T) {
 		t.Errorf("want recursive loads, got:\n%s", res.SAI)
 	}
 }
+
+func TestCheckerLayoutSpread(t *testing.T) {
+	// Spread sources resolve through the checker where the scope map
+	// has no entry (factory results, call-init consts). Both refused
+	// with "no recorded interface layout" before layoutOfNode wiring.
+	factory := "interface P { x: i32; y: i32 }\nfunction mk(): P { return { x: 1, y: 2 }; }\nfunction main(): i32 {\n  const q = { ...mk() };\n  return q.x + q.y;\n}\n"
+	res := mustLower(t, "s1.ts", factory)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want spread field loads, got:\n%s", res.SAI)
+	}
+	inferred := "interface P { x: i32; y: i32 }\nfunction mk(): P { return { x: 1, y: 2 }; }\nfunction main(): i32 {\n  const v = mk();\n  const q = { ...v, y: 20 };\n  return q.x + q.y;\n}\n"
+	res = mustLower(t, "s2.ts", inferred)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want spread field loads, got:\n%s", res.SAI)
+	}
+	// Checker-named literals record before the syntactic walk: an
+	// annotated shorthand literal spreads without a recorded entry.
+	shorthand := "interface P { x: i32; y: i32 }\nfunction main(): i32 {\n  const x = 1;\n  const y = 2;\n  const p: P = { x, y };\n  const q = { ...p };\n  return q.x + q.y;\n}\n"
+	res = mustLower(t, "s3.ts", shorthand)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want spread field loads, got:\n%s", res.SAI)
+	}
+	// Untyped sources stay loud (checker names nothing for any).
+	bad := "function g(o: any): i32 {\n  const q = { ...o };\n  return 0;\n}\nfunction main(): i32 {\n  return g(0);\n}\n"
+	if r := Lower("s4.ts", bad); !r.Refused {
+		t.Fatalf("expected spread-unknown refusal, got:\n%s", r.SAI)
+	}
+}
