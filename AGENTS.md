@@ -65,6 +65,12 @@
   不得超前）。剩余 13 个 string 符号缺失为 **sci 侧真实缺口**
   （`sa_string_index_of` 等两前端实发、`origin/main` 亦无，`sa` 二进制无内建），
   按“禁 tsgo 原创”立项到 sci（Zig runtime + `string.sai` extern，另起 commit）。
+- ✅ sci 缺口关闭（13/13，`cross-platform` 连续 4 个 commit，均 C 实测全过）：
+  谓词 4（index/lastIndex/starts/ends，22 用例）→ 大小写+parseFloat 3（21 用例）
+  → repeat/pad/replace 4（17 用例，node 交叉核对）→ codePointAt/fromCodePoint 2
+  （11 用例；OOB=-1 哨兵，非法码位=U+FFFD；windows 交叉编译干净）。
+  `check_sa_std_projection.sh` 现 **49 sa_std + 15 node 全过**（此前 31 缺失归零）。
+  注：286 demos 无一覆盖这些 string 方法（链接前零 e2e），本批是首次可链接。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
