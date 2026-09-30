@@ -2579,6 +2579,11 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 				return "0", tUnknown
 			}
 		}
+		// Async timers refuse with the Phase-2 rationale (user-defined
+		// shadowing still wins via funcSigs above).
+		if refuseTimerCall(e, fname, n) {
+			return "0", tUnknown
+		}
 		e.refuse(n, "call to unknown function %s (declare it before use)", fname)
 		return "0", tUnknown
 	}
@@ -2656,6 +2661,9 @@ func (e *emitter) lowerDirectCallee(fname string, args []string, n *ast.Node) st
 		e.emit("%s = call @%s(%s)", t, e.fnRef(fname), strings.Join(args, ", "))
 		e.ownTemp(t)
 		return t
+	}
+	if refuseTimerCall(e, fname, n) {
+		return "0"
 	}
 	e.refuse(n, "call to unknown function %s (declare it before use)", fname)
 	return "0"
