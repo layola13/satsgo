@@ -2013,6 +2013,8 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		// erasure as `as`; the parser already rejects angle assertions
 		// in expression positions where they would ambiguate).
 		return e.lowerExpr(n.Expression())
+	case ast.KindTaggedTemplateExpression:
+		return e.lowerTaggedTemplate(n)
 	default:
 		e.refuse(n, "expression %s is not in the SA-lowerable subset", n.Kind.String())
 		return "0", tUnknown
@@ -7472,6 +7474,90 @@ func (e *emitter) lowerArrayLiteral(n *ast.Node) (string, saType) {
 	e.emit("!%s", buf)
 	e.declareOwned(h)
 	return h, tArray
+}
+
+// rawTemplateText returns the raw (uncooked) text of a template head,
+// middle or tail (the parser fills RawText there); anything else falls
+// back to cooked text. No-substitution literals go through rawNoSubText
+// instead: the parser leaves their RawText empty.
+func rawTemplateText(n *ast.Node) string {
+	switch n.Kind {
+	case ast.KindTemplateHead:
+		return n.AsTemplateHead().RawText
+	case ast.KindTemplateMiddle:
+		return n.AsTemplateMiddle().RawText
+	case ast.KindTemplateTail:
+		return n.AsTemplateTail().RawText
+	default:
+		return n.Text()
+	}
+}
+
+// rawNoSubText slices the exact source bytes between a no-substitution
+// template's backticks (positions are byte-exact, verified against
+// multibyte prefixes). The parser leaves NoSub RawText empty, and cooked
+// text is untrustworthy for String.raw (every escape changes length).
+func (e *emitter) rawNoSubText(n *ast.Node) (string, bool) {
+	p, en := n.Pos(), n.End()
+	if p < 0 || en > len(e.src) || en-p < 2 || e.src[p] != '`' {
+		return "", false
+	}
+	return e.src[p+1 : en-1], true
+}
+
+// lowerTaggedTemplate lowers tagged templates. `String.raw` cooks
+// nothing (raw parts plus normally-rendered substitutions); any other
+// tag refuses loudly (the tag receives the strings array plus values,
+// and string arrays are not lowerable yet).
+func (e *emitter) lowerTaggedTemplate(n *ast.Node) (string, saType) {
+	tt := n.AsTaggedTemplateExpression()
+	if tag := tt.Tag; tag.Kind == ast.KindPropertyAccessExpression {
+		pa := tag.AsPropertyAccessExpression()
+		if pa.Expression.Kind == ast.KindIdentifier && pa.Expression.Text() == "String" &&
+			pa.Name().Text() == "raw" {
+			return e.lowerRawTemplate(tt.Template, n)
+		}
+	}
+	e.refuse(n, "tagged templates are not lowerable yet (tag(strings, ...values) needs the strings array)")
+	return "0", tUnknown
+}
+
+// lowerRawTemplate joins raw template parts with rendered substitutions
+// (mirrors lowerTemplate, but heads/tails stay uncooked).
+func (e *emitter) lowerRawTemplate(tpl *ast.Node, pos *ast.Node) (string, saType) {
+	_ = pos
+	if tpl.Kind == ast.KindNoSubstitutionTemplateLiteral {
+		raw, ok := e.rawNoSubText(tpl)
+		if !ok {
+			e.refuse(tpl, "String.raw literal has no recoverable source text")
+			return "0", tUnknown
+		}
+		return e.lowerStringLiteral(raw), tString
+	}
+	if tpl.Kind != ast.KindTemplateExpression {
+		e.refuse(tpl, "tagged template shape is not lowerable")
+		return "0", tUnknown
+	}
+	tp := tpl.AsTemplateExpression()
+	e.needImport("sa_std/string.sai")
+	e.needImport("sa_std/fmt.sai")
+	acc := e.lowerStringLiteral(rawTemplateText(tp.Head))
+	for _, sp := range tp.TemplateSpans.Nodes {
+		span := sp.AsTemplateSpan()
+		v, vt := e.lowerExpr(span.Expression)
+		part, ok := e.renderInterpValue(v, vt, span.Expression)
+		if !ok {
+			return "0", tUnknown
+		}
+		acc = e.concatSlices(acc, part)
+		tail := rawTemplateText(span.Literal)
+		if tail != "" {
+			tailH := e.lowerStringLiteral(tail)
+			acc = e.concatSlices(acc, tailH)
+			e.releaseIfOwnedTemp(tailH)
+		}
+	}
+	return acc, tString
 }
 
 func (e *emitter) lowerTemplate(n *ast.Node) (string, saType) {

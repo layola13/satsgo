@@ -495,3 +495,11 @@
   全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 15/33 双对数
   （含继承遮蔽：base 方法读 base 槽、子类方法读子类槽）；planck 零移动。
   JEV blast-radius safe_to_apply 89%。
+- ✅ Tagged 模板（`String.raw` 煮无 + 他 tag 大声拒）：raw 段 +
+  正常插值渲染（复用 `concatSlices`/`renderInterpValue`）；NoSub 的
+  RawText 解析器留空，改源码字节切片（位置字节性以多字节前缀实证，
+  取不到则大声拒；熟文本永不可信，每个转义都变长度）；他 tag 大声拒
+  （缺 strings 数组）。单测 3 项（形状 + 拒形 + 转义锁定 + 多字节切片）；
+  全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 纯形对数，
+  unicode 与子集字节语义一致（子集长度即字节，既有语义）。
+  JEV blast-radius safe_to_apply 78%（首审 24%，切片回归加固后翻转）。

@@ -1297,3 +1297,66 @@ function main(): i32 {
 		})
 	}
 }
+
+// `String.raw` cooks nothing (raw parts, rendered substitutions); other
+// tags refuse loudly (the strings array is not lowerable yet).
+func TestTaggedTemplate(t *testing.T) {
+	src := `function main(): i32 {
+  const a = String.raw` + "`a\\nb${41}c`" + `;
+  return a.length;
+}
+`
+	res := mustLower(t, "raw.ts", src)
+	for _, want := range []string{
+		`@import "sa_std/string.sai"`,
+		"call @sa_string_concat(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	plain := `function main(): i32 {
+  const b = String.raw` + "`hi`" + `;
+  return b.length;
+}
+`
+	res = mustLower(t, "rawplain.ts", plain)
+	if !strings.Contains(res.SAI, "return ") {
+		t.Errorf("missing return in output:\n%s", res.SAI)
+	}
+	bad := Lower("refuse.ts", "function tag(s: any): string {\n  return \"t\";\n}\nfunction main(): i32 {\n  const s = tag`hi`;\n  return s.length;\n}\n")
+	if !bad.Refused {
+		t.Fatalf("expected tag refusal, lowered:\n%s", bad.SAI)
+	}
+	if !strings.Contains(diagText(bad), "tagged templates are not lowerable yet") {
+		t.Errorf("missing tag diagnostic:\n%s", diagText(bad))
+	}
+}
+
+// String.raw never cooks: escapes stay literal (backslash-n is two
+// chars), including no-substitution literals (source-sliced; the parser
+// leaves their RawText empty).
+func TestTaggedRawEscapes(t *testing.T) {
+	src := "function main(): i32 {\n  const a = String.raw`a\\nb`;\n  return a.length;\n}\n"
+	res := mustLower(t, "rawesc.ts", src)
+	if !strings.Contains(res.SAI, `utf8:"a\\nb\0"`) {
+		t.Errorf("raw escape cooked in output:\n%s", res.SAI)
+	}
+	// Cooked templates keep cooking (control shape, not raw).
+	cooked := "function main(): i32 {\n  const c = `a\\nb`;\n  return c.length;\n}\n"
+	res = mustLower(t, "cooked.ts", cooked)
+	if strings.Contains(res.SAI, `utf8:"a\\nb\0"`) {
+		t.Errorf("cooked template left raw in output:\n%s", res.SAI)
+	}
+}
+
+// rawNoSubText slices exact source bytes (positions are byte-exact even
+// past multibyte prefixes); cooked text can never stand in (every escape
+// changes length, including invisible unicode escapes).
+func TestRawNoSubSlicing(t *testing.T) {
+	src := "const e = \"caf\u00e9\";\nfunction main(): i32 {\n  const u = String.raw`a\\tb`;\n  return u.length;\n}\n"
+	res := mustLower(t, "rawuni.ts", src)
+	if !strings.Contains(res.SAI, `utf8:"a\\tb\0"`) {
+		t.Errorf("raw slice wrong past multibyte prefix:\n%s", res.SAI)
+	}
+}
