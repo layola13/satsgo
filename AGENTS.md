@@ -120,6 +120,10 @@
   年月日/时分秒/毫秒/时区偏移全覆盖，闰日/越界拒绝；C 实测 16 用例
   （与 node oracle 逐字对，含 8 拒绝）；windows 干净。
   sa_std 契约 52/52；单测 2 项（成功形状 + 元数拒绝）。
+- ✅ Date get 系（sci 8 原语共享 Hinnant civil helper + satsgo 零新分支路由，
+  `getTimezoneOffset` 恒 0 UTC，setter 大声拒）：C 实测 24 用例与 node
+  逐字对（含 1969 负值；另验证 NY 时区下实现为 UTC 固定）；
+  sa_std 契约 60/60；单测 2 项（8 调用形状 + setter 拒绝）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

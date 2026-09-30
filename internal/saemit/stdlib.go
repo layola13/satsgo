@@ -184,6 +184,16 @@ var StdProjectionTable = []StdProjection{
 	// invalid ISO panics at runtime (loud; NaN is unrepresentable).
 	{TS: "Date.parse", Module: "sa_std/time.sai", Symbol: "sa_time_parse_iso", Ret: tI64,
 		Note: "status-checked via emitStatusCheckedI64"},
+	// Date getters route only through dateVars method dispatch (i64 in,
+	// i64 out, zero-arg direct calls; month 0-based, Sunday 0, UTC).
+	{TS: "Date.getFullYear", Module: "sa_std/time.sai", Symbol: "sa_time_get_full_year", Ret: tI64, Note: ""},
+	{TS: "Date.getMonth", Module: "sa_std/time.sai", Symbol: "sa_time_get_month", Ret: tI64, Note: ""},
+	{TS: "Date.getDate", Module: "sa_std/time.sai", Symbol: "sa_time_get_date", Ret: tI64, Note: ""},
+	{TS: "Date.getHours", Module: "sa_std/time.sai", Symbol: "sa_time_get_hours", Ret: tI64, Note: ""},
+	{TS: "Date.getMinutes", Module: "sa_std/time.sai", Symbol: "sa_time_get_minutes", Ret: tI64, Note: ""},
+	{TS: "Date.getSeconds", Module: "sa_std/time.sai", Symbol: "sa_time_get_seconds", Ret: tI64, Note: ""},
+	{TS: "Date.getMilliseconds", Module: "sa_std/time.sai", Symbol: "sa_time_get_milliseconds", Ret: tI64, Note: ""},
+	{TS: "Date.getDay", Module: "sa_std/time.sai", Symbol: "sa_time_get_day", Ret: tI64, Note: ""},
 	// ---- node plugin backend (pilot): native os surfaces ---------------
 	// Convention per node.sai: u32 status + &out slots; nonzero panics.
 	{TS: "os.platform", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_platform", Ret: tString,

@@ -2763,19 +2763,28 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 	}
 	// Date millis bindings answer getTime as the identity (the value
-	// already is i64 millis) and toISOString via the sci formatter;
-	// other methods fall through to refusal.
+	// already is i64 millis), toISOString/getters via the sci time
+	// primitives (i64 by value), and getTimezoneOffset as constant 0
+	// (UTC-only subset); other methods fall through to refusal.
 	if e.dateVars[recv] {
 		if method == "getTime" && len(args) == 0 {
 			return recv, tI64, true
 		}
-		if method == "toISOString" && len(args) == 0 {
-			if proj, ok := projectionByTS("Date.toISOString"); ok {
-				v, t := e.emitProjCall(proj, []string{recv}, pos)
-				if e.refused {
-					return "0", tUnknown, true
+		if method == "getTimezoneOffset" && len(args) == 0 {
+			return "0", tI32, true
+		}
+		if len(args) == 0 {
+			for _, m := range []string{"toISOString", "getFullYear", "getMonth", "getDate", "getHours", "getMinutes", "getSeconds", "getMilliseconds", "getDay"} {
+				if method != m {
+					continue
 				}
-				return v, t, true
+				if proj, ok := projectionByTS("Date." + m); ok {
+					v, t := e.emitProjCall(proj, []string{recv}, pos)
+					if e.refused {
+						return "0", tUnknown, true
+					}
+					return v, t, true
+				}
 			}
 		}
 	}

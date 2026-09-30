@@ -523,6 +523,26 @@ func TestLowerDate(t *testing.T) {
 	if r := Lower("d6.ts", prsArity); !r.Refused {
 		t.Fatalf("expected parse-arity refusal, got:\n%s", r.SAI)
 	}
+	getters := "function main(): i64 {\n  const d = new Date();\n  return d.getFullYear() + d.getMonth() + d.getDate() + d.getHours() + d.getMinutes() + d.getSeconds() + d.getMilliseconds() + d.getDay() + d.getTimezoneOffset();\n}\n"
+	res = mustLower(t, "d7.ts", getters)
+	for _, want := range []string{
+		"call @sa_time_get_full_year",
+		"call @sa_time_get_month",
+		"call @sa_time_get_date",
+		"call @sa_time_get_hours",
+		"call @sa_time_get_minutes",
+		"call @sa_time_get_seconds",
+		"call @sa_time_get_milliseconds",
+		"call @sa_time_get_day",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	setters := "function main(): i64 {\n  const d = new Date();\n  d.setFullYear(2025);\n  return d.getTime();\n}\n"
+	if r := Lower("d8.ts", setters); !r.Refused {
+		t.Fatalf("expected setter refusal, got:\n%s", r.SAI)
+	}
 }
 
 func TestLowerTopLevelConst(t *testing.T) {
