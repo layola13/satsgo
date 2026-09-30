@@ -277,6 +277,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	}
 	sharedLayouts := map[string]*layout{}
 	sharedClassDefs := map[string]*classDef{}
+	sharedStaticDefs := map[string]*classDef{}
 	sharedEnums := map[string]map[string]int64{}
 	globalRets := map[string]map[string]saType{} // file -> name -> ret
 	globalArity := map[string]map[string]int{}
@@ -398,6 +399,9 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		for k, c := range scratch.classDefs {
 			sharedClassDefs[k] = c
 		}
+		for k, c := range scratch.staticDefs {
+			sharedStaticDefs[k] = c
+		}
 		for k, v := range scratch.enums {
 			sharedEnums[k] = v
 		}
@@ -510,6 +514,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		}
 		e.layouts = sharedLayouts
 		e.classDefs = sharedClassDefs
+		e.staticDefs = sharedStaticDefs
 		e.enums = sharedEnums
 		e.funcSigs = map[string]saType{}
 		e.funcParams = map[string]int{}
