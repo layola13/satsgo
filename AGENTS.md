@@ -393,3 +393,10 @@
   JEV consistency 4/4 先行、blast-radius local_only 96%。
   缺口序列：对象模块状态、计算串累加（缺泄漏豁免）、串数组、effectful 初始化、
   顶层可执行语句入口、命名空间合并重开、import-equals、跨文件成员。
+- ✅ 裸 panic 带码（8 处 + 命名常量；零 sci 变更）：本二进制拒裸 `panic`
+  （`panic_op` 需字面量），既有 8 处发射（`throw`、DOM 满、node/deno/sa_std
+  状态检查 6 处）产物恒不可组装。`throw`→`panic(2501)`、DOM 满→`2502`、
+  状态检查→`2503`；25xx 为 satsgo 发射块（sci 12xx-22xx 已占，
+  1403 注册表 OOM 沿用）。单测 `TestCodedPanics` 4 子项断码 + 无裸 panic；
+  旧 panic 子串断言全过；286 sweep 零回退；throw 与 `Date.parse` 产物现过
+  `sa check`（此前必挂）。JEV blast-radius safe_to_apply 77%。

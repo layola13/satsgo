@@ -118,7 +118,7 @@ func (e *emitter) domRead(sym, base string, extra []string, pos *ast.Node) (stri
 	e.emit("%s = eq %s, %d", full, n, domReadCap)
 	e.emit("br %s -> %s, %s", full, fullL, okL)
 	e.emitRaw("%s:", fullL)
-	e.emit("panic")
+	e.emit("panic(%d)", panicDomScratchFull)
 	e.terminated = true
 	e.emitRaw("%s:", okL)
 	e.terminated = false

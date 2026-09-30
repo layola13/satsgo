@@ -144,6 +144,17 @@ const (
 	tUnknown saType = "i32"
 )
 
+// Satsgo-emitted panic codes (25xx block; bare `panic` is rejected by the
+// assembler, so every runtime abort carries a code). The 25xx range is
+// free in sci/sa_std (12xx-22xx taken); the SAI context above each panic
+// names the failing call. 1403 stays for registry OOM (same-registry
+// family as the THREAD_LOCAL_SLOT macro).
+const (
+	panicThrow          = 2501 // `throw` (user exception aborts; no resume edges)
+	panicDomScratchFull = 2502 // DOM read scratch exactly full (would truncate)
+	panicBackendStatus  = 2503 // status-checked backend call failed (node/deno/sa_std nonzero status)
+)
+
 // annotationType renders a TS type annotation to an saType.
 // Explicit SA-style names (i32/i64/u64/f64/ptr) are authoritative; core TS
 // keywords map deterministically; `number` without annotation info defaults
@@ -692,7 +703,7 @@ func (e *emitter) lowerBlockStatement(st *ast.Node) {
 		e.terminated = true
 	case ast.KindThrowStatement:
 		// SA-ASM has no exception edges: throw lowers to panic (abort).
-		e.emit("panic")
+		e.emit("panic(%d)", panicThrow)
 		e.terminated = true
 	case ast.KindEmptyStatement:
 		// no-op
@@ -8202,7 +8213,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 			e.emit("%s = ne %s, 0", isbad, nst)
 			e.emit("br %s -> %s, %s", isbad, badL, wrapL)
 			e.emitRaw("%s:", badL)
-			e.emit("panic")
+			e.emit("panic(%d)", panicBackendStatus)
 			e.terminated = true
 			e.emitRaw("%s:", wrapL)
 			e.terminated = false
@@ -8239,7 +8250,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 			e.emit("%s = ne %s, 0", ubad, ust)
 			e.emit("br %s -> %s, %s", ubad, ubadL, uokL)
 			e.emitRaw("%s:", ubadL)
-			e.emit("panic")
+			e.emit("panic(%d)", panicBackendStatus)
 			e.terminated = true
 			e.emitRaw("%s:", uokL)
 			e.terminated = false
@@ -8278,7 +8289,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 			e.emit("%s = ne %s, 0", bad, st)
 			e.emit("br %s -> %s, %s", bad, badL, okL)
 			e.emitRaw("%s:", badL)
-			e.emit("panic")
+			e.emit("panic(%d)", panicBackendStatus)
 			e.terminated = true
 			e.emitRaw("%s:", okL)
 			e.terminated = false
@@ -8308,7 +8319,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 			e.emit("%s = ne %s, 0", bad, st)
 			e.emit("br %s -> %s, %s", bad, badL, okL)
 			e.emitRaw("%s:", badL)
-			e.emit("panic")
+			e.emit("panic(%d)", panicBackendStatus)
 			e.terminated = true
 			e.emitRaw("%s:", okL)
 			e.terminated = false
@@ -8387,7 +8398,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		e.emit("%s = ne %s, 0", bad, st)
 		e.emit("br %s -> %s, %s", bad, badL, okL)
 		e.emitRaw("%s:", badL)
-		e.emit("panic")
+		e.emit("panic(%d)", panicBackendStatus)
 		e.terminated = true
 		e.emitRaw("%s:", okL)
 		e.terminated = false
@@ -8482,7 +8493,7 @@ func (e *emitter) emitStatusCheckedI64(proj StdProjection, arg string, pos *ast.
 	e.emit("%s = ne %s, 0", bad, st)
 	e.emit("br %s -> %s, %s", bad, badL, okL)
 	e.emitRaw("%s:", badL)
-	e.emit("panic")
+	e.emit("panic(%d)", panicBackendStatus)
 	e.terminated = true
 	e.emitRaw("%s:", okL)
 	e.terminated = false

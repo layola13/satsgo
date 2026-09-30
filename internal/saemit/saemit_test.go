@@ -905,3 +905,29 @@ func TestScaffoldLayout(t *testing.T) {
 		}
 	}
 }
+
+// Coded panics: bare `panic` is rejected by the assembler, so every
+// runtime abort carries a code (25xx satsgo block; 1403 registry OOM).
+func TestCodedPanics(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"throw", "function main(): void {\n  throw \"boom\";\n}\n", "panic(2501)"},
+		{"dom scratch full", "function main(): string {\n  const el = document.createElement(\"div\");\n  return el.textContent;\n}\n", "panic(2502)"},
+		{"date parse status", "function main(): i64 {\n  return Date.parse(\"2024-01-01\");\n}\n", "panic(2503)"},
+		{"node status", "import { platform } from \"os\";\nfunction main(): i32 {\n  const p = platform();\n  return p.length;\n}\n", "panic(2503)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := mustLower(t, "panic.ts", tc.src)
+			if !strings.Contains(res.SAI, tc.want) {
+				t.Errorf("missing %q in output:\n%s", tc.want, res.SAI)
+			}
+			if strings.Contains(res.SAI, "\n    panic\n") {
+				t.Errorf("bare panic emitted:\n%s", res.SAI)
+			}
+		})
+	}
+}
