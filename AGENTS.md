@@ -413,3 +413,13 @@
   entry 真机 check 过、纯 entry `sa run` exit 0。
   JEV blast-radius safe_to_apply 69%。后续 D2：program 入口同路 +
   非入口顶层可执行拒 + `export main` 碰撞处置。
+- ✅ 顶层入口合成 D2（纯测试交付，零产品代码变更）：入口文件走 D1 共享
+  `lowerSourceFile`（prefix "" 前缀无关），非入口顶层可执行走 `planEntry`
+  拒（link + prefix 判定）。3 个 `LowerProgram` 门禁测：入口合成形状
+  （`@main` + `@main__user` + 前缀被调）、非入口拒文、零执行零改名。
+  `export main` 处置结论：可链接程序中入口 main 被导入当且仅当成环
+  （环检测/可达性/拒三重覆盖，错目标不可达）；相邻发现星号重导出同文件
+  调用错位（`mid__add` vs `lib__add` 定义）系既有 linker 缺口——基线同现、
+  与改名无关、`sa check` 响亮，记序列缺口另立项（linker 手术，不混入 entry）。
+  全套件绿、286 sweep 零回退、程序真机 check 过。
+  JEV blast-radius local_only 100%。

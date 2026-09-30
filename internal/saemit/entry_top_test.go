@@ -124,3 +124,52 @@ func TestEntryRefusals(t *testing.T) {
 		})
 	}
 }
+
+// D2 program parity: the entry file synthesizes through the shared path
+// (prefix ""), non-entry top executables refuse loudly.
+func TestEntryProgramEntrySynthesizes(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { get } from \"./util\";\nfunction main(): i32 {\n  return get();\n}\nmain();\n",
+		"util.ts": "export function get(): i32 {\n  return 7;\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	for _, want := range []string{"@main() -> i32:", "call @main__user()", "@main__user() -> i32:", "call @util__get()"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in linked output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestEntryProgramNonEntryRefuses(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { get } from \"./util\";\nfunction main(): i32 {\n  return get();\n}\n",
+		"util.ts": "export function get(): i32 {\n  return 7;\n}\nconsole.log(\"loaded\");\n",
+	}
+	res := LowerProgram("main.ts", files)
+	if !res.Refused {
+		t.Fatalf("expected refusal for non-entry top executables, got:\n%s", res.SAI)
+	}
+	found := false
+	for _, d := range res.Diagnostics {
+		if strings.Contains(d, "non-entry program files") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing non-entry diagnostic: %v", res.Diagnostics)
+	}
+}
+
+func TestEntryProgramNoExecUnchanged(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { get } from \"./util\";\nfunction main(): i32 {\n  return get();\n}\n",
+		"util.ts": "export function get(): i32 {\n  return 7;\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if strings.Contains(res.SAI, "main__user") {
+		t.Errorf("spurious rename in executable-free program:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "@main() -> i32:") {
+		t.Errorf("missing user @main:\n%s", res.SAI)
+	}
+}
