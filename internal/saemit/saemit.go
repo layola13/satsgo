@@ -6956,8 +6956,8 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		e.refuse(st, "non-literal module specifiers are not lowerable")
 		return
 	}
-	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" ||
-		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" {
+	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" || mod == "crypto" ||
+		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" || mod == "node:crypto" {
 		// Record named imports so bare calls (readFile(...)) resolve via
 		// the projection table at call sites ("node:" maps to the same
 		// backend table; node-plugin symbols carry Backend: "node").
@@ -7120,7 +7120,39 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// panic on nonzero status (loud), then wrap outs per NodeOut.
 	// "string" takes no arguments; "string1" takes one string slice
 	// expanded to (&ptr, len) in-params ahead of the out slots.
-	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "argv") {
+	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "argv" || proj.NodeOut == "sized") {
+		if proj.NodeOut == "sized" {
+			// size in, bare &ptr out whose length echoes the request.
+			if len(args) != 1 {
+				e.refuse(pos, "%s takes 1 argument", proj.TS)
+				return "0", tUnknown
+			}
+			ps := e.freshTmp()
+			e.emit("%s = alloc 8", ps)
+			e.ownTemp(ps)
+			st := e.freshTmp()
+			e.emit("%s = call @%s(%s, &%s)", st, proj.Symbol, args[0], ps)
+			e.ownTemp(st)
+			badL := e.freshLabel("node_bad")
+			okL := e.freshLabel("node_ok")
+			bad := e.freshTmp()
+			e.emit("%s = ne %s, 0", bad, st)
+			e.emit("br %s -> %s, %s", bad, badL, okL)
+			e.emitRaw("%s:", badL)
+			e.emit("panic")
+			e.terminated = true
+			e.emitRaw("%s:", okL)
+			e.terminated = false
+			ptr := e.freshTmp()
+			e.emit("%s = load %s + 0 as ptr", ptr, ps)
+			out := e.freshTmp()
+			e.emit("%s = alloc 16", out)
+			e.emit("store %s + 0, %s as ptr", out, ptr)
+			e.emit("store %s + 8, %s as u64", out, args[0])
+			e.declareOwned(out)
+			e.releaseIfOwnedTemp(ps)
+			return out, tString
+		}
 		want := 0
 		if proj.NodeOut == "string1" {
 			want = 1

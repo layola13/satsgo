@@ -79,6 +79,10 @@
   `{ptr,len}` 数组（SA slice 布局 = 插件 `SaSlice`；零参仍 alloc 一槽，
   插件按 argc==0 短路，无 null 发明；argv 用后 `!` 释放）。
   node 契约 20/20 全过；形状校验器 `check_sai_shape.py` 通过；全量单测过。
+- ✅ node `crypto.randomBytes`（`NodeOut "sized"`：u64 size 进 + 裸 `&ptr` 出，
+  长回显请求值；`crypto` 进 import 白名单含 `node:crypto` 前缀）。
+  createHash/update/digest 链需句柄追踪（Map/Set 先例），保持大声拒，另立项。
+  node 契约 21/21 全过；形状校验通过；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

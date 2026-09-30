@@ -369,6 +369,24 @@ func TestLowerNodePath(t *testing.T) {
 	}
 }
 
+func TestLowerNodeCrypto(t *testing.T) {
+	src := "import { randomBytes } from \"crypto\";\nfunction main(): i32 {\n  const b = randomBytes(16);\n  return b.length;\n}\n"
+	res := mustLower(t, "c1.ts", src)
+	for _, want := range []string{
+		"call @sa_node_plugin_crypto_random_bytes",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	bad := "import { randomBytes } from \"crypto\";\nfunction main(): i32 {\n  const b = randomBytes();\n  return b.length;\n}\n"
+	r := Lower("c2.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected arity refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

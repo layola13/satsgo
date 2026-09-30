@@ -55,8 +55,9 @@ type StdProjection struct {
 	// (status, outs...): "string" wraps (&ptr,&len) outs into a slice;
 	// "string1" additionally expands one leading string-slice argument
 	// to (&ptr, len) in-params; "argv" packs all string arguments into
-	// a 16-byte {ptr,len} array passed as (argv, argc). Nonzero status
-	// panics (loud).
+	// a 16-byte {ptr,len} array passed as (argv, argc); "sized" takes
+	// one u64 size and wraps a bare &ptr out whose length is the
+	// requested size (e.g. randomBytes). Nonzero status panics (loud).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
@@ -216,6 +217,11 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "argv", Note: "variadic strings; status-checked"},
 	{TS: "path.resolve", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_resolve", Ret: tString,
 		NodeOut: "argv", Note: "variadic strings; status-checked"},
+	// crypto: randomBytes(size) -> byte slice (length is the request).
+	// createHash/update/digest chains need handle tracking (Map/Set
+	// precedent) and stay loudly refused until that lands.
+	{TS: "crypto.randomBytes", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_crypto_random_bytes", Ret: tString,
+		NodeOut: "sized", Note: "one u64 size; out len echoes size; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table
