@@ -432,3 +432,19 @@
   单测 1 项（星 + 命名双拒形）；全套件绿、286 sweep 零回退；
   planck program 口径 56 文件两边一致、诊断 519→491（早拒收敛级联噪声，
   零新增坏点）。JEV consistency 4/4 先行、blast-radius safe_to_apply 86%。
+- ✅ 装饰器/`using` 静默吞转大声拒（soundness 修补）：类/成员/参数装饰器
+  此前直接丢弃（定义时效应丢失），`using` 按普通声明 lowering（dispose
+  丢失）。类位/成员位（`recordClass` 头）/变量声明位（函数体 + 顶层，
+  `NodeFlagsUsing` 覆盖 `await using`）三处设防；`modClaim` 排除 using
+  防槽认领掩盖诊断。单测 1 项（5 拒形）；全套件绿、286 零回退。
+- ✅ 逻辑复合赋值 `&&=`/`||=`/`??=`（真短路 lowering）：RHS 只在 assign
+  臂求值（既有 `and`/`or` 值运算是 eager 的，此处不沿用），双臂经 join 槽
+  （`??` 形，alloc 在 br 前）；目标仿 `=`（标识符 + 命名空间成员，含模块
+  槽与串槽字面量分发）；串测 len（空串 falsy，纠正 header 指针恒真）、
+  `??=` 指针测、`f64` 用 `fcmp`；join 值须物化寄存器（命名空间内裸名不定
+  寄存器、立即数不可存，`snapImm` 统一快照）；预扫 `assignedNames` 计入
+  （否则模块名先折叠后拒）。途中抓到 assign 臂极性反转（`||=` 测真进 skip）
+  与发射 fallthrough（alloc 在 br 后），真机对数锁定。
+  单测 1 项（三臂形状 + 单次调用 + 串 len + 模块槽 + 坏目标拒）；
+  全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 六形 31 对数。
+  JEV blast-radius local_only 98%。

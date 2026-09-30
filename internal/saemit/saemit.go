@@ -650,11 +650,24 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 			e.refuse(st, "nested class declarations are not lowerable")
 			return
 		}
+		// Decorators run arbitrary code at definition time; silently
+		// dropping them would change program behavior.
+		if len(st.Decorators()) > 0 {
+			e.refuse(st, "class decorators are not lowerable (definition-time effects have no SA-ASM form)")
+			return
+		}
 		e.recordClass(st)
 		return
 	case ast.KindFunctionDeclaration:
 		e.lowerFunction(st)
 	case ast.KindVariableStatement:
+		// `using`/`await using` dispose at scope exit; even top-level
+		// disposal has observable order, so refuse before any fold/slot
+		// path can claim the declaration.
+		if st.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsUsing != 0 {
+			e.refuse(st, "using declarations are not lowerable (explicit resource disposal has no SA-ASM scope-exit hook)")
+			return
+		}
 		if topLevel {
 			// A top-level `const f = (...) => ...` is a file-scope callback
 			// (mirrors sa_plugin_ts parseTopLevelArrowFn): emit @f directly.
@@ -1137,6 +1150,12 @@ func (e *emitter) lowerVarStatement(st *ast.Node) {
 // directly rather than wrapped in a statement).
 func (e *emitter) lowerVarDeclList(list *ast.Node) {
 	dl := list.AsVariableDeclarationList()
+	// `using`/`await using` dispose at scope exit (Symbol.dispose):
+	// silently dropping the declaration would leak/skip disposal.
+	if dl.Flags&ast.NodeFlagsUsing != 0 {
+		e.refuse(list, "using declarations are not lowerable (explicit resource disposal has no SA-ASM scope-exit hook)")
+		return
+	}
 	for _, d := range dl.Declarations.Nodes {
 		init := d.Initializer()
 		// A createHash call stages its accumulator here; only a plain
@@ -2090,6 +2109,13 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 		e.lowerCompoundAssign(bin, op)
 		return "0", tI32
 	}
+	// `&&=` / `||=` / `??=` lower with real short-circuit (unlike the
+	// eager `and`/`or` value ops): the RHS lowers only on the assign arm,
+	// and the arms join through a slot (mirrors the `??` join shape).
+	if op == ast.KindAmpersandAmpersandEqualsToken || op == ast.KindBarBarEqualsToken ||
+		op == ast.KindQuestionQuestionEqualsToken {
+		return e.lowerLogicAssign(bin, op, n)
+	}
 	// `in` folds statically: layouts are fixed, so field presence is a
 	// compile-time 1/0 (unknown bases refuse loudly). The verdict
 	// materialises into a temp (br takes registers, not immediates).
@@ -2375,6 +2401,158 @@ func (e *emitter) lowerCompoundAssign(bin *ast.BinaryExpression, op ast.Kind) {
 	} else {
 		e.refuse(bin.Left, "compound assignment target is not lowerable")
 	}
+}
+
+// lowerLogicAssign lowers `a &&= b` / `a ||= b` / `a ??= b` with real
+// short-circuit: the test reads the target once, the RHS lowers only on
+// the assign arm, and both arms join through a slot (mirrors the `??`
+// join shape). Targets mirror `=`: bare identifiers (scope bindings win
+// over module slots) and mutable namespace members; anything else refuses
+// loudly. Strings test length (empty is falsy; a header pointer never is);
+// `??=` keeps the pointer test like `??` (null/undefined map to 0).
+func (e *emitter) lowerLogicAssign(bin *ast.BinaryExpression, op ast.Kind, pos *ast.Node) (string, saType) {
+	// Resolve the target once: test-value operand plus a store closure.
+	// The closure lowers the RHS and stores it, reporting the value
+	// operand the assignment yields (same rule as `=`).
+	type target struct {
+		test  string
+		ttype saType
+		store func(rhs *ast.Node) (string, saType, bool)
+	}
+	var tgt *target
+	if bin.Left.Kind == ast.KindIdentifier {
+		// Same declared-or-sloppy rule as `=`/`+=`: lowerExpr resolves
+		// (locals, slots, folds), assign declares the rest. The join
+		// slot needs a materialized register, so the closure returns
+		// the RHS operand (never the bare name: inside namespaces it
+		// resolves qualified and names no register).
+		name := bin.Left.Text()
+		l, lt := e.lowerExpr(bin.Left)
+		if e.refused {
+			return "0", tUnknown
+		}
+		tgt = &target{test: l, ttype: lt, store: func(rhs *ast.Node) (string, saType, bool) {
+			// Module-string slots take literal stores (assign would
+			// refuse via modWiden; mirrors the `=` dispatch).
+			if e.lookupBinding(name) == nil {
+				if ms := e.modStateOf(name); ms != nil && ms.w == modStrW {
+					return e.emitModStoreStringDispatch(ms, rhs, pos)
+				}
+			}
+			rv, rt := e.lowerExpr(rhs)
+			kind := operandKind(rv, rhs)
+			e.assign(name, rv, kind, rt, pos)
+			if e.refused {
+				return "0", tUnknown, false
+			}
+			return e.snapImm(rv, rt, kind), rt, true
+		}}
+	} else if bin.Left.Kind == ast.KindPropertyAccessExpression {
+		if q, ns, mem, ok := e.nsLetTarget(bin.Left); ok {
+			if ms := e.modVars[q]; ms != nil {
+				if !e.checkNsAccess(ns, mem, bin.Left) {
+					return "0", tUnknown
+				}
+				l, lt := e.emitModLoad(ms, bin.Left)
+				tgt = &target{test: l, ttype: lt, store: func(rhs *ast.Node) (string, saType, bool) {
+					if ms.w == modStrW {
+						return e.emitModStoreStringDispatch(ms, rhs, pos)
+					}
+					rv, rt := e.lowerExpr(rhs)
+					kind := operandKind(rv, rhs)
+					v, t, ok := e.emitModStore(ms, rv, kind, rt, pos)
+					if !ok {
+						return "0", tUnknown, false
+					}
+					return e.snapImm(v, t, kind), t, true
+				}}
+			}
+		}
+		if tgt == nil {
+			e.refuse(bin.Left, "logical assignment target is not lowerable")
+			return "0", tUnknown
+		}
+	} else {
+		e.refuse(bin.Left, "logical assignment target is not lowerable")
+		return "0", tUnknown
+	}
+	// Truthiness test: scalars/f64 compare against zero (fcmp for
+	// floats); strings compare length (empty is falsy); `??=` keeps the
+	// pointer test like `??`.
+	// The join slot allocates before the test/branch (a terminator
+	// must precede every label; mirrors the `??` shape).
+	slot := e.freshTmp()
+	e.emit("%s = alloc 8", slot)
+	e.ownTemp(slot)
+	test := e.freshTmp()
+	isStr := tgt.ttype == tString
+	if isStr && op != ast.KindQuestionQuestionEqualsToken {
+		_, ln := e.expandSlice(tgt.test)
+		if op == ast.KindAmpersandAmpersandEqualsToken {
+			e.emit("%s = ne %s, 0", test, ln)
+		} else {
+			e.emit("%s = eq %s, 0", test, ln)
+		}
+	} else if tgt.ttype == tF64 {
+		if op == ast.KindAmpersandAmpersandEqualsToken {
+			e.emit("%s = fcmp_ne %s, 0.0", test, tgt.test)
+		} else {
+			e.emit("%s = fcmp_eq %s, 0.0", test, tgt.test)
+		}
+	} else {
+		if op == ast.KindAmpersandAmpersandEqualsToken {
+			e.emit("%s = ne %s, 0", test, tgt.test)
+		} else {
+			e.emit("%s = eq %s, 0", test, tgt.test)
+		}
+	}
+	// The test is "should assign": truthy for `&&=`, falsy/nullish
+	// for `||=`/`??=` — so it always branches to the assign arm first.
+	assignL := e.freshLabel("logas_assign")
+	skipL := e.freshLabel("logas_skip")
+	endL := e.freshLabel("logas_end")
+	e.emit("br %s -> %s, %s", test, assignL, skipL)
+	e.emitRaw("%s:", assignL)
+	v, _, ok := tgt.store(bin.Right)
+	if !ok || e.refused {
+		return "0", tUnknown
+	}
+	e.emit("store %s + 0, %s as ptr", slot, v)
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", skipL)
+	// Folded-constant tests arrive as immediates (the assign arm then
+	// refuses); snapshot so the slot store always sees a register.
+	e.emit("store %s + 0, %s as ptr", slot, e.snapImm(tgt.test, tgt.ttype, operandKind(tgt.test, bin.Left)))
+	e.emit("jmp %s", endL)
+	e.emitRaw("%s:", endL)
+	out := e.freshTmp()
+	e.emit("%s = load %s + 0 as i32", out, slot)
+	e.releaseIfOwnedTemp(slot)
+	return out, tgt.ttype
+}
+
+// isLogicAssign reports the short-circuit assignments (`&&=`/`||=`/`??=`),
+// which lower through lowerLogicAssign rather than lowerCompoundAssign.
+func isLogicAssign(op ast.Kind) bool {
+	return op == ast.KindAmpersandAmpersandEqualsToken ||
+		op == ast.KindBarBarEqualsToken ||
+		op == ast.KindQuestionQuestionEqualsToken
+}
+
+// snapImm snapshots an immediate operand into a fresh temp (join slots
+// and stores take registers, not immediates); anything else passes
+// through untouched.
+func (e *emitter) snapImm(v string, t saType, kind string) string {
+	if kind != "imm" {
+		return v
+	}
+	o := e.freshTmp()
+	if t == tF64 {
+		e.emit("%s = fadd %s, 0.0", o, v)
+	} else {
+		e.emit("%s = add %s, 0", o, v)
+	}
+	return o
 }
 
 func (e *emitter) lowerPrefixUnary(n *ast.Node) (string, saType) {
@@ -7570,6 +7748,22 @@ func (e *emitter) recordClass(st *ast.Node) {
 	def.name = e.nsDefName(def.name)
 	name = def.name
 	def.nsSegs = append([]string{}, e.nsStack...)
+	// Member/parameter decorators run arbitrary code at definition
+	// time; silently dropping them would change program behavior.
+	for _, m := range cd.Members.Nodes {
+		if len(m.Decorators()) > 0 {
+			e.refuse(m, "member decorators are not lowerable (definition-time effects have no SA-ASM form)")
+			return
+		}
+		if m.Kind == ast.KindConstructor {
+			for _, p := range m.Parameters() {
+				if len(p.AsNode().Decorators()) > 0 {
+					e.refuse(p.AsNode(), "parameter decorators are not lowerable (definition-time effects have no SA-ASM form)")
+					return
+				}
+			}
+		}
+	}
 	// Static literals fold regardless of heritage (no instance needed);
 	// a heritage-refused class still publishes its statics for folding.
 	for _, m := range cd.Members.Nodes {

@@ -931,3 +931,94 @@ func TestCodedPanics(t *testing.T) {
 		})
 	}
 }
+
+// Decorators and `using` used to lower silently (dropping definition-time
+// effects and disposal); both refuse loudly now.
+func TestLoudDecoratorUsing(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"class decorator", "@sealed\nclass C {\n}\nfunction main(): i32 {\n  return 0;\n}\n", "class decorators are not lowerable"},
+		{"member decorator", "class C {\n  @m v: i32 = 1;\n}\nfunction main(): i32 {\n  return 0;\n}\n", "member decorators are not lowerable"},
+		{"using local", "function main(): i32 {\n  using x = 1;\n  return x;\n}\n", "using declarations are not lowerable"},
+		{"await using local", "function main(): i32 {\n  await using y = 2;\n  return y;\n}\n", "using declarations are not lowerable"},
+		{"using top level", "using K = 42;\nfunction main(): i32 {\n  return 0;\n}\n", "using declarations are not lowerable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
+			}
+		})
+	}
+}
+
+// Logical compound assignment short-circuits: the RHS lowers only on
+// the assign arm, and both arms join through a slot (mirrors `??`).
+func TestLogicAssign(t *testing.T) {
+	src := `function bump(): i32 {
+  return 10;
+}
+function main(): i32 {
+  let a = 0;
+  let b = 2;
+  let c = 0;
+  a ||= bump();
+  b &&= bump();
+  c ??= bump();
+  return a * 100 + b * 10 + c;
+}
+`
+	res := mustLower(t, "logas.ts", src)
+	for _, want := range []string{
+		"logas_assign", "logas_skip", "logas_end",
+		"call @bump()",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// One call per operator: RHS lowers once, on the assign arm only.
+	if n := strings.Count(res.SAI, "call @bump()"); n != 3 {
+		t.Errorf("expected 3 bump calls, got %d:\n%s", n, res.SAI)
+	}
+	// String truthiness tests length, not the header pointer.
+	str := `function main(): i32 {
+  let s = "";
+  s ||= "d";
+  return s.length;
+}
+`
+	res = mustLower(t, "logas_str.ts", str)
+	if !strings.Contains(res.SAI, "+ 8 as u64") {
+		t.Errorf("missing length test in string ||= output:\n%s", res.SAI)
+	}
+	// Module slots route through the registry on both arms.
+	mod := `let m: i32 = 0;
+function main(): i32 {
+  m ||= 7;
+  m &&= 3;
+  return m;
+}
+`
+	res = mustLower(t, "logas_mod.ts", mod)
+	for _, want := range []string{
+		"call @sa_modstate_set_u64(",
+		"call @sa_modstate_get_u64(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Bad targets refuse loudly.
+	bad := Lower("refuse.ts", "function main(): i32 {\n  const o = { x: 1 };\n  o.x ||= 2;\n  return 0;\n}\n")
+	if !bad.Refused {
+		t.Fatalf("expected refusal for non-slot member target, lowered:\n%s", bad.SAI)
+	}
+}

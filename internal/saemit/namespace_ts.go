@@ -414,17 +414,17 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 		if m.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst == 0 {
 			dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
 			if len(dl.Declarations.Nodes) != 1 {
-				e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+				e.refuse(m, "multi-declarator mutable namespace state is not lowerable (split into single declarations)")
 				return
 			}
 			d := dl.Declarations.Nodes[0]
 			nm, ok := bindingNameText(d)
 			if !ok {
-				e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+				e.refuse(m, "destructured mutable namespace state is not lowerable (scalar let only)")
 				return
 			}
 			if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
-				e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+				e.refuse(m, "arrow mutable namespace state is not lowerable (use const for callees)")
 				return
 			}
 			// Declarations emit no code; use sites call the registry.

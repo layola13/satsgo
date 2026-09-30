@@ -100,9 +100,10 @@ func (e *emitter) modStrKeyOf(qual string) (ptr, ln, flag uint64) {
 }
 
 // assignedNames walks whole files collecting bare names on the left of
-// `=`, compound assignments, and `++`/`--`. Over-approximating (shadowed
-// assigns count) is sound: it only routes more names to slots, and scope
-// lookup still prefers locals at use sites. for-of/in bind a fresh
+// `=`, compound assignments (including logical `&&=`/`||=`/`??=`), and
+// `++`/`--`. Over-approximating (shadowed assigns count) is sound: it
+// only routes more names to slots, and scope lookup still prefers locals
+// at use sites. for-of/in bind a fresh
 // "forof_elem" (or declare via assignLocal), so they never assign module
 // bindings and stay out of the scan.
 func assignedNames(stmts []*ast.Node) map[string]bool {
@@ -116,7 +117,7 @@ func assignedNames(stmts []*ast.Node) map[string]bool {
 		case ast.KindBinaryExpression:
 			bin := n.AsBinaryExpression()
 			op := bin.OperatorToken.Kind
-			if op == ast.KindEqualsToken || isCompoundAssign(op) {
+			if op == ast.KindEqualsToken || isCompoundAssign(op) || isLogicAssign(op) {
 				if bin.Left.Kind == ast.KindIdentifier {
 					out[bin.Left.Text()] = true
 				}
@@ -330,6 +331,12 @@ func modInitFitsSlot(at, iw saType, imm string) bool {
 func (e *emitter) modClaim(d *ast.Node) (string, bool) {
 	name, ok := bindingNameText(d)
 	if !ok {
+		return "", false
+	}
+	// `using` disposes at scope exit: never a plain slot (the statement
+	// refuses loudly; claiming it here would only mask the diagnostic).
+	if d.Parent != nil && d.Parent.Kind == ast.KindVariableDeclarationList &&
+		d.Parent.AsVariableDeclarationList().Flags&ast.NodeFlagsUsing != 0 {
 		return "", false
 	}
 	if !e.modAssigned[name] {
