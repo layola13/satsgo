@@ -403,3 +403,129 @@ function main(): i32 {
 		t.Fatalf("no slot keys found in output:\n%s", res.SAI)
 	}
 }
+
+// Object module state rides per-field scalar slots (no heap persists);
+// reads materialize headers, writes persist per field.
+func TestModStateObjectBasic(t *testing.T) {
+	src := `interface P {
+  x: i32;
+  y: i32;
+}
+let o: P = { x: 1, y: 2 };
+function bump(): i32 {
+  o.x = o.x + 10;
+  o.y++;
+  return o.x + o.y;
+}
+function main(): i32 {
+  bump();
+  return bump();
+}
+`
+	res := mustLower(t, "objstate.ts", src)
+	for _, want := range []string{
+		`@import "sa_std/modstate.sai"`,
+		"call @sa_modstate_get_u64(",
+		"call @sa_modstate_set_u64(",
+		"alloc 8",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestModStateObjectWholeStore(t *testing.T) {
+	src := `interface P {
+  x: i32;
+  y: i32;
+}
+let o: P = { x: 0, y: 0 };
+function main(): i32 {
+  o = { x: 3, y: 4 };
+  return o.x + o.y;
+}
+`
+	res := mustLower(t, "objwhole.ts", src)
+	if !strings.Contains(res.SAI, "call @sa_modstate_set_u64(") {
+		t.Errorf("missing slot stores in output:\n%s", res.SAI)
+	}
+}
+
+func TestModStateObjectRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"string field", "interface P {\n  x: i32;\n  s: string;\n}\nlet o: P = { x: 1, s: \"a\" };\nfunction main(): i32 {\n o.x = 2;\n return o.x;\n}\n", "holds scalars only"},
+		{"computed store", "interface P {\n  x: i32;\n  y: i32;\n}\nlet o: P = { x: 1, y: 2 };\nfunction mk(): P {\n  return { x: 9, y: 9 };\n}\nfunction main(): i32 {\n o = mk();\n return o.x;\n}\n", "stores object literals only"},
+		{"unknown field", "interface P {\n  x: i32;\n}\nlet o: P = { x: 1 };\nfunction main(): i32 {\n o.z = 2;\n return o.x;\n}\n", "has no field z"},
+		{"extra key", "interface P {\n  x: i32;\n}\nlet o: P = { x: 1 };\nfunction main(): i32 {\n o = { x: 1, z: 2 };\n return o.x;\n}\n", "is not in the layout"},
+		{"deep write", "interface P {\n  x: i32;\n  y: i32;\n}\nlet o: P = { x: 1, y: 2 };\nfunction main(): i32 {\n o.x.y = 1;\n return o.x;\n}\n", "member depth is not lowerable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
+			}
+		})
+	}
+}
+
+func TestModStateObjectNamespace(t *testing.T) {
+	src := `namespace N {
+  export let o: P = { x: 1, y: 2 };
+}
+interface P {
+  x: i32;
+  y: i32;
+}
+function main(): i32 {
+  N.o = { x: 5, y: 6 };
+  return N.o.x + N.o.y;
+}
+`
+	res := mustLower(t, "nsobj.ts", src)
+	for _, want := range []string{
+		"call @sa_modstate_set_u64(",
+		"call @sa_modstate_get_u64(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+// Scope bindings shadow module objects: a scalar parameter named like
+// the module object must miss (never read the slot layout).
+func TestModStateObjectShadowing(t *testing.T) {
+	src := `interface P {
+  x: i32;
+  y: i32;
+}
+let o: P = { x: 1, y: 2 };
+function get(o: i32): i32 {
+  return o + 10;
+}
+function main(): i32 {
+  o.x = 100;
+  return get(5) + o.x;
+}
+`
+	res := mustLower(t, "objshadow.ts", src)
+	// The parameter reads the register (never the slot layout).
+	if !strings.Contains(res.SAI, "add o, 10") {
+		t.Errorf("shadowed param misrouted in output:\n%s", res.SAI)
+	}
+	// A member write through a shadowed name refuses (scalars have no
+	// fields) instead of storing to the module slot.
+	bad := Lower("refuse.ts", "interface P {\n  x: i32;\n  y: i32;\n}\nlet o: P = { x: 1, y: 2 };\nfunction set(o: i32): i32 {\n  o.x = 9;\n  return o;\n}\nfunction main(): i32 {\n  return set(1);\n}\n")
+	if !bad.Refused {
+		t.Fatalf("expected shadowed member-write refusal, lowered:\n%s", bad.SAI)
+	}
+}

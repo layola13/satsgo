@@ -997,6 +997,32 @@ func (e *emitter) nsLetTarget(n *ast.Node) (q, ns, member string, ok bool) {
 	return "", "", "", false
 }
 
+// nsObjFieldTarget resolves `N.obj.field` (and deeper `A.B.obj.field`)
+// to its object slot plus field: peel the last segment, resolve the
+// outer as a let member, require an object slot. Privacy enforced by
+// the caller via checkNsAccess (same as the member itself).
+func (e *emitter) nsObjFieldTarget(n *ast.Node) (ms *modState, field, ns, member string, ok bool) {
+	if n.Kind != ast.KindPropertyAccessExpression {
+		return nil, "", "", "", false
+	}
+	pa := n.AsPropertyAccessExpression()
+	if pa.Expression.Kind != ast.KindPropertyAccessExpression {
+		return nil, "", "", "", false
+	}
+	if pa.Name() == nil || pa.Name().Kind != ast.KindIdentifier {
+		return nil, "", "", "", false
+	}
+	q, qns, qmem, found := e.nsLetTarget(pa.Expression)
+	if !found {
+		return nil, "", "", "", false
+	}
+	m := e.modVars[q]
+	if m == nil || !m.isObj {
+		return nil, "", "", "", false
+	}
+	return m, pa.Name().Text(), qns, qmem, true
+}
+
 // entityNameText flattens type-level entity names to the namespace path
 // form (`NS.I` -> "NS_I", matching qualified layout keys). Unknown shapes
 // yield "" (never panics on hostile input).

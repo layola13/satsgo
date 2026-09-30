@@ -38,16 +38,33 @@ const modStrW = "str"
 
 // modState is one lowered module variable: qualified name, scalar width,
 // value-slot key (ptr slot for strings), and init-flag key (0 when the
-// zero fast path applies; strings always flag).
+// zero fast path applies; strings always flag). Objects ride per-field
+// scalar slots (isObj; no heap persists) with one shared flag.
 type modState struct {
 	qual   string
-	w      string // "i32" | "i64" | "u64" | "f64" | modStrW
+	w      string // "i32" | "i64" | "u64" | "f64" | modStrW | modObjW
 	isBool bool   // boolean-typed (renders as i32 0/1; typeof says boolean)
 	key    uint64
-	key2   uint64 // len slot (strings only, 0 for scalars)
+	key2   uint64 // len slot (strings only, 0 otherwise)
 	flag   uint64
 	init   string // init immediate text ("" when zero fast path)
 	initW  saType // init literal width (for widening the init store)
+	isObj  bool
+	fields []modField
+	olay   *layout // struct layout for header materialization
+}
+
+// modObjW is the slot-width sentinel for objects (per-field slots).
+const modObjW = "obj"
+
+// modField is one object slot field: layout name, scalar width,
+// value-slot key, and init literal ("" when zero-filled).
+type modField struct {
+	name  string
+	w     string
+	key   uint64
+	init  string
+	initW saType
 }
 
 // modWidthOf normalizes a slot width to the SA store/load name.
@@ -99,6 +116,37 @@ func (e *emitter) modStrKeyOf(qual string) (ptr, ln, flag uint64) {
 	return fnv1a64("strptr\x00"+base) & modKeyMask, fnv1a64("strlen\x00"+base) & modKeyMask, fnv1a64("strflag\x00"+base) & modKeyMask
 }
 
+// modObjFieldKey derives one object's field value-slot key (per-field
+// domain, so fields never collide with each other or scalar cells).
+func (e *emitter) modObjFieldKey(qual, field string) uint64 {
+	base := "satsgo modstate v1\x00" + e.prefix + "\x00" + qual + "\x00" + field
+	return fnv1a64("objfield\x00"+base) & modKeyMask
+}
+
+// modObjFlagKey derives one object's init-flag slot key.
+func (e *emitter) modObjFlagKey(qual string) uint64 {
+	base := "satsgo modstate v1\x00" + e.prefix + "\x00" + qual
+	return fnv1a64("objflag\x00"+base) & modKeyMask
+}
+
+// modFieldWidth normalizes a layout field type to a slot width (the
+// 4-byte int family shares the i32 slot); handles and exotic widths
+// report false for a loud refusal upstream.
+func modFieldWidth(fw string) (string, bool) {
+	switch fw {
+	case "i32", "u32", "boolean", "number":
+		return "i32", true
+	case "i64":
+		return "i64", true
+	case "u64":
+		return "u64", true
+	case "f64":
+		return "f64", true
+	default:
+		return "", false
+	}
+}
+
 // assignedNames walks whole files collecting bare names on the left of
 // `=`, compound assignments (including logical `&&=`/`||=`/`??=`), and
 // `++`/`--`. Over-approximating (shadowed assigns count) is sound: it
@@ -113,26 +161,43 @@ func assignedNames(stmts []*ast.Node) map[string]bool {
 		if n == nil {
 			return
 		}
+		// assignRoot folds a member/index chain to its root identifier
+		// (`o.x = ` and `a[i] = ` count as assignments to o and a;
+		// over-approximation stays sound: claiming routes through
+		// modClaim, which only accepts slot-compatible initializers).
+		assignRoot := func(n *ast.Node) {
+			for n != nil {
+				if n.Kind == ast.KindIdentifier {
+					out[n.Text()] = true
+					return
+				}
+				if n.Kind == ast.KindPropertyAccessExpression {
+					n = n.AsPropertyAccessExpression().Expression
+					continue
+				}
+				if n.Kind == ast.KindElementAccessExpression {
+					n = n.AsElementAccessExpression().Expression
+					continue
+				}
+				return
+			}
+		}
 		switch n.Kind {
 		case ast.KindBinaryExpression:
 			bin := n.AsBinaryExpression()
 			op := bin.OperatorToken.Kind
 			if op == ast.KindEqualsToken || isCompoundAssign(op) || isLogicAssign(op) {
-				if bin.Left.Kind == ast.KindIdentifier {
-					out[bin.Left.Text()] = true
-				}
+				assignRoot(bin.Left)
 			}
 		case ast.KindPrefixUnaryExpression:
 			un := n.AsPrefixUnaryExpression()
-			if (un.Operator == ast.KindPlusPlusToken || un.Operator == ast.KindMinusMinusToken) &&
-				un.Operand.Kind == ast.KindIdentifier {
-				out[un.Operand.Text()] = true
+			if un.Operator == ast.KindPlusPlusToken || un.Operator == ast.KindMinusMinusToken {
+				assignRoot(un.Operand)
 			}
 		case ast.KindPostfixUnaryExpression:
 			un := n.AsPostfixUnaryExpression()
-			if (un.Operator == ast.KindPlusPlusToken || un.Operator == ast.KindMinusMinusToken) &&
-				un.Operand.Kind == ast.KindIdentifier {
-				out[un.Operand.Text()] = true
+			if un.Operator == ast.KindPlusPlusToken || un.Operator == ast.KindMinusMinusToken {
+				assignRoot(un.Operand)
 			}
 		}
 		for ch := range n.IterChildren() {
@@ -273,6 +338,10 @@ func (e *emitter) registerModState(qual string, w, iw saType, init string, noIni
 // registerModDeclarator classifies one declarator and records its slot.
 // Shared by top-level pre-registration and namespace member lowering.
 func (e *emitter) registerModDeclarator(d *ast.Node, qual string) {
+	if d.Initializer() != nil && d.Initializer().Kind == ast.KindObjectLiteralExpression {
+		e.registerModObject(d, qual)
+		return
+	}
 	imm, iw, noInit, ok := modInitOf(d.Initializer())
 	if !ok {
 		e.refuse(d, "module state %s needs a scalar or string literal initializer", qual)
@@ -303,6 +372,119 @@ func (e *emitter) registerModDeclarator(d *ast.Node, qual string) {
 	_, _ = e.registerModState(qual, w, iw, imm, noInit, d)
 }
 
+// registerModObject records one object-literal declarator as per-field
+// scalar slots. The layout comes from the annotation when present
+// (authoritative), else from matching the literal keys. Every field
+// value must be a scalar literal (strings, handles and nested objects
+// have no module lifetime); missing fields zero-fill like struct alloc;
+// extra keys refuse. An explicit annotation must agree per field.
+func (e *emitter) registerModObject(d *ast.Node, qual string) {
+	ol := d.Initializer().AsObjectLiteralExpression()
+	// Layout: annotation first, literal-key match as fallback.
+	var lay *layout
+	if tn := d.AsVariableDeclaration().Type; tn != nil {
+		lay = e.layoutOfAnnotation(tn)
+	}
+	var lits map[string]*ast.Node
+	if lay == nil {
+		lits = map[string]*ast.Node{}
+		names := []string{}
+		for _, p := range ol.Properties.Nodes {
+			fname, ok := objPropName(p)
+			if !ok || p.Kind == ast.KindSpreadAssignment {
+				e.refuse(d, "module state %s needs an annotated object literal (spread and computed keys need a layout)", qual)
+				return
+			}
+			if p.Kind != ast.KindPropertyAssignment {
+				e.refuse(d, "module state %s holds scalar fields only (shorthand needs an annotated layout)", qual)
+				return
+			}
+			lits[fname] = p.AsPropertyAssignment().Initializer
+			names = append(names, fname)
+		}
+		lay = e.matchLayout(names)
+		if lay == nil {
+			e.refuse(d, "module state %s matches no recorded interface layout (declare the interface first)", qual)
+			return
+		}
+	} else {
+		lits = map[string]*ast.Node{}
+		for _, p := range ol.Properties.Nodes {
+			fname, ok := objPropName(p)
+			if !ok || p.Kind == ast.KindSpreadAssignment {
+				e.refuse(d, "module state %s holds scalar fields only (spread and computed keys are not lowerable)", qual)
+				return
+			}
+			if p.Kind != ast.KindPropertyAssignment {
+				e.refuse(d, "module state %s holds scalar fields only (shorthand fields are not lowerable)", qual)
+				return
+			}
+			if _, ok := lay.offsets[fname]; !ok {
+				e.refuse(d, "module state %s field %s is not in the layout", qual, fname)
+				return
+			}
+			lits[fname] = p.AsPropertyAssignment().Initializer
+		}
+	}
+	// Redefinition and collision checks mirror registerModState.
+	if e.modVars != nil {
+		if _, ok := e.modVars[qual]; ok {
+			e.refuse(d, "module variable %s is already declared (redefinition is not lowerable)", qual)
+			return
+		}
+	}
+	if e.nsNameTaken(qual) {
+		e.refuse(d, "module variable %s collides with an existing definition", qual)
+		return
+	}
+	ms := &modState{qual: qual, w: modObjW, isObj: true, olay: lay}
+	ms.flag = e.modObjFlagKey(qual)
+	needFlag := false
+	for _, f := range lay.fields {
+		fw, ok := modFieldWidth(lay.types[f])
+		if !ok {
+			e.refuse(d, "module state %s holds scalars only (field %s is %s)", qual, f, lay.types[f])
+			return
+		}
+		mf := modField{name: f, w: fw, key: e.modObjFieldKey(qual, f)}
+		if initNode, ok := lits[f]; ok {
+			imm, iw, noInit, ok := modInitOf(initNode)
+			if !ok || noInit {
+				e.refuse(d, "module state %s field %s needs a scalar literal", qual, f)
+				return
+			}
+			var st saType
+			switch fw {
+			case "i64":
+				st = tI64
+			case "u64":
+				st = tU64
+			case "f64":
+				st = tF64
+			default:
+				st = tI32
+			}
+			if !modInitFitsSlot(st, iw, imm) {
+				e.refuse(d, "module state %s field %s initializer does not match its layout", qual, f)
+				return
+			}
+			mf.init, mf.initW = imm, iw
+			if !modIsZero(imm, iw) {
+				needFlag = true
+			}
+		}
+		ms.fields = append(ms.fields, mf)
+	}
+	if !needFlag {
+		ms.flag = 0
+	}
+	if e.modVars == nil {
+		e.modVars = map[string]*modState{}
+	}
+	e.modVars[qual] = ms
+	e.needImport("sa_std/modstate.sai")
+}
+
 // modInitFitsSlot reports whether a literal initializer fits an annotated
 // slot: int literals fill any int width (zero fills f64 too, via the
 // zero fast path which emits no init); float literals need f64; bool
@@ -325,9 +507,10 @@ func modInitFitsSlot(at, iw saType, imm string) bool {
 }
 
 // modClaim reports whether one declarator belongs to the slot mechanism:
-// named, assigned somewhere in the file, and initialized with nil or a
-// scalar/string literal (arrows stay callees; effectful and exotic inits
-// keep their existing fold/refuse paths untouched).
+// named, assigned somewhere in the file, and initialized with nil, a
+// scalar/string literal, or an object literal (arrows stay callees;
+// effectful and exotic inits keep their existing fold/refuse paths
+// untouched; object contents refine at registration).
 func (e *emitter) modClaim(d *ast.Node) (string, bool) {
 	name, ok := bindingNameText(d)
 	if !ok {
@@ -345,6 +528,9 @@ func (e *emitter) modClaim(d *ast.Node) (string, bool) {
 	if init := d.Initializer(); init != nil {
 		if init.Kind == ast.KindArrowFunction {
 			return "", false
+		}
+		if init.Kind == ast.KindObjectLiteralExpression {
+			return name, true
 		}
 		if _, _, _, ok := modInitOf(init); !ok {
 			return "", false
@@ -470,6 +656,10 @@ func (e *emitter) emitModEnsure(ms *modState, pos *ast.Node) {
 		// String inits materialize the literal (@const-immortal data)
 		// into both slots; the header releases after the stores.
 		e.emitModInitString(ms, pos)
+	} else if ms.isObj {
+		// Object inits widen each nonzero field literal into its own
+		// slot (zero fields ride the registry zero-fill).
+		e.emitModInitObject(ms, pos)
 	} else if wv, ok := e.modWiden(ms, ms.init, "imm", ms.initW, pos); ok {
 		// The init value widens like any store (never verbatim: negative
 		// int and f64 immediates are not verbatim u64).
@@ -498,6 +688,27 @@ func (e *emitter) emitModInitString(ms *modState, pos *ast.Node) {
 	e.emitModSetRaw(ms.key, pu)
 	e.emitModSetRaw(ms.key2, ln)
 	e.releaseIfOwnedTemp(h)
+}
+
+// emitModInitObject widens one object's nonzero field literals into
+// their slots (shared with whole-object stores; see emitModStoreObject).
+func (e *emitter) emitModInitObject(ms *modState, pos *ast.Node) {
+	for _, mf := range ms.fields {
+		if mf.init == "" {
+			continue
+		}
+		if wv, ok := e.modWidenField(ms, &mf, mf.init, "imm", mf.initW, pos); ok {
+			e.emitModSetRaw(mf.key, wv)
+		}
+	}
+}
+
+// modWidenField normalizes one value operand to u64 bits for one object's
+// field slot by delegating to modWiden through a field-width proxy (same
+// rules; diagnostics name the field).
+func (e *emitter) modWidenField(ms *modState, mf *modField, src, srcKind string, srcType saType, pos *ast.Node) (string, bool) {
+	proxy := &modState{qual: ms.qual + "." + mf.name, w: mf.w}
+	return e.modWiden(proxy, src, srcKind, srcType, pos)
 }
 
 // modStringText extracts literal response text for string stores: string
@@ -630,11 +841,15 @@ func (e *emitter) modF64ToU64(src string) (string, bool) {
 
 // emitModLoad reads one slot to a fresh temp carrying the slot width
 // (trunc narrows, scratch round-trips f64 bits, u64 snapshots, strings
-// materialize a header from the dual slots).
+// materialize a header from the dual slots, objects materialize a
+// header from per-field slots).
 func (e *emitter) emitModLoad(ms *modState, pos *ast.Node) (string, saType) {
 	e.emitModEnsure(ms, pos)
 	if ms.w == modStrW {
 		return e.emitModLoadString(ms, pos)
+	}
+	if ms.isObj {
+		return e.emitModLoadObject(ms, pos)
 	}
 	t := e.freshTmp()
 	e.emit("%s = call @sa_modstate_get_u64(%d)", t, ms.key)
@@ -699,10 +914,198 @@ func (e *emitter) modStrMark(h string) {
 	e.modStrTmps[h] = true
 }
 
+// emitModLoadObject reads per-field slots into a fresh header sized by
+// the layout (caller-managed lifetime like any literal header). The
+// header temp records the layout so field chains resolve on it.
+func (e *emitter) emitModLoadObject(ms *modState, pos *ast.Node) (string, saType) {
+	h := e.freshTmp()
+	e.emit("%s = alloc %d", h, ms.olay.size)
+	e.ownTemp(h)
+	for _, f := range ms.olay.fields {
+		e.emit("store %s + %d, 0 as %s", h, ms.olay.offsets[f], ms.olay.types[f])
+	}
+	for i := range ms.fields {
+		mf := &ms.fields[i]
+		v, t := e.emitModLoadField(ms, mf, pos)
+		e.emit("store %s + %d, %s as %s", h, ms.olay.offsets[mf.name], v, ms.olay.types[mf.name])
+		_ = t
+	}
+	e.declareOwned(h)
+	if e.varLayouts == nil {
+		e.varLayouts = map[string]*layout{}
+	}
+	e.varLayouts[h] = ms.olay
+	return h, tArray
+}
+
+// emitModLoadField reads one object field slot narrowed to its width.
+func (e *emitter) emitModLoadField(ms *modState, mf *modField, pos *ast.Node) (string, saType) {
+	_ = ms
+	_ = pos
+	t := e.freshTmp()
+	e.emit("%s = call @sa_modstate_get_u64(%d)", t, mf.key)
+	e.ownTemp(t)
+	switch mf.w {
+	case "i64":
+		n := e.freshTmp()
+		e.emit("%s = trunc %s as i64", n, t)
+		e.releaseIfOwnedTemp(t)
+		return n, tI64
+	case "u64":
+		n := e.freshTmp()
+		e.emit("%s = add %s, 0", n, t)
+		e.releaseIfOwnedTemp(t)
+		return n, tU64
+	case "f64":
+		sc := e.freshTmp()
+		e.emit("%s = alloc 8", sc)
+		e.ownTemp(sc)
+		e.emit("store %s + 0, %s as u64", sc, t)
+		e.releaseIfOwnedTemp(t)
+		n := e.freshTmp()
+		e.emit("%s = load %s + 0 as f64", n, sc)
+		e.releaseIfOwnedTemp(sc)
+		return n, tF64
+	default:
+		n := e.freshTmp()
+		e.emit("%s = trunc %s as i32", n, t)
+		e.releaseIfOwnedTemp(t)
+		return n, tI32
+	}
+}
+
+// emitModStoreObject lowers one whole-object literal assignment to per-
+// field status-checked sets (ensure first), then materializes the header
+// as the assignment value (chained stores keep a real struct).
+func (e *emitter) emitModStoreObject(ms *modState, rhs *ast.Node, pos *ast.Node) (string, saType, bool) {
+	if rhs == nil || rhs.Kind != ast.KindObjectLiteralExpression {
+		e.refuse(pos, "module state %s stores object literals only (computed objects are not lowerable yet)", ms.qual)
+		return "0", tUnknown, false
+	}
+	ol := rhs.AsObjectLiteralExpression()
+	vals := map[string]*ast.Node{}
+	for _, p := range ol.Properties.Nodes {
+		fname, ok := objPropName(p)
+		if !ok || p.Kind != ast.KindPropertyAssignment {
+			e.refuse(pos, "module state %s stores plain object literals only", ms.qual)
+			return "0", tUnknown, false
+		}
+		if _, ok := ms.olay.offsets[fname]; !ok {
+			e.refuse(pos, "module state %s field %s is not in the layout", ms.qual, fname)
+			return "0", tUnknown, false
+		}
+		vals[fname] = p.AsPropertyAssignment().Initializer
+	}
+	for i := range ms.fields {
+		mf := &ms.fields[i]
+		init, ok := vals[mf.name]
+		if !ok {
+			// Missing fields zero-fill (mirrors struct alloc): store 0.
+			e.emitModEnsure(ms, pos)
+			e.emitModSetRaw(mf.key, "0")
+			continue
+		}
+		rv, rt := e.lowerExpr(init)
+		if e.refused {
+			return "0", tUnknown, false
+		}
+		wv, ok := e.modWidenField(ms, mf, rv, operandKind(rv, init), rt, pos)
+		if !ok {
+			return "0", tUnknown, false
+		}
+		e.emitModEnsure(ms, pos)
+		e.emitModSetRaw(mf.key, wv)
+	}
+	v, t := e.emitModLoad(ms, pos)
+	if e.refused {
+		return "0", tUnknown, false
+	}
+	return v, t, true
+}
+
+// emitModStoreField lowers one `obj.field = v` to a status-checked field
+// slot store (ensure first). Reports the stored operand and field type.
+func (e *emitter) emitModStoreField(ms *modState, field, src, srcKind string, srcType saType, pos *ast.Node) (string, saType, bool) {
+	mf := ms.fieldByName(field)
+	if mf == nil {
+		e.refuse(pos, "module state %s has no field %s", ms.qual, field)
+		return "0", tUnknown, false
+	}
+	wv, ok := e.modWidenField(ms, mf, src, srcKind, srcType, pos)
+	if !ok {
+		return "0", tUnknown, false
+	}
+	e.emitModEnsure(ms, pos)
+	e.emitModSetRaw(mf.key, wv)
+	var rt saType
+	switch mf.w {
+	case "i64":
+		rt = tI64
+	case "u64":
+		rt = tU64
+	case "f64":
+		rt = tF64
+	default:
+		rt = tI32
+	}
+	if wv == src {
+		return src, srcType, true
+	}
+	return wv, rt, true
+}
+
+// emitModObjIncDec lowers `obj.field++` on a slot field: load, add/sub,
+// store back (postfix delivers the old value; f64 uses fadd/fsub).
+func (e *emitter) emitModObjIncDec(ms *modState, field string, up, postfix bool, pos *ast.Node) (string, saType) {
+	mf := ms.fieldByName(field)
+	if mf == nil {
+		e.refuse(pos, "module state %s has no field %s", ms.qual, field)
+		return "0", tUnknown
+	}
+	cur, ct := e.emitModLoadField(ms, mf, pos)
+	nw := e.freshTmp()
+	one, op := "1", "add"
+	if !up {
+		op = "sub"
+	}
+	if ct == tF64 {
+		op, one = "fadd", "1.0"
+		if !up {
+			op = "fsub"
+		}
+	}
+	e.emit("%s = %s %s, %s", nw, op, cur, one)
+	e.emitModEnsure(ms, pos)
+	wv, ok := e.modWidenField(ms, mf, nw, "temp", ct, pos)
+	if !ok {
+		return "0", tUnknown
+	}
+	e.emitModSetRaw(mf.key, wv)
+	if postfix {
+		return cur, ct
+	}
+	return nw, ct
+}
+
+// fieldByName finds one object's field slot (nil when absent).
+func (ms *modState) fieldByName(field string) *modField {
+	for i := range ms.fields {
+		if ms.fields[i].name == field {
+			return &ms.fields[i]
+		}
+	}
+	return nil
+}
+
 // emitModStore lowers one assignment to a slot: widen the value, ensure,
 // status-checked set. Returns the stored value operand and slot type so
-// chained assignments (`y = (x = 5)`) keep a real operand.
+// chained assignments (`y = (x = 5)`) keep a real operand. Whole objects
+// route through emitModStoreObject (literal dispatch at the `=` sites).
 func (e *emitter) emitModStore(ms *modState, src, srcKind string, srcType saType, pos *ast.Node) (string, saType, bool) {
+	if ms.isObj {
+		e.refuse(pos, "module state %s stores object literals only (computed objects are not lowerable yet)", ms.qual)
+		return "0", tUnknown, false
+	}
 	wv, ok := e.modWiden(ms, src, srcKind, srcType, pos)
 	if !ok {
 		return "0", tUnknown, false
@@ -730,10 +1133,15 @@ func (e *emitter) emitModStore(ms *modState, src, srcKind string, srcType saType
 
 // emitModIncDec lowers `x++`/`x--`/`++x`/`--x` on a slot: load, add/sub,
 // store back. Postfix delivers the old value (JS semantics). Strings
-// refuse: arithmetic on slice headers is meaningless.
+// refuse (arithmetic on slice headers is meaningless), as do whole
+// objects (use `obj.field++`).
 func (e *emitter) emitModIncDec(ms *modState, up, postfix bool, pos *ast.Node) (string, saType) {
 	if ms.w == modStrW {
 		e.refuse(pos, "++/-- on string module state %s is not lowerable", ms.qual)
+		return "0", tUnknown
+	}
+	if ms.isObj {
+		e.refuse(pos, "++/-- on object module state %s is not lowerable (use obj.field++)", ms.qual)
 		return "0", tUnknown
 	}
 	cur, ct := e.emitModLoad(ms, pos)

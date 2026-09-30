@@ -522,6 +522,18 @@
   286 sweep 零回退 + check 全过；真机 `sa check` 过；planck 零移动
   （无 import-equals 用例）。
   JEV blast-radius safe_to_apply 93%。
+- ✅ 对象模块状态（标量字段逐槽化，零堆持久化）：每字段独立 u64 槽 +
+  对象 flag 槽（FNV 域隔离）；布局按注解优先、字面量匹配兜底；缺字段
+  零填；串/句柄/嵌套/spread/简写/计算键大声拒；读按布局物化 header
+  （`varLayouts` 标记，裸读免费经 `layoutOfVar`）；写直存字段槽
+  （整对象字面量分发，链式禁防静默丢）；`N.obj` 整读写 + `N.obj.x`
+  全路由（隐私同成员）；`o.x++`、`typeof object`、解构、`in` 复用既有位。
+  途中堵住遮蔽洞（局部同名标量参数曾误读槽布局，三处 scope 优先守卫
+  + 回归锁定）。单测 5 项（10 断言）；全套件绿、286 sweep 零回退 +
+  check 全过；Zig 胶水真实 key 驱动 14/25；混合程序 382 指令 check；
+  planck 零移动（48 文件、零干净新增）。
+  JEV blast-radius safe_to_apply 89%（首审 44%，共享路径审计 + 遮蔽
+  回归加固后翻转）。
 - ✅ 跨文件 miss 路由（`linkRoute` 品类诚实文案 + 全 miss 位接线）：
   修双 prescan 重复诊断（prescan 收归一处）；`linkSeeded` 豁免自碰撞
   （`directTopFuncs` 保真碰撞仍拒——从 ns 文件 import 曾整文件误拒）；

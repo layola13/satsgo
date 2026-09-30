@@ -586,9 +586,6 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	// Pre-scan: whole-file assigned names, so top-level fold-vs-slot
 	// decisions precede later assignments (see modstate.go).
 	e.modAssigned = assignedNames(stmts)
-	// Pre-register assigned top-level scalar declarators, so forward
-	// reads from earlier functions resolve to slots.
-	e.preRegisterModStates(stmts)
 	// Plan entry synthesis before signatures: top executables collect,
 	// a colliding user `main` renames (see entry_top.go).
 	e.planEntry(stmts)
@@ -675,6 +672,10 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	// import-equals aliases above their namespace, cross-body calls).
 	// Member BODIES still lower deferred (see lowerPendingNamespaces).
 	e.prescanNamespaces(stmts)
+	// Pre-register assigned top-level declarators, so forward reads from
+	// earlier functions resolve to slots (after layouts record: object
+	// slots need their interface layout).
+	e.preRegisterModStates(stmts)
 	// Two-pass lowering: definitions first (executables skipped), then
 	// deferred namespace members (cross-body forward refs resolved),
 	// then the entry body (see entry_top.go). Files without executables
@@ -2179,10 +2180,18 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	if op == ast.KindEqualsToken {
 		// Module-string stores materialize literals directly: lowering
 		// the RHS first would strand a dead header, and computed RHS
-		// refuse here before any code emits for them.
+		// refuse here before any code emits for them. Whole objects
+		// dispatch the same way (literals only, per-field stores).
 		if bin.Left.Kind == ast.KindIdentifier && e.lookupBinding(bin.Left.Text()) == nil {
 			if ms := e.modStateOf(bin.Left.Text()); ms != nil && ms.w == modStrW {
 				v, t, ok := e.emitModStoreStringDispatch(ms, bin.Right, n)
+				if !ok {
+					return "0", tUnknown
+				}
+				return v, t
+			}
+			if ms := e.modStateOf(bin.Left.Text()); ms != nil && ms.isObj {
+				v, t, ok := e.emitModStoreObject(ms, bin.Right, n)
 				if !ok {
 					return "0", tUnknown
 				}
@@ -2229,9 +2238,17 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 					}
 					// String members dispatch on the RHS node (the
 					// pre-lowered header, if any, releases via normal
-					// scope cleanup).
+					// scope cleanup). Whole objects dispatch the same
+					// way (literals only, per-field stores).
 					if ms.w == modStrW {
 						v, t, ok := e.emitModStoreStringDispatch(ms, bin.Right, n)
+						if !ok {
+							return "0", tUnknown
+						}
+						return v, t
+					}
+					if ms.isObj {
+						v, t, ok := e.emitModStoreObject(ms, bin.Right, n)
 						if !ok {
 							return "0", tUnknown
 						}
@@ -2243,6 +2260,33 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 					}
 					return v, t
 				}
+			}
+			// Module-object field stores persist to the field slot
+			// (single-level only; deeper chains refuse in
+			// lowerFieldStore rather than dropping silently). Scope
+			// bindings shadow the module name (see layoutOfVar).
+			if pa := bin.Left.AsPropertyAccessExpression(); pa.Expression.Kind == ast.KindIdentifier {
+				if e.lookupBinding(pa.Expression.Text()) == nil {
+					if ms := e.modStateOf(pa.Expression.Text()); ms != nil && ms.isObj {
+						v, t, ok := e.emitModStoreField(ms, pa.Name().Text(), rhs, operandKind(rhs, bin.Right), rtype, n)
+						if !ok {
+							return "0", tUnknown
+						}
+						return v, t
+					}
+				}
+			}
+			// Namespace object field stores (`N.obj.x`, privacy like
+			// the member itself).
+			if ms, field, ns, mem, ok := e.nsObjFieldTarget(bin.Left); ok {
+				if !e.checkNsAccess(ns, mem, n) {
+					return "0", tUnknown
+				}
+				v, t, ok := e.emitModStoreField(ms, field, rhs, operandKind(rhs, bin.Right), rtype, n)
+				if !ok {
+					return "0", tUnknown
+				}
+				return v, t
 			}
 			if e.lowerFieldStore(bin.Left, rhs) {
 				return rhs, tI32
@@ -2773,7 +2817,21 @@ func (e *emitter) lowerIncDec(operand *ast.Node, up, postfix bool, pos *ast.Node
 				return e.emitModIncDec(ms, up, postfix, pos)
 			}
 		}
+		// Module-object fields inc/dec through their field slot
+		// (scope bindings shadow the module name, see layoutOfVar).
 		pa := operand.AsPropertyAccessExpression()
+		if pa.Expression.Kind == ast.KindIdentifier && e.lookupBinding(pa.Expression.Text()) == nil {
+			if ms := e.modStateOf(pa.Expression.Text()); ms != nil && ms.isObj {
+				return e.emitModObjIncDec(ms, pa.Name().Text(), up, postfix, pos)
+			}
+		}
+		// Namespace object fields (`N.obj.x`, privacy like the member).
+		if ms, field, ns, mem, ok := e.nsObjFieldTarget(operand); ok {
+			if !e.checkNsAccess(ns, mem, pos) {
+				return "0", tUnknown
+			}
+			return e.emitModObjIncDec(ms, field, up, postfix, pos)
+		}
 		if pa.Expression.Kind == ast.KindIdentifier {
 			if l := e.layoutOfVar(pa.Expression.Text()); l != nil {
 				if off, ok := l.offsets[pa.Name().Text()]; ok {
@@ -7057,6 +7115,21 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 			return v, t
 		}
 	}
+	// Namespace object field reads (`N.obj.x`, nested `A.B.obj.x`):
+	// privacy enforced like the member itself, then a field load.
+	if ms, field, ns, mem, ok := e.nsObjFieldTarget(n); ok {
+		if !e.checkNsAccess(ns, mem, n) {
+			return "0", tUnknown
+		}
+		mf := ms.fieldByName(field)
+		if mf == nil {
+			e.refuse(n, "module state %s has no field %s", ms.qual, field)
+			return "0", tUnknown
+		}
+		e.emitModEnsure(ms, n)
+		v, t := e.emitModLoadField(ms, mf, n)
+		return v, t
+	}
 	// Accessor reads refuse precisely (inlining with `this` binding and
 	// side-effect ordering is a later slice).
 	if pa.Expression.Kind == ast.KindIdentifier {
@@ -7261,6 +7334,13 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 	l := e.layoutOfVar(segs[0])
 	if l == nil {
 		return false
+	}
+	// Module objects persist field stores to slots (callers dispatch
+	// depth-1 writes with real operand types beforehand); deeper chains
+	// would store to a fresh header and silently drop, so refuse loudly.
+	if ms := e.modStateOf(segs[0]); ms != nil && ms.isObj {
+		e.refuse(target, "module state %s member depth is not lowerable (single-level fields only)", ms.qual)
+		return true
 	}
 	// Private fields never cross `super` (TS: always an error there).
 	if cur.Kind == ast.KindSuperKeyword {
@@ -7934,12 +8014,23 @@ func (e *emitter) lowerObjectLiteral(n *ast.Node) (string, saType) {
 }
 
 // layoutOfVar resolves the struct layout for a base register (variable name
-// or struct handle temp).
+// or struct handle temp). Module-state objects resolve by (qualified) name
+// to their recorded layout, so member chains read through them — but a
+// scope binding always shadows (a scalar parameter named like the module
+// object must miss, never read the slot layout).
 func (e *emitter) layoutOfVar(base string) *layout {
-	if e.varLayouts == nil {
+	if e.varLayouts != nil {
+		if l, ok := e.varLayouts[base]; ok {
+			return l
+		}
+	}
+	if e.lookupBinding(base) != nil {
 		return nil
 	}
-	return e.varLayouts[base]
+	if ms := e.modStateOf(base); ms != nil && ms.isObj {
+		return ms.olay
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -7999,6 +8090,8 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 				kind = "boolean"
 			} else if ms.w == modStrW {
 				kind = "string"
+			} else if ms.isObj {
+				kind = "object"
 			} else {
 				kind = "number"
 			}
