@@ -7215,6 +7215,11 @@ func (e *emitter) lowerModuleDecl(st *ast.Node) {
 
 func (e *emitter) lowerImport(st *ast.Node) {
 	imp := st.AsImportDeclaration()
+	// Type-only imports erase at compile time (no runtime edge, no
+	// resolution, no recording; mirrors the link-graph filter).
+	if cl := imp.ImportClause; cl != nil && cl.IsTypeOnly() {
+		return
+	}
 	mod, ok := stringLiteralText(imp.ModuleSpecifier)
 	if !ok {
 		e.refuse(st, "non-literal module specifiers are not lowerable")

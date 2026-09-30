@@ -113,6 +113,18 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			if st.Kind != ast.KindImportDeclaration && st.Kind != ast.KindExportDeclaration {
 				continue
 			}
+			// Type-only imports/exports erase at compile time and carry
+			// no runtime edge (`import type { T } from "./y"` must not
+			// fuse cycles; planck Shape->Body is exactly this shape).
+			// Bare side-effect imports have no clause and stay linked.
+			if st.Kind == ast.KindImportDeclaration {
+				if cl := st.AsImportDeclaration().ImportClause; cl != nil && cl.IsTypeOnly() {
+					continue
+				}
+			}
+			if st.Kind == ast.KindExportDeclaration && st.IsTypeOnly() {
+				continue
+			}
 			spec := moduleSpecifierOf(st)
 			if spec == "" {
 				continue

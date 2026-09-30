@@ -106,6 +106,32 @@ func TestLowerProgramCycleRefuses(t *testing.T) {
 	}
 }
 
+func TestLowerProgramTypeOnlyEdgeSkipped(t *testing.T) {
+	// A value cycle through a type-only edge is erasable: b's use of
+	// main is `import type`, so no runtime cycle exists (planck
+	// Shape->Body shape).
+	files := map[string]string{
+		"main.ts": "import { a } from \"./b\";\nfunction main(): i32 { return a(); }\n",
+		"b.ts":    "import type { m } from \"./main\";\nexport function a(): i32 { return 1; }\n",
+	}
+	res := LowerProgram("main.ts", files)
+	if res.Refused {
+		t.Fatalf("type-only edge must not fuse a cycle, got:\n%s", strings.Join(res.Diagnostics, "\n"))
+	}
+	if !strings.Contains(res.SAI, "call @b__a()") {
+		t.Errorf("missing linked call:\n%s", res.SAI)
+	}
+	// export type re-exports erase the same way.
+	re := map[string]string{
+		"main.ts": "import { a } from \"./b\";\nfunction main(): i32 { return a(); }\n",
+		"b.ts":    "export type { m } from \"./main\";\nexport function a(): i32 { return 1; }\n",
+	}
+	res = LowerProgram("main.ts", re)
+	if res.Refused {
+		t.Fatalf("export-type edge must not fuse a cycle, got:\n%s", strings.Join(res.Diagnostics, "\n"))
+	}
+}
+
 func TestLowerProgramImportFirst(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { sub } from \"./util\";\nfunction main(): i32 { return add(1, 2) + sub(5, 1); }\n",

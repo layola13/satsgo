@@ -102,7 +102,9 @@ checker 回退在真实 JS 上成立）。
 | 22 | ModuleDeclaration | `namespace` 块，未立项 |
 | 其它 | typeof min/max 别名、`testbed` 重载签名、无布局字面量 | 零散 |
 
-program 口径现状：`tsgo-sa build src` 撞上真实值循环
-`Fixture ↔ Body`（双向 value import；`Shape → Body` 仅为 `import type` 可擦除）。
- backlog：链接图忽略 `import type` 边；值循环是否可按 SA 扁平合并容忍（需论证，
- 保守仍拒）。本轮不展开，先记。
+program 口径现状（2026-09-30 更新）：显式 `import type` / `export type`
+边已擦除（链接图 + 降级双侧，单测锁定），`Fixture ↔ Body` 值循环告警消除；
+现报 `Shape ↔ Distance`——双向皆为 value import 但仅类型位使用
+（`set(shape: Shape)` / `proxy: DistanceProxy`，esbuild 口径可擦除）。
+backlog：基于用法的擦除（binder 查值位引用，无则消边），独立特性另立项；
+真值循环仍保守拒。

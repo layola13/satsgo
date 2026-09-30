@@ -129,6 +129,10 @@
   date 0/hours 25/负值）；途中抓到 Extra 追加导致的实参错位，改显式 splicing。
   C 实测 11 用例与 node 逐字对；sa_std 契约 61/61；
   单测 2 项（7 调用形状 + 元数拒绝）。
+- ✅ 链接图擦除显式类型边（`import type` / `export type`，链接图 + 降级双侧；
+  裸副作用导入保留）：planck `Shape → Body` 边消除，值循环告警收敛到
+  `Shape ↔ Distance`（value import 但仅类型位使用，待基于用法的擦除另立项）。
+  单测 1 项（import-type/export-type 双形状）；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
