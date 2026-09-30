@@ -2834,7 +2834,8 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 	// Date millis bindings answer getTime as the identity (the value
 	// already is i64 millis), toISOString/getters via the sci time
 	// primitives (i64 by value), and getTimezoneOffset as constant 0
-	// (UTC-only subset); other methods fall through to refusal.
+	// (UTC-only subset); other methods refuse explicitly here (never
+	// fall through: the generic tail would misreport them).
 	if e.dateVars[recv] {
 		if (method == "getTime" || method == "valueOf") && len(args) == 0 {
 			return recv, tI64, true
@@ -2876,6 +2877,8 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 				}
 			}
 		}
+		e.refuse(pos, "Date.%s is not in the subset (see the time projection list)", method)
+		return "0", tUnknown, true
 	}
 	// Class methods inline at the call site (no vtables in SA-ASM).
 	if className, ok := e.varClass[recv]; ok {

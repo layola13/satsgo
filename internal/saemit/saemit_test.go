@@ -568,6 +568,24 @@ func TestLowerDate(t *testing.T) {
 	if r := Lower("d11.ts", loc); !r.Refused {
 		t.Fatalf("expected locale refusal, got:\n%s", r.SAI)
 	}
+	// toLocale* refuse with the Date-specific diagnostic (not the generic
+	// first-class tail).
+	for _, m := range []string{"toLocaleString", "toLocaleDateString", "toLocaleTimeString"} {
+		src := "function main(): string {\n  const d = new Date();\n  return d." + m + "();\n}\n"
+		r := Lower("d12.ts", src)
+		if !r.Refused {
+			t.Fatalf("expected %s refusal, got:\n%s", m, r.SAI)
+		}
+		hit := false
+		for _, dg := range r.Diagnostics {
+			if strings.Contains(dg.Error(), "Date."+m) {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Errorf("want Date-specific diagnostic for %s, got %v", m, r.Diagnostics)
+		}
+	}
 }
 
 func TestLowerDeno(t *testing.T) {

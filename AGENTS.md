@@ -136,6 +136,8 @@
   satsgo 4 表行经 Extra 末位对齐 + `valueOf` 恒等；`toLocale*` 大声拒）：
   与 node oracle 逐字对 8 用例（含闰日/负值/非法 fmt）；windows 干净。
   sa_std 契约 62/62；单测 2 项（4 调用计数 + locale 拒绝）。
+- ✅ Date 未知方法显式拒（`dateVars` 尾部不再掉入泛尾，`toLocale*` 等报
+  Date 专属诊断）：单测扩展 1 项（3 方法 × 专属诊断断言）。
 - ✅ 链接图擦除显式类型边（`import type` / `export type`，链接图 + 降级双侧；
   裸副作用导入保留）：planck `Shape → Body` 边消除，值循环告警收敛到
   `Shape ↔ Distance`（value import 但仅类型位使用，待基于用法的擦除另立项）。
