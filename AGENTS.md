@@ -213,6 +213,9 @@
 - ✅ deno 文件批（`readTextFile` 经 string1，`writeTextFile` 经 fire 双 slice；
   `Deno.env.*` 需两级命名空间路由，单测锁定拒绝）：deno 契约 4/4；
   形状校验通过；单测扩展 2 项。
+- ✅ 命名空间对象 p3（`const {a, b: c} = NS` 解构，直达 qualified）：
+  缺省/嵌套/spread/计算键大声拒；spread/动态键仍另立项。单测 1 项
+  （成功 + 改名 + 未知成员拒 + 缺省拒）；全量单测过。
 - ✅ timers 拒绝锁定（`node_timers.go` 模块）：6 个异步定时器全局以 Phase-2
   事件循环为由大声拒（置于未知函数之前，用户自定义同名函数仍优先）；
   `timers_sleep` 无同步 JS 语义故不投影（SA 原生侧用 `sa_time_sleep_ms`）。

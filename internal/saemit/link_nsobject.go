@@ -142,6 +142,73 @@ func bindDefNSMembers(e *emitter, local string, res *modResolution) {
 	e.defNSImports[local] = true
 }
 
+// lowerNsDestructure lowers `const {a, b: c} = NS` for namespace imports
+// (default-object or `import * as`): each member binds straight to its
+// qualified callee (dotted importEnv keys can only come from namespace
+// machinery, so presence is the existence proof). Initializers, nesting,
+// spreads and computed keys refuse loudly (p3 covers one static level).
+func lowerNsDestructure(e *emitter, d, nm *ast.Node, ns string) {
+	if nm.Kind != ast.KindObjectBindingPattern {
+		e.refuse(d, "namespace destructuring needs an object pattern")
+		return
+	}
+	for _, el := range nm.AsBindingPattern().Elements.Nodes {
+		if el.Kind != ast.KindBindingElement {
+			e.refuse(el, "namespace destructuring needs plain elements")
+			return
+		}
+		be := el.AsBindingElement()
+		if be.Initializer != nil {
+			e.refuse(el, "namespace destructuring defaults are not in the subset")
+			return
+		}
+		// Key: shorthand (no PropertyName) or identifier/string key.
+		key := ""
+		if be.PropertyName == nil {
+			nname := be.Name()
+			if nname == nil || nname.Kind != ast.KindIdentifier {
+				e.refuse(el, "namespace destructuring needs plain names")
+				return
+			}
+			key = nname.Text()
+		} else {
+			pn := be.PropertyName.AsNode()
+			if pn.Kind != ast.KindIdentifier && pn.Kind != ast.KindStringLiteral {
+				e.refuse(el, "namespace destructuring keys must be identifiers or strings")
+				return
+			}
+			if pn.Kind == ast.KindStringLiteral {
+				s, ok := stringLiteralText(pn)
+				if !ok {
+					e.refuse(el, "namespace destructuring keys must be identifiers or strings")
+					return
+				}
+				key = s
+			} else {
+				key = pn.Text()
+			}
+		}
+		ln := be.Name()
+		if ln == nil || ln.Kind != ast.KindIdentifier {
+			e.refuse(el, "namespace destructuring needs plain local names (no nesting)")
+			return
+		}
+		q, ok := e.importEnv[ns+"."+key]
+		if !ok {
+			e.refuse(el, "%s is not exported by %s", key, ns)
+			return
+		}
+		local := ln.Text()
+		e.importEnv[local] = q
+		if r, ok := e.importRet[ns+"."+key]; ok {
+			e.importRet[local] = r
+		} else {
+			e.importRet[local] = tI32
+		}
+		e.importedNames[local] = true
+	}
+}
+
 // routeDefNSMember lowers `D.m(..)` for default-object imports through
 // importEnv (export must exist; checked at link time). Reports handled;
 // unknown members refuse loudly like namespaces.

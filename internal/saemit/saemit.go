@@ -3754,6 +3754,18 @@ func (e *emitter) lowerDestructuringDecl(d, nm, init *ast.Node) {
 		e.refuse(d, "function values do not destructure")
 		return
 	}
+	// Namespace destructuring claims its own receivers first
+	// (see link_nsobject.go); spread/dynamic shapes stay loud there.
+	if init.Kind == ast.KindIdentifier {
+		if _, ok := e.defNSImports[init.Text()]; ok {
+			lowerNsDestructure(e, d, nm, init.Text())
+			return
+		}
+		if _, ok := e.nsImports[init.Text()]; ok {
+			lowerNsDestructure(e, d, nm, init.Text())
+			return
+		}
+	}
 	v, _ := e.lowerExpr(init)
 	if e.refused {
 		return

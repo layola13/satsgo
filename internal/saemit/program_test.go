@@ -161,6 +161,45 @@ func TestLowerProgramDefaultPassthrough(t *testing.T) {
 	}
 }
 
+func TestLowerProgramNsDestructure(t *testing.T) {
+	// `const {a, b: c} = NS` binds members straight to qualified callees.
+	files := map[string]string{
+		"main.ts": "import T from \"./timer\";\nfunction main(): i32 {\n  const { now, diff: delta } = T;\n  return now() + delta(3);\n}\n",
+		"timer.ts": "export function now(): i32 { return 7; }\nexport function diff(t: i32): i32 { return t - 1; }\nexport default { now, diff };\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	for _, want := range []string{"call @timer__now()", "call @timer__diff(3)"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Namespace imports destructure the same way.
+	ns := map[string]string{
+		"main.ts": "import * as u from \"./util\";\nfunction main(): i32 {\n  const { add } = u;\n  return add(1, 2);\n}\n",
+		"util.ts": "export function add(a: i32, b: i32): i32 { return a + b; }\n",
+	}
+	res = mustLowerProgram(t, "main.ts", ns)
+	if !strings.Contains(res.SAI, "call @util__add(1, 2)") {
+		t.Errorf("missing ns call:\n%s", res.SAI)
+	}
+	// Unknown members refuse loudly.
+	bad := map[string]string{
+		"main.ts": "import T from \"./timer\";\nfunction main(): i32 {\n  const { bogus } = T;\n  return 1;\n}\n",
+		"timer.ts": "export function now(): i32 { return 7; }\nexport default { now };\n",
+	}
+	if r := LowerProgram("main.ts", bad); !r.Refused {
+		t.Fatalf("expected unknown-member refusal, got:\n%s", r.SAI)
+	}
+	// Defaults refuse loudly.
+	def := map[string]string{
+		"main.ts": "import T from \"./timer\";\nfunction main(): i32 {\n  const { now = 1 } = T;\n  return 1;\n}\n",
+		"timer.ts": "export function now(): i32 { return 7; }\nexport default { now };\n",
+	}
+	if r := LowerProgram("main.ts", def); !r.Refused {
+		t.Fatalf("expected default-value refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerProgramImportFirst(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { sub } from \"./util\";\nfunction main(): i32 { return add(1, 2) + sub(5, 1); }\n",
