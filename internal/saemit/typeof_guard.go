@@ -6,7 +6,79 @@ package saemit
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
+	"github.com/microsoft/typescript-go/internal/checker"
 )
+
+// typeofKind folds a statically-known typeof operand to its JS result
+// string via checker types (unions fold only when every member agrees;
+// any/unknown/never and exotic shapes yield false). JS quirks honored:
+// null -> "object", void/undefined -> "undefined", bigint/symbol kept.
+func (t *typeCtx) typeofKind(n *ast.Node) (string, bool) {
+	ty := t.typeAtNode(n)
+	if ty == nil {
+		return "", false
+	}
+	kind := ""
+	ok := false
+	func() {
+		defer func() {
+			_ = recover()
+		}()
+		var flats []*checker.Type
+		if ty.Flags()&checker.TypeFlagsUnionOrIntersection != 0 {
+			flats = ty.Types()
+		} else {
+			flats = []*checker.Type{ty}
+		}
+		for _, m := range flats {
+			k, good := typeofKindSingle(t, m)
+			if !good {
+				return
+			}
+			if kind == "" {
+				kind = k
+			} else if kind != k {
+				return
+			}
+		}
+		ok = kind != ""
+	}()
+	if !ok {
+		return "", false
+	}
+	return kind, true
+}
+
+func typeofKindSingle(t *typeCtx, ty *checker.Type) (string, bool) {
+	f := ty.Flags()
+	switch {
+	case f&checker.TypeFlagsAnyOrUnknown != 0:
+		return "", false
+	case f&checker.TypeFlagsStringLike != 0:
+		return "string", true
+	case f&checker.TypeFlagsNumberLike != 0:
+		return "number", true
+	case f&checker.TypeFlagsBigIntLike != 0:
+		return "bigint", true
+	case f&checker.TypeFlagsBooleanLike != 0:
+		return "boolean", true
+	case f&checker.TypeFlagsESSymbolLike != 0:
+		return "symbol", true
+	case f&checker.TypeFlagsVoid != 0:
+		return "undefined", true
+	case f&checker.TypeFlagsUndefined != 0:
+		return "undefined", true
+	case f&checker.TypeFlagsNull != 0:
+		return "object", true
+	}
+	if len(t.check.GetSignaturesOfType(ty, checker.SignatureKindCall)) > 0 {
+		return "function", true
+	}
+	if f&checker.TypeFlagsObject != 0 {
+		return "object", true
+	}
+	return "", false
+}
 
 // lowerTypeofGuard handles typeof-against-"undefined" comparisons.
 // Reports (value, type, handled); unhandled shapes return false so normal

@@ -175,6 +175,10 @@
   （双向、否定式）降为 `eq/ne v, 0`（子集 null/undefined→0，故精确）；
   非标识操作数大声拒；planck `typeof min/max` 4 项消除（diag 617→613）。
   单测 1 项（肯定/否定/非标识拒）；全量单测过。
+- ✅ checker#6 已知 kind 折叠（`typeCtx.typeofKind`）：number/string/bigint/
+  boolean/symbol/void/undefined/null→object/function/object 联合一致才折叠，
+  any/unknown/exotic 大声拒；方言原语（`i32` 注解 NoLib 下本就是 Any，
+  只认真实 TS 类型）。单测扩展 2 项（number 折叠 + any 拒绝）；planck 持平。
 - ✅ checker#7 首刀 binder 可见性（`typeCtx.declaredAt`，GetSymbolAtLocation）：
   typeof 尾部分支改走“scope 无 → binder 不可见才 unknown global”；
   所有权/别名仍归自建 scope（binder 无所有权概念，边界注明）。

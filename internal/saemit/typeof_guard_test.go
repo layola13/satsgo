@@ -24,6 +24,18 @@ func TestLowerTypeofGuard(t *testing.T) {
 	if r := Lower("g3.ts", bad); !r.Refused {
 		t.Fatalf("expected non-identifier refusal, got:\n%s", r.SAI)
 	}
+	// Checker-known kinds fold (number param; dialect i32 annotations
+	// are Any under NoLib, so only real TS types resolve).
+	fold := "function f(x: number): string {\n  return typeof x;\n}\nfunction main(): i32 {\n  const s: string = f(1);\n  return s.length;\n}\n"
+	res = mustLower(t, "g5.ts", fold)
+	if !strings.Contains(res.SAI, "number") {
+		t.Errorf("missing folded kind:\n%s", res.SAI)
+	}
+	// any-typed values refuse (no silent kind).
+	anyv := "function f(x: any): string {\n  return typeof x;\n}\nfunction main(): i32 {\n  return 1;\n}\n"
+	if r := Lower("g6.ts", anyv); !r.Refused {
+		t.Fatalf("expected any refusal, got:\n%s", r.SAI)
+	}
 	// Truly unknown names stay "unknown global" (binder agrees).
 	unk := "function main(): i32 {\n  if (typeof zzz === \"number\") {\n    return 1;\n  }\n  return 0;\n}\n"
 	r := Lower("g4.ts", unk)
