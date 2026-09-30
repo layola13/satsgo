@@ -818,10 +818,18 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 		}
 	}
 	// Captures: free identifiers minus params, minus locals declared in
-	// the body, minus globals and callee names (never values).
+	// the body, minus globals and callee names (never values). Uses come
+	// from the shared usage walk (todo/02#5: no hand-rolled identifier
+	// walk; types and binding names never count as uses).
 	bodyNode := arrow.Body()
 	uses := map[string]bool{}
-	collectValueIdents(bodyNode, uses)
+	if bodyNode != nil {
+		if bodyNode.Kind == ast.KindBlock {
+			uses = valueUsedNames(bodyNode.Statements())
+		} else {
+			uses = valueUsedNames([]*ast.Node{bodyNode})
+		}
+	}
 	decls := map[string]bool{name: true}
 	for _, p := range pnames {
 		decls[p] = true
@@ -977,27 +985,6 @@ func captureSig(e *emitter, captures []string) []string {
 		sig = append(sig, fmt.Sprintf("%s: %s", c, t))
 	}
 	return sig
-}
-
-// collectValueIdents gathers identifier uses, skipping property names
-// (`a.b` contributes `a`, not `b`).
-func collectValueIdents(n *ast.Node, out map[string]bool) {
-	if n == nil {
-		return
-	}
-	if n.Kind == ast.KindPropertyAccessExpression {
-		pa := n.AsPropertyAccessExpression()
-		collectValueIdents(pa.Expression, out)
-		return
-	}
-	if n.Kind == ast.KindIdentifier {
-		out[n.Text()] = true
-		return
-	}
-	n.ForEachChild(func(c *ast.Node) bool {
-		collectValueIdents(c, out)
-		return false
-	})
 }
 
 // collectDeclaredNames gathers locally-declared names (vars, functions,

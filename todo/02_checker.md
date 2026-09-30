@@ -15,7 +15,8 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    v2：`type X={...}` 建布局 + 嵌套 ftypes 下沉；diag 649→617。
 3. [ ] 泛型单态化类型驱动（deferred：句柄模型下调用点继承已够用）：`Box<T>` 不再靠调用点布局继承。
 4. [x] `?.` 真守卫：`strictNullChecks` 可空信息决定是否加 join-slot（非空保持直调）。
-5. [ ] 捕获分析换 binder locals（deferred：启发式在 286+lodash 实测成立）（删 `collectValueIdents` 手写 walk）。
+5. [x] 捕获分析换 binder locals（`collectValueIdents` 手写 walk 已删，
+   改走共享 `valueUsedNames`；286 输出逐字节一致 + 新单测锁定类型名不进捕获）。
 6. [ ] 拒绝条件从（deferred：元数/类型拒绝已按需加）“语法 Kind”升级为“checker 类型”（精准杀，提升白名单通过率）。
 7. [ ] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
 

@@ -573,6 +573,19 @@ func TestLowerDeno(t *testing.T) {
 	}
 }
 
+func TestLowerArrowCaptureSharedWalk(t *testing.T) {
+	// todo/02#5: captures come from the shared usage walk, so the type
+	// name Box never becomes a capture; only the outer value does.
+	src := "interface Box { v: i32 }\nfunction main(): i32 {\n  const base = 10;\n  const f = (x: Box): i32 => x.v + base;\n  return f({ v: 1 });\n}\n"
+	res := mustLower(t, "a1.ts", src)
+	if !strings.Contains(res.SAI, "base: i32") {
+		t.Errorf("missing base capture param:\n%s", res.SAI)
+	}
+	if strings.Contains(res.SAI, "Box: i32") {
+		t.Errorf("type name must not be captured:\n%s", res.SAI)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

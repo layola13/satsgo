@@ -164,6 +164,9 @@
   挂钩）：`type X={...}` 对象别名建布局，嵌套经既有 ftypes 下沉；
   planck program 口径 diag 649→617（累计 686→617）。单测扩展 1 项；
   全量单测过。
+- ✅ checker#5 捕获分析换共享 walk（删 `collectValueIdents` 手写 walk，
+  arrow 捕获走 `valueUsedNames`）：286 输出逐字节一致（ Lower 口径 286/0
+  前后相同）；单测 1 项（类型名不进捕获）。
 - ✅ tsx `useState`（路二任务 5，`tsx.go` 内）：前导语句仅限
   `const [x, setX] = useState(数字/布尔)`，state 块发射字面量，
   模板 `{x}` 插值；字符串初值/setter 引用/计算表达式/杂语句大声拒
