@@ -18,25 +18,33 @@
 // join shape); every access (read or write) runs the ensure prologue so a
 // write-first program cannot be clobbered by a later lazy init.
 //
-// Scope: i32/i64/u64/f64 scalars (bool folds to i32), single-file and
-// same-file program. Strings/arrays/objects (pointer ownership has no
-// module-lifetime story), effectful initializers, and cross-file variable
-// access refuse loudly. A name assigned anywhere in the file never folds
-// into constVals (the old fold-then-rebind shape miscompiled silently:
-// `sa=1` vs `node=2` on a counter, check-clean).
+// Scope: i32/i64/u64/f64 scalars (bool folds to i32) plus string state,
+// single-file and same-file program. Strings ride dual u64 slots
+// (ptr+len) with literal-only stores (@const data is immortal; computed
+// strings have no module-lifetime story and refuse loudly). Arrays/objects,
+// effectful initializers, and cross-file variable access refuse loudly.
+// A name assigned anywhere in the file never folds into constVals (the old
+// fold-then-rebind shape miscompiled silently: `sa=1` vs `node=2` on a
+// counter, check-clean).
 package saemit
 
 import (
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
+// modStrW is the slot-width sentinel for strings (dual ptr+len slots;
+// reads materialize a 16-byte header, mirroring lowerStringLiteral).
+const modStrW = "str"
+
 // modState is one lowered module variable: qualified name, scalar width,
-// value-slot key, and init-flag key (0 when the zero fast path applies).
+// value-slot key (ptr slot for strings), and init-flag key (0 when the
+// zero fast path applies; strings always flag).
 type modState struct {
 	qual   string
-	w      string // "i32" | "i64" | "u64" | "f64"
+	w      string // "i32" | "i64" | "u64" | "f64" | modStrW
 	isBool bool   // boolean-typed (renders as i32 0/1; typeof says boolean)
 	key    uint64
+	key2   uint64 // len slot (strings only, 0 for scalars)
 	flag   uint64
 	init   string // init immediate text ("" when zero fast path)
 	initW  saType // init literal width (for widening the init store)
@@ -73,9 +81,17 @@ func fnv1a64(s string) uint64 {
 
 // modKeyOf derives the value/flag slot keys for one qualified variable.
 // Distinct domain strings keep value and flag cells apart without XOR hacks.
+// Scalar domains are frozen (emitted keys stay stable across versions).
 func (e *emitter) modKeyOf(qual string) (uint64, uint64) {
 	base := "satsgo modstate v1\x00" + e.prefix + "\x00" + qual
 	return fnv1a64("val\x00" + base), fnv1a64("flag\x00" + base)
+}
+
+// modStrKeyOf derives the ptr/len/flag slot keys for one qualified string
+// variable (separate domains; never collide with scalar cells).
+func (e *emitter) modStrKeyOf(qual string) (ptr, ln, flag uint64) {
+	base := "satsgo modstate v1\x00" + e.prefix + "\x00" + qual
+	return fnv1a64("strptr\x00" + base), fnv1a64("strlen\x00" + base), fnv1a64("strflag\x00" + base)
 }
 
 // assignedNames walks whole files collecting bare names on the left of
@@ -142,9 +158,11 @@ func (e *emitter) modStateOf(name string) *modState {
 	return nil
 }
 
-// modInitOf classifies one declarator initializer: scalar literal (plus
-// unary-minus numerics) or absent (zero fast path). Strings and exotic
-// shapes report ok=false; the caller refuses loudly with the reason.
+// modInitOf classifies one declarator initializer: scalar/string literal
+// (plus unary-minus numerics) or absent (zero fast path). Exotic shapes
+// report ok=false; the caller refuses loudly with the reason. String text
+// mirrors the fold paths exactly (stringLiteralText / Text(), fed to
+// lowerStringLiteral identically), so @const bytes stay consistent.
 func modInitOf(init *ast.Node) (imm string, w saType, noInit, ok bool) {
 	if init == nil {
 		return "", tI32, true, true
@@ -159,6 +177,13 @@ func modInitOf(init *ast.Node) (imm string, w saType, noInit, ok bool) {
 		return "1", tBool, false, true
 	case ast.KindFalseKeyword:
 		return "0", tBool, false, true
+	case ast.KindStringLiteral:
+		if s, ok := stringLiteralText(init); ok {
+			return s, tString, false, true
+		}
+		return "", tUnknown, false, false
+	case ast.KindNoSubstitutionTemplateLiteral:
+		return init.Text(), tString, false, true
 	case ast.KindPrefixUnaryExpression:
 		un := init.AsPrefixUnaryExpression()
 		if un.Operator == ast.KindMinusToken && un.Operand.Kind == ast.KindNumericLiteral {
@@ -175,7 +200,12 @@ func modInitOf(init *ast.Node) (imm string, w saType, noInit, ok bool) {
 
 // modIsZero reports numeric/bool zero initializers (any spelling the
 // classifier accepts): the registry zero-fills, so no flag or branch.
+// Strings never take the fast path (even "" materializes explicitly: a
+// null ptr must never reach an extern).
 func modIsZero(imm string, w saType) bool {
+	if w == tString {
+		return false
+	}
 	if w == tF64 {
 		f := imm
 		if len(f) > 0 && f[0] == '-' {
@@ -190,7 +220,7 @@ func modIsZero(imm string, w saType) bool {
 	return i == "0"
 }
 
-// registerModState records one qualified scalar variable and returns its
+// registerModState records one qualified module variable and returns its
 // state. Collisions with existing definitions refuse (same rule as
 // namespace merging: the program is invalid TS, and sharing the name
 // would resolve uses ambiguously).
@@ -207,15 +237,24 @@ func (e *emitter) registerModState(qual string, w, iw saType, init string, noIni
 		e.refuse(pos, "module variable %s collides with an existing definition", qual)
 		return nil, false
 	}
-	width := modWidthOf(w)
-	key, flag := e.modKeyOf(qual)
-	ms := &modState{qual: qual, w: width, isBool: w == tBool, key: key}
-	if !noInit && !modIsZero(init, w) {
-		ms.flag = flag
+	ms := &modState{qual: qual, w: modWidthOf(w), isBool: w == tBool}
+	if w == tString {
+		// Strings ride dual slots (ptr+len) with their own key family;
+		// the flag always applies, even for "" (see modIsZero).
+		ms.w = modStrW
+		ms.key, ms.key2, ms.flag = e.modStrKeyOf(qual)
 		ms.init = init
-		// The init store widens the literal itself (never raw: negative
-		// int and f64 immediates are not verbatim u64).
 		ms.initW = iw
+	} else {
+		key, flag := e.modKeyOf(qual)
+		ms.key = key
+		if !noInit && !modIsZero(init, w) {
+			ms.flag = flag
+			ms.init = init
+			// The init store widens the literal itself (never raw: negative
+			// int and f64 immediates are not verbatim u64).
+			ms.initW = iw
+		}
 	}
 	if e.modVars == nil {
 		e.modVars = map[string]*modState{}
@@ -230,11 +269,7 @@ func (e *emitter) registerModState(qual string, w, iw saType, init string, noIni
 func (e *emitter) registerModDeclarator(d *ast.Node, qual string) {
 	imm, iw, noInit, ok := modInitOf(d.Initializer())
 	if !ok {
-		if d.Initializer() != nil && d.Initializer().Kind == ast.KindStringLiteral {
-			e.refuse(d, "string module state %s is not lowerable yet (scalar i32/i64/u64/f64 only)", qual)
-		} else {
-			e.refuse(d, "module state %s needs a scalar literal initializer", qual)
-		}
+		e.refuse(d, "module state %s needs a scalar or string literal initializer", qual)
 		return
 	}
 	// An explicit annotation pins the slot width. NOTE: tUnknown shares
@@ -246,15 +281,12 @@ func (e *emitter) registerModDeclarator(d *ast.Node, qual string) {
 		// Widths share spellings (tString == tArray == ptr, tUnknown ==
 		// tI32), so compare with ifs, not switch cases. An exotic
 		// annotation collapsing to "i32" stays i32 (locals infer the
-		// same way); anything outside scalar widths refuses.
-		if at == tString {
-			e.refuse(d, "string module state %s is not lowerable yet (scalar i32/i64/u64/f64 only)", qual)
+		// same way); anything outside scalar/string widths refuses.
+		if at == tVoid {
+			e.refuse(d, "module state %s needs a scalar or string literal initializer", qual)
 			return
-		} else if at == tVoid {
-			e.refuse(d, "module state %s needs a scalar literal initializer", qual)
-			return
-		} else if at != tI32 && at != tBool && at != tI64 && at != tU64 && at != tF64 {
-			e.refuse(d, "module state %s needs a scalar type annotation (i32/i64/u64/f64/boolean)", qual)
+		} else if at != tI32 && at != tBool && at != tI64 && at != tU64 && at != tF64 && at != tString {
+			e.refuse(d, "module state %s needs a scalar or string type annotation (i32/i64/u64/f64/boolean/string)", qual)
 			return
 		} else if !noInit && !modInitFitsSlot(at, iw, imm) {
 			e.refuse(d, "module state %s initializer does not match its annotation", qual)
@@ -268,8 +300,11 @@ func (e *emitter) registerModDeclarator(d *ast.Node, qual string) {
 // modInitFitsSlot reports whether a literal initializer fits an annotated
 // slot: int literals fill any int width (zero fills f64 too, via the
 // zero fast path which emits no init); float literals need f64; bool
-// literals need boolean (same i32 width).
+// literals need boolean (same i32 width); string literals need string.
 func modInitFitsSlot(at, iw saType, imm string) bool {
+	if at == tString || iw == tString {
+		return at == tString && iw == tString
+	}
 	aw, lw := modWidthOf(at), modWidthOf(iw)
 	if aw == lw {
 		return true
@@ -299,7 +334,7 @@ func (e *emitter) modClaim(d *ast.Node) (string, bool) {
 		if init.Kind == ast.KindArrowFunction {
 			return "", false
 		}
-		if _, _, _, ok := modInitOf(init); !ok && init.Kind != ast.KindStringLiteral {
+		if _, _, _, ok := modInitOf(init); !ok {
 			return "", false
 		}
 	}
@@ -359,9 +394,26 @@ func (ms *modState) saType() saType {
 		return tU64
 	case "f64":
 		return tF64
+	case modStrW:
+		return tString
 	default:
 		return tI32
 	}
+}
+
+// modStrRecv pre-lowers an unshadowed module-string receiver to a header
+// temp for method dispatch (locals shadow via scopes above; namespace
+// members resolve qualified-first through modStateOf).
+func (e *emitter) modStrRecv(recv string, pos *ast.Node) (string, bool) {
+	if e.lookupBinding(recv) != nil {
+		return "", false
+	}
+	ms := e.modStateOf(recv)
+	if ms == nil || ms.w != modStrW {
+		return "", false
+	}
+	h, _ := e.emitModLoad(ms, pos)
+	return h, true
 }
 
 // emitModSetRaw stores one u64-valued operand to a raw slot key with the
@@ -402,9 +454,13 @@ func (e *emitter) emitModEnsure(ms *modState, pos *ast.Node) {
 	e.emit("%s = ne %s, 0", c, f)
 	e.emit("br %s -> %s, %s", c, doneL, initL)
 	e.emitRaw("%s:", initL)
-	// The init value widens like any store (never verbatim: negative
-	// int and f64 immediates are not verbatim u64).
-	if wv, ok := e.modWiden(ms, ms.init, "imm", ms.initW, pos); ok {
+	if ms.w == modStrW {
+		// String inits materialize the literal (@const-immortal data)
+		// into both slots; the header releases after the stores.
+		e.emitModInitString(ms, pos)
+	} else if wv, ok := e.modWiden(ms, ms.init, "imm", ms.initW, pos); ok {
+		// The init value widens like any store (never verbatim: negative
+		// int and f64 immediates are not verbatim u64).
 		e.emitModSetRaw(ms.key, wv)
 	}
 	e.emitModSetRaw(ms.flag, "1")
@@ -414,12 +470,90 @@ func (e *emitter) emitModEnsure(ms *modState, pos *ast.Node) {
 	e.releaseIfOwnedTemp(f)
 }
 
+// emitModInitString materializes a string literal init into both slots.
+// The @const bytes are process-immortal, so the header releases after
+// the stores with no lifetime hazard (computed strings never reach here:
+// only literal/response text flows through registration).
+func (e *emitter) emitModInitString(ms *modState, pos *ast.Node) {
+	_ = pos
+	h := e.lowerStringLiteral(ms.init)
+	pv := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", pv, h)
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, h)
+	pu := e.freshTmp()
+	e.emit("%s = trunc %s as u64", pu, pv)
+	e.emitModSetRaw(ms.key, pu)
+	e.emitModSetRaw(ms.key2, ln)
+	e.releaseIfOwnedTemp(h)
+}
+
+// modStringText extracts literal response text for string stores: string
+// literals and untagged templates mirror the fold paths; identifiers must
+// name folded string consts (their @const data is immortal like literals).
+func (e *emitter) modStringText(n *ast.Node) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	switch n.Kind {
+	case ast.KindStringLiteral:
+		return stringLiteralText(n)
+	case ast.KindNoSubstitutionTemplateLiteral:
+		return n.Text(), true
+	case ast.KindIdentifier:
+		if q := e.qualify(n.Text()); q != "" {
+			if lit, ok := e.constVals[q]; ok && e.constIsStr[q] {
+				return lit, true
+			}
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+// emitModStoreString lowers one literal string assignment to a slot:
+// ensure, materialize, dual set. The header transfers to the caller as
+// the assignment value (chained stores keep a real slice); computed RHS
+// never reaches here (the dispatch refuses first).
+func (e *emitter) emitModStoreString(ms *modState, text string, pos *ast.Node) (string, saType, bool) {
+	e.emitModEnsure(ms, pos)
+	h := e.lowerStringLiteral(text)
+	pv := e.freshTmp()
+	e.emit("%s = load %s + 0 as ptr", pv, h)
+	ln := e.freshTmp()
+	e.emit("%s = load %s + 8 as u64", ln, h)
+	pu := e.freshTmp()
+	e.emit("%s = trunc %s as u64", pu, pv)
+	e.emitModSetRaw(ms.key, pu)
+	e.emitModSetRaw(ms.key2, ln)
+	e.modStrMark(h)
+	return h, tString, true
+}
+
+// emitModStoreStringDispatch routes one string-slot assignment: literal
+// and folded-const RHS store directly; anything computed refuses loudly
+// (its buffer has no module lifetime: storing the bits would dangle).
+func (e *emitter) emitModStoreStringDispatch(ms *modState, rhs *ast.Node, pos *ast.Node) (string, saType, bool) {
+	if text, ok := e.modStringText(rhs); ok {
+		return e.emitModStoreString(ms, text, pos)
+	}
+	e.refuse(pos, "module state %s stores string literals and string constants only (computed strings are not lowerable yet)", ms.qual)
+	return "0", tUnknown, false
+}
+
 // modWiden normalizes one value operand to u64 bits for the set call:
 // same-width ints retag via trunc, i32 widens via sext, ints enter f64 via
-// sitofp, f64 bits spill through scratch. Anything else refuses loudly
-// (handle copies never reach here: strings/arrays cannot register).
+// sitofp, f64 bits spill through scratch. String slots refuse here: their
+// stores go through emitModStoreString with literal text (a widened temp
+// cannot prove @const-immortal data). Anything else refuses loudly
+// (handle copies never reach here: arrays cannot register).
 func (e *emitter) modWiden(ms *modState, src, srcKind string, srcType saType, pos *ast.Node) (string, bool) {
 	_ = srcKind
+	if ms.w == modStrW {
+		e.refuse(pos, "module state %s stores string literals and string constants only (computed strings are not lowerable yet)", ms.qual)
+		return "0", false
+	}
 	sw := modWidthOf(srcType)
 	if sw == "u64" && ms.w == "u64" {
 		return src, true
@@ -483,9 +617,13 @@ func (e *emitter) modF64ToU64(src string) (string, bool) {
 }
 
 // emitModLoad reads one slot to a fresh temp carrying the slot width
-// (trunc narrows, scratch round-trips f64 bits, u64 snapshots).
+// (trunc narrows, scratch round-trips f64 bits, u64 snapshots, strings
+// materialize a header from the dual slots).
 func (e *emitter) emitModLoad(ms *modState, pos *ast.Node) (string, saType) {
 	e.emitModEnsure(ms, pos)
+	if ms.w == modStrW {
+		return e.emitModLoadString(ms, pos)
+	}
 	t := e.freshTmp()
 	e.emit("%s = call @sa_modstate_get_u64(%d)", t, ms.key)
 	e.ownTemp(t)
@@ -518,6 +656,37 @@ func (e *emitter) emitModLoad(ms *modState, pos *ast.Node) (string, saType) {
 	}
 }
 
+// emitModLoadString reads dual ptr+len slots into a fresh 16-byte header
+// (caller-managed lifetime like any literal header; the slot bits stay
+// put). The header temp registers in modStrTmps so handle-aware sites
+// (class-inline/callback params) alias instead of half-copying.
+func (e *emitter) emitModLoadString(ms *modState, pos *ast.Node) (string, saType) {
+	_ = pos
+	tp := e.freshTmp()
+	e.emit("%s = call @sa_modstate_get_u64(%d)", tp, ms.key)
+	e.ownTemp(tp)
+	tl := e.freshTmp()
+	e.emit("%s = call @sa_modstate_get_u64(%d)", tl, ms.key2)
+	e.ownTemp(tl)
+	h := e.freshTmp()
+	e.emit("%s = alloc 16", h)
+	e.ownTemp(h)
+	e.emit("store %s + 0, %s as ptr", h, tp)
+	e.emit("store %s + 8, %s as u64", h, tl)
+	e.releaseIfOwnedTemp(tp)
+	e.releaseIfOwnedTemp(tl)
+	e.modStrMark(h)
+	return h, tString
+}
+
+// modStrMark records a string header temp for handle-aware param sites.
+func (e *emitter) modStrMark(h string) {
+	if e.modStrTmps == nil {
+		e.modStrTmps = map[string]bool{}
+	}
+	e.modStrTmps[h] = true
+}
+
 // emitModStore lowers one assignment to a slot: widen the value, ensure,
 // status-checked set. Returns the stored value operand and slot type so
 // chained assignments (`y = (x = 5)`) keep a real operand.
@@ -548,8 +717,13 @@ func (e *emitter) emitModStore(ms *modState, src, srcKind string, srcType saType
 }
 
 // emitModIncDec lowers `x++`/`x--`/`++x`/`--x` on a slot: load, add/sub,
-// store back. Postfix delivers the old value (JS semantics).
+// store back. Postfix delivers the old value (JS semantics). Strings
+// refuse: arithmetic on slice headers is meaningless.
 func (e *emitter) emitModIncDec(ms *modState, up, postfix bool, pos *ast.Node) (string, saType) {
+	if ms.w == modStrW {
+		e.refuse(pos, "++/-- on string module state %s is not lowerable", ms.qual)
+		return "0", tUnknown
+	}
 	cur, ct := e.emitModLoad(ms, pos)
 	nw := e.freshTmp()
 	one := "1"

@@ -378,3 +378,18 @@
   JEV blast-radius local_only 97%。
   缺口序列：串/对象模块状态（双槽 + 生命周期）、effectful 初始化、
   顶层可执行语句入口、 bare `panic` 8 处潜雷（本二进制拒，286 未触及）。
+- ✅ 串模块状态（`modstate.go` 扩展 + 薄钩子 10 处；零 sci 变更，复用既有
+  `get/set_u64` 对）：串槽 = 双 u64 槽（ptr+len）+ flag 槽（新 FNV 域，标量键
+  不动）；写仅字面量/折叠串 const（`@const` 永生中转、header 用后释放；
+  `=` 点分前后路由、计算串经 `modWiden` 大声拒）；读经双 get 物化 header
+  （`modStrTmps` 标记供类内联/回调别名，防半拷贝）；方法经 `lowerStringMethod`
+  直达（防 `indexOf` 等数组名抢占）；`++/--` 拒；数组字面量/push 仅对标记
+  临时量拒（纯字面量数组放行保 `Buffer.concat`）；`typeof` 报 string；
+  串恒走 flag 初始化（空串亦显式，防 extern 空指针触碰）；闭包捕获天然直通
+  槽（`lookupBinding` 守卫已排除无 scope 名，箭头实测同键）；旧串拒测转正 1 项。
+  探否决 `tString == tArray == "ptr"` 类型判等（改节点/名源精确判定）。
+  286 单文件扫测 286 逐字节一致 + `sa check` 286 全过；单测 6 新串测 + 4 拒子项；
+  新形状 `sa check` 全过（串读写/方法/命名空间串/类参/`typeof`/拒形）；
+  JEV consistency 4/4 先行、blast-radius local_only 96%。
+  缺口序列：对象模块状态、计算串累加（缺泄漏豁免）、串数组、effectful 初始化、
+  顶层可执行语句入口、命名空间合并重开、import-equals、跨文件成员。

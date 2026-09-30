@@ -132,7 +132,8 @@ func TestModStateRefusals(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"string state", "let s = \"hi\";\nfunction main(): i32 {\n s = \"yo\";\n return 0;\n}\n", "string module state"},
+		// "string state" turned positive: literal string stores lower to
+		// dual slots (see TestModStateStringBasic).
 		{"effectful init", "function g(): i32 { return 1; }\nlet x = g();\nfunction main(): i32 {\n x = 2;\n return x;\n}\n", "move state into function scope"},
 		{"annotation mismatch", "let x: i32 = 1.5;\nfunction main(): i32 {\n x = 2;\n return x;\n}\n", "does not match its annotation"},
 		{"redefinition", "let x = 0;\nlet x = 1;\nfunction main(): i32 {\n x = 2;\n return x;\n}\n", "already declared"},
@@ -216,5 +217,136 @@ function main(): i32 {
 		if !strings.Contains(res.SAI, want) {
 			t.Errorf("missing %q in output:\n%s", want, res.SAI)
 		}
+	}
+}
+
+// String module state rides dual slots (ptr+len) with literal-only
+// stores (@const data is immortal); reads materialize headers.
+func TestModStateStringBasic(t *testing.T) {
+	src := `let mode = "auto";
+function main(): i32 {
+  mode = "fast";
+  return mode.length;
+}
+`
+	res := mustLower(t, "strmode.ts", src)
+	for _, want := range []string{
+		`@import "sa_std/modstate.sai"`,
+		"call @sa_modstate_get_u64(",
+		"call @sa_modstate_set_u64(",
+		"alloc 16",
+		"load ",
+		" + 8 as u64",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	if strings.Contains(res.SAI, "\nmode = ") {
+		t.Errorf("register assignment to module string leaked through:\n%s", res.SAI)
+	}
+}
+
+func TestModStateStringMethod(t *testing.T) {
+	src := `let mode = "auto";
+function shout(): i32 {
+  return mode.toUpperCase().length;
+}
+function main(): i32 {
+  mode = "fast";
+  return shout();
+}
+`
+	res := mustLower(t, "strmethod.ts", src)
+	for _, want := range []string{
+		"call @sa_string_to_upper_ascii(",
+		"call @sa_modstate_get_u64(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestModStateStringConstInit(t *testing.T) {
+	src := `const D = "-";
+let sep = "-";
+function use(d: string): i32 {
+  return d.length;
+}
+function main(): i32 {
+  sep = ",";
+  return use(D) + sep.length;
+}
+`
+	res := mustLower(t, "strconst.ts", src)
+	if !strings.Contains(res.SAI, "call @sa_modstate_set_u64(") {
+		t.Errorf("missing slot stores in output:\n%s", res.SAI)
+	}
+	// Identifier inits (`let sep = D`) keep baseline refusal: no
+	// constant propagation through the fold yet (sequenced gap).
+	bad := Lower("strconst2.ts", "const D = \"-\";\nlet sep = D;\nfunction main(): i32 {\n sep = \",\";\n return sep.length;\n}\n")
+	if !bad.Refused {
+		t.Fatalf("expected refusal for identifier init, lowered:\n%s", bad.SAI)
+	}
+}
+
+func TestModStateStringRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"computed store", "let s = \"a\";\nfunction main(): i32 {\n s = s + \"x\";\n return 0;\n}\n", "string literals and string constants only"},
+		{"call store", "function g(): string { return \"z\"; }\nlet s = \"a\";\nfunction main(): i32 {\n s = g();\n return 0;\n}\n", "string literals and string constants only"},
+		{"incdec", "let s = \"a\";\nfunction main(): i32 {\n s++;\n return 0;\n}\n", "++/-- on string module state"},
+		{"array element", "let s = \"a\";\nfunction main(): i32 {\n const a = [s];\n s = \"b\";\n return 0;\n}\n", "string array elements"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
+			}
+		})
+	}
+}
+
+func TestModStateStringNamespace(t *testing.T) {
+	src := `namespace N {
+  export let tag = "a";
+  export function len(): i32 {
+    return tag.length;
+  }
+}
+function main(): i32 {
+  N.tag = "bb";
+  return N.len();
+}
+`
+	res := mustLower(t, "nsstr.ts", src)
+	for _, want := range []string{
+		"call @sa_modstate_get_u64(",
+		"call @sa_modstate_set_u64(",
+		"call @N_len()",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestModStateStringUnassignedFolds(t *testing.T) {
+	src := `let K = "hi";
+function main(): i32 {
+  return K.length;
+}
+`
+	res := mustLower(t, "strfold.ts", src)
+	if strings.Contains(res.SAI, "sa_modstate") {
+		t.Errorf("unassigned string let must keep the const fold:\n%s", res.SAI)
 	}
 }

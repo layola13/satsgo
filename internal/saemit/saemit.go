@@ -401,9 +401,12 @@ type emitter struct {
 	mathAliases map[string]string
 	// modAssigned collects whole-file assigned bare names (pre-scan, so
 	// fold decisions precede later assignments); modVars holds lowered
-	// module-state slots by qualified name (see modstate.go).
+	// module-state slots by qualified name (see modstate.go); modStrTmps
+	// marks string header temps so handle-aware param sites alias instead
+	// of half-copying.
 	modAssigned map[string]bool
 	modVars     map[string]*modState
+	modStrTmps  map[string]bool
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -1955,6 +1958,18 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	}
 	// assignment folds to register copy (plain `s = "..."` is NOT valid SA).
 	if op == ast.KindEqualsToken {
+		// Module-string stores materialize literals directly: lowering
+		// the RHS first would strand a dead header, and computed RHS
+		// refuse here before any code emits for them.
+		if bin.Left.Kind == ast.KindIdentifier && e.lookupBinding(bin.Left.Text()) == nil {
+			if ms := e.modStateOf(bin.Left.Text()); ms != nil && ms.w == modStrW {
+				v, t, ok := e.emitModStoreStringDispatch(ms, bin.Right, n)
+				if !ok {
+					return "0", tUnknown
+				}
+				return v, t
+			}
+		}
 		rhs, rtype := e.lowerExpr(bin.Right)
 		if bin.Left.Kind == ast.KindIdentifier {
 			name := bin.Left.Text()
@@ -1992,6 +2007,16 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 				if ms := e.modVars[q]; ms != nil {
 					if !e.checkNsAccess(ns, mem, n) {
 						return "0", tUnknown
+					}
+					// String members dispatch on the RHS node (the
+					// pre-lowered header, if any, releases via normal
+					// scope cleanup).
+					if ms.w == modStrW {
+						v, t, ok := e.emitModStoreStringDispatch(ms, bin.Right, n)
+						if !ok {
+							return "0", tUnknown
+						}
+						return v, t
 					}
 					v, t, ok := e.emitModStore(ms, rhs, operandKind(rhs, bin.Right), rtype, n)
 					if !ok {
@@ -3112,6 +3137,15 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 		return "", tUnknown, false
 	}
+	// Module-state strings pre-lower to a header temp and route to the
+	// string surface directly (locals shadow via scopes above; without
+	// this, array-named methods like indexOf would claim the receiver).
+	if h, ok := e.modStrRecv(recv, pos); ok {
+		if v, t, ok := e.lowerStringMethod(h, method, args, pos); ok {
+			return v, t, true
+		}
+		return "", tUnknown, false
+	}
 	// Receiver-kind dispatch (mirrors the scope lookup): string bindings
 	// route to the string surface, array bindings to array methods.
 	if e.strVars[recv] {
@@ -3882,7 +3916,7 @@ func (e *emitter) bindCallbackParam(p *ast.Node, val string, pos *ast.Node) {
 			e.varLayouts[name.Text()] = l
 			return
 		}
-		if e.arrVars[val] || e.strVars[val] {
+		if e.arrVars[val] || e.strVars[val] || e.modStrTmps[val] {
 			e.declareAlias(name.Text(), val)
 			if e.arrVars[val] {
 				if e.arrVars == nil {
@@ -3894,7 +3928,7 @@ func (e *emitter) bindCallbackParam(p *ast.Node, val string, pos *ast.Node) {
 				}
 				e.arrElems[name.Text()] = e.arrElems[val]
 			}
-			if e.strVars[val] {
+			if e.strVars[val] || e.modStrTmps[val] {
 				if e.strVars == nil {
 					e.strVars = map[string]bool{}
 				}
@@ -4687,6 +4721,10 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 	case "push":
 		if len(args) != 1 {
 			return "", tUnknown, false
+		}
+		if e.modStrTmps[args[0]] {
+			e.refuse(pos, "module string array elements are not lowerable yet (4-wide slots hold i32 only)")
+			return "0", tUnknown, true
 		}
 		return e.lowerArrayPush(recv, args[0], "i32", 4), tI32, true
 	case "pop":
@@ -6955,6 +6993,10 @@ func (e *emitter) lowerArrayLiteral(n *ast.Node) (string, saType) {
 				continue
 			}
 			v, _ := e.lowerExpr(el)
+			if e.modStrTmps[v] {
+				e.refuse(el, "module string array elements are not lowerable yet (4-wide slots hold i32 only)")
+				return "0", tUnknown
+			}
 			e.lowerArrayPush(h, v, "i32", 4)
 		}
 		return h, tArray
@@ -6962,6 +7004,13 @@ func (e *emitter) lowerArrayLiteral(n *ast.Node) (string, saType) {
 	elems := []string{}
 	for _, el := range al.Elements.Nodes {
 		v, _ := e.lowerExpr(el)
+		// Module-string headers are 16 bytes; 4-wide slots would
+		// truncate them (pure-literal arrays stay node-consumable for
+		// Buffer.concat-style backends, so only marked temps refuse).
+		if e.modStrTmps[v] {
+			e.refuse(el, "module string array elements are not lowerable yet (4-wide slots hold i32 only)")
+			return "0", tUnknown
+		}
 		elems = append(elems, v)
 	}
 	h := e.freshTmp()
@@ -7215,8 +7264,10 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 		case e.f64Vars[name]:
 			kind = "number"
 		case e.modStateOf(name) != nil:
-			if e.modStateOf(name).isBool {
+			if ms := e.modStateOf(name); ms.isBool {
 				kind = "boolean"
+			} else if ms.w == modStrW {
+				kind = "string"
 			} else {
 				kind = "number"
 			}
@@ -7811,7 +7862,7 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 				e.varLayouts = map[string]*layout{}
 			}
 			e.varLayouts[pname] = l
-		} else if e.arrVars[args[i]] || e.strVars[args[i]] {
+		} else if e.arrVars[args[i]] || e.strVars[args[i]] || e.modStrTmps[args[i]] {
 			e.declareAlias(pname, args[i])
 			if e.arrVars[args[i]] {
 				if e.arrVars == nil {
@@ -7823,7 +7874,7 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 				}
 				e.arrElems[pname] = e.arrElems[args[i]]
 			}
-			if e.strVars[args[i]] {
+			if e.strVars[args[i]] || e.modStrTmps[args[i]] {
 				if e.strVars == nil {
 					e.strVars = map[string]bool{}
 				}
