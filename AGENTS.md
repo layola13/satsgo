@@ -260,6 +260,13 @@
   （另加 `export let` 无值对照锁）。
   全套件绿、286 sweep 零 diff；planck 538→522（-16 全为 EPSILON，
   零新增-kind）；真机 check + run 差分一致（7==7）。
+- ✅ 死分支消除（`isFalseConst` + if/while/for/ternary 四位，
+  planck 断言簇；单测扩展 1 项）。
+  常量假条件直接消死臂且永不 lowering（`_ASSERT` 折叠后
+  `if (_ASSERT) console.assert(...)` 整臂蒸发，内层 getType 同消；
+  真条件恒走物化旧路；for 假仅留 init 并平衡 scope；do/switch 不动）。
+  全套件绿、286 sweep 零 diff；planck 522→477
+  （first-class 97→60，零新增-kind）；真机 check + run 差分一致（11==11）。
 - ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
   整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
   `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。

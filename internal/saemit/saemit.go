@@ -1515,8 +1515,47 @@ func (e *emitter) materializeCond(cond string) string {
 	return t
 }
 
+// isFalseConst decides constant-false conditions WITHOUT lowering:
+// false keyword, integer/float zero literals, and constVals-folded names
+// holding zero. Only the false arm drives elimination (dead code may name
+// values that do not exist); true conditions keep the materialize path.
+func (e *emitter) isFalseConst(n *ast.Node) bool {
+	for n.Kind == ast.KindParenthesizedExpression {
+		n = n.Expression()
+		if n == nil {
+			return false
+		}
+	}
+	switch n.Kind {
+	case ast.KindFalseKeyword:
+		return true
+	case ast.KindNumericLiteral:
+		return n.Text() == "0" || n.Text() == "0.0"
+	case ast.KindIdentifier:
+		if lit, ok := e.constVals[e.qualify(n.Text())]; ok {
+			return lit == "0" || lit == "0.0"
+		}
+	}
+	return false
+}
+
 func (e *emitter) lowerIf(st *ast.Node) {
 	is := st.AsIfStatement()
+	// Constant-false conditions eliminate the then-arm without lowering
+	// it: dead code may name values that do not exist (planck's
+	// `if (_ASSERT) console.assert(...)` with folded _ASSERT).
+	if e.isFalseConst(is.Expression) {
+		if is.ElseStatement == nil {
+			e.terminated = false
+			return
+		}
+		e.pushScope()
+		e.terminated = false
+		e.lowerBranchBody(is.ElseStatement)
+		e.releaseScope()
+		e.popScope()
+		return
+	}
 	cond, _ := e.lowerExpr(is.Expression)
 	cond = e.materializeCond(cond)
 	thenL := e.freshLabel("then")
@@ -1573,6 +1612,11 @@ func (e *emitter) lowerBranchBody(s *ast.Node) {
 
 func (e *emitter) lowerWhile(st *ast.Node) {
 	ws := st.AsWhileStatement()
+	// Never-taken loops emit nothing (same dead-code rule as if).
+	if e.isFalseConst(ws.Expression) {
+		e.terminated = false
+		return
+	}
 	topL := e.freshLabel("while_top")
 	bodyL := e.freshLabel("while_body")
 	endL := e.freshLabel("while_end")
@@ -1610,6 +1654,14 @@ func (e *emitter) lowerFor(st *ast.Node) {
 		default:
 			e.lowerExpr(fs.Initializer)
 		}
+	}
+	// Never-taken C loops emit the init only (same dead-code rule):
+	// balance the scope above, pop no loop targets (none pushed).
+	if fs.Condition != nil && e.isFalseConst(fs.Condition) {
+		e.releaseScope()
+		e.popScope()
+		e.terminated = false
+		return
 	}
 	topL := e.freshLabel("for_top")
 	bodyL := e.freshLabel("for_body")
@@ -7501,6 +7553,11 @@ func (e *emitter) lowerTernary(n *ast.Node) (string, saType) {
 	// name a value that does not exist.
 	if arm, ok := e.envProbeArm(n); ok {
 		return e.lowerExpr(arm)
+	}
+	// Constant-false conditions take the false arm without lowering the
+	// true arm (same dead-code rule as if).
+	if e.isFalseConst(ce.Condition) {
+		return e.lowerExpr(ce.WhenFalse)
 	}
 	cond, _ := e.lowerExpr(ce.Condition)
 	cond = e.materializeCond(cond)

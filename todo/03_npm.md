@@ -141,3 +141,7 @@ backlog：基于用法的擦除（binder 查值位引用，无则消边），独
   planck program 口径 538→522（-16 全为 EPSILON 簇，零新增）；
   单测 1 项（折叠 + 对象/桶/私有恒拒）；286 零 diff；
   真机 check + run 差分一致（7==7）。
+- ✅ 死分支消除（2026-09-30，`isFalseConst` + 四位消除）：
+  常量假条件死臂永不 lowering（断言簇整蒸发）。
+  planck program 口径 522→477（first-class 97→60，零新增）；
+  单测扩展 1 项；286 零 diff；真机 check + run 差分一致（11==11）。

@@ -229,14 +229,28 @@ func TestEnvProbeFold(t *testing.T) {
 		t.Errorf("function-scope probe must fold to a constant, got:\n%s", res.SAI)
 	}
 	// Constant conditions materialise into registers (br takes no
-	// immediates): const-bool if/while lower check-clean.
+	// immediates): const-bool if/while lower check-clean. False
+	// conditions eliminate instead (see below); true keeps materialize.
 	cc := "const NO = false;\nconst YES = true;\nfunction main(): i32 {\n  if (NO) {\n    return 1;\n  }\n  while (NO) {\n    return 2;\n  }\n  if (YES) {\n    return 3;\n  }\n  return 0;\n}\n"
 	res = mustLower(t, "e5.ts", cc)
 	if strings.Contains(res.SAI, "br 0") || strings.Contains(res.SAI, "br 1") {
 		t.Errorf("constant conditions must materialise, got:\n%s", res.SAI)
 	}
-	if !strings.Contains(res.SAI, "ne 0, 0") || !strings.Contains(res.SAI, "ne 1, 0") {
-		t.Errorf("want ne-materialised conditions, got:\n%s", res.SAI)
+	if strings.Contains(res.SAI, "ne 0, 0") {
+		t.Errorf("false conditions must eliminate, not materialise, got:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "ne 1, 0") {
+		t.Errorf("want ne-materialised true condition, got:\n%s", res.SAI)
+	}
+	// Dead arms never lower: naming a nonexistent value inside one is
+	// not a diagnostic (planck's `if (_ASSERT) console.assert(...)`).
+	dead := "const NO = false;\nfunction main(): i32 {\n  if (NO) {\n    return undefinedFn();\n  }\n  while (NO) {\n    return undefinedFn();\n  }\n  const r = NO ? undefinedFn() : 5;\n  for (let i = 0; false; i++) {\n    return undefinedFn();\n  }\n  return r;\n}\n"
+	res = mustLower(t, "e7.ts", dead)
+	if res.Refused {
+		t.Fatalf("dead arms must not lower, got: %v", res.Diagnostics)
+	}
+	if strings.Contains(res.SAI, "undefinedFn") {
+		t.Errorf("dead arm leaked into output:\n%s", res.SAI)
 	}
 	// Non-binary ternary conditions must not panic the probe scanner
 	// (regression: identifier conditions hit AsBinaryExpression).
