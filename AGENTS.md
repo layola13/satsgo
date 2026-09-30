@@ -101,6 +101,11 @@
   是纯 Zig 原生运行时（无 TS 解析/降级逻辑），satsgo 投影是其 TS 前端桥，
   零运行时模拟；`sa_plugin_deno` 有 57 externs 但无 exported-symbols 清单、
   无 bun 插件，Deno/Bun 投影待后端先行（本轮不动）。
+- ✅ node `util.stripVTControlCharacters`（纯 string→string，复用 string1；
+  `util` 进 import 白名单）。`format`（缺 args→JSON 编码器）、`inspect`
+  （入参为任意值而 `expandSlice` 无类型守卫）、`isDeepStrictEqual`
+  （缺 bool-out 分支）、`formatWithOptions`（插件符号表无）四项保持大声拒，
+  单测锁定 3 项拒绝。node 契约 31/31 全过；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

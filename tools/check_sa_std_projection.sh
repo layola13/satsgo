@@ -99,6 +99,7 @@ node_symbols=(
   sa_node_plugin_url_parse
   sa_node_plugin_url_format
   sa_node_plugin_url_resolve
+  sa_node_plugin_util_strip_vt_control_characters
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

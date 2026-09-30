@@ -247,6 +247,13 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string1", Note: "JSON text in; URL text out; status-checked"},
 	{TS: "url.resolve", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_url_resolve", Ret: tString,
 		NodeOut: "string2", Note: "from+to slices; status-checked"},
+	// util: only total string->string surfaces project. format needs an
+	// args-to-JSON encoder (no helper yet), inspect takes arbitrary values
+	// (expandSlice has no type guard), is_deep_strict_equal needs a bool
+	// out kind, format_with_options is absent from the plugin's symbol
+	// list; all four stay loudly refused until those land.
+	{TS: "util.stripVTControlCharacters", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_util_strip_vt_control_characters", Ret: tString,
+		NodeOut: "string1", Note: "one string arg; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

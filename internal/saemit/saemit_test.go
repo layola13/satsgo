@@ -457,6 +457,30 @@ func TestLowerNodeURL(t *testing.T) {
 	}
 }
 
+func TestLowerNodeUtil(t *testing.T) {
+	src := "import { stripVTControlCharacters } from \"util\";\nfunction main(): i32 {\n  const s: string = stripVTControlCharacters(\"\\u001b[31mhi\\u001b[0m\");\n  return s.length;\n}\n"
+	res := mustLower(t, "t1.ts", src)
+	for _, want := range []string{
+		"call @sa_node_plugin_util_strip_vt_control_characters",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Deferred util surfaces refuse loudly (no JSON encoder / bool-out
+	// kind / missing plugin symbol yet).
+	for _, src := range []string{
+		"import { format } from \"util\";\nfunction main(): i32 {\n  const s: string = format(\"%d\", 1);\n  return s.length;\n}\n",
+		"import { inspect } from \"util\";\nfunction main(): i32 {\n  const s: string = inspect(\"x\");\n  return s.length;\n}\n",
+		"import { isDeepStrictEqual } from \"util\";\nfunction main(): i32 {\n  return isDeepStrictEqual(\"a\", \"a\");\n}\n",
+	} {
+		if r := Lower("t2.ts", src); !r.Refused {
+			t.Fatalf("expected refusal, got:\n%s", r.SAI)
+		}
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)
