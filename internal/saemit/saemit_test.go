@@ -314,6 +314,17 @@ func TestLowerNodeOs(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
 	}
+	nodeOsBatch3 := "import { version, userInfo, networkInterfaces } from \"os\";\nfunction main(): i32 {\n  return version().length + userInfo().length + networkInterfaces().length;\n}\n"
+	res = mustLower(t, "n3c.ts", nodeOsBatch3)
+	for _, want := range []string{
+		"call @sa_node_plugin_os_version",
+		"call @sa_node_plugin_os_user_info",
+		"call @sa_node_plugin_os_network_interfaces",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 	nodeGlobals := "function main(): i32 {\n  const c = process.cwd();\n  const u = crypto.randomUUID();\n  return c.length + u.length;\n}\n"
 	res = mustLower(t, "n4.ts", nodeGlobals)
 	for _, want := range []string{

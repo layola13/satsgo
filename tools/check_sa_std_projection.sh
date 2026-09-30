@@ -78,6 +78,9 @@ node_symbols=(
   sa_node_plugin_os_endianness
   sa_node_plugin_os_machine
   sa_node_plugin_os_cpus
+  sa_node_plugin_os_version
+  sa_node_plugin_os_user_info
+  sa_node_plugin_os_network_interfaces
   sa_node_plugin_process_cwd
   sa_node_plugin_crypto_random_uuid
 )

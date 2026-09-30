@@ -186,6 +186,14 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "os.cpus", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_cpus", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	// Batch 3: same (&out_ptr,&out_len)->u32 shape, verified in node.sai.
+	// TS keys follow Node camelCase (userInfo/networkInterfaces).
+	{TS: "os.version", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_version", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.userInfo", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_user_info", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "os.networkInterfaces", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_network_interfaces", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	// process/crypto globals (Node exposes them without import; same shape).
 	{TS: "process.cwd", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_process_cwd", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
