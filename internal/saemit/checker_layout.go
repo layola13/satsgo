@@ -154,6 +154,7 @@ func (e *emitter) recordTypeAlias(st *ast.Node) {
 	if name == "<anon>" {
 		return
 	}
+	name = e.nsDefName(name)
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
 	for _, tp := range st.TypeParameters() {
 		if nm := tp.Name(); nm != nil && nm.Kind == ast.KindIdentifier {

@@ -356,6 +356,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier && hasExportModifier(st) {
 					expOf[p].exports[st.Name().Text()] = true
 				}
+			case ast.KindModuleDeclaration:
+				// Runtime namespaces contribute qualified signatures for
+				// same-file calls (ambient blocks skip; see namespace_ts.go).
+				if isAmbientModule(st) {
+					continue
+				}
+				if nm, ok := moduleDeclName(st); ok {
+					collectNsProgramSigs(moduleMemberStmts(st), nm, globalRets[p], globalArity[p], globalRest[p], globalDefaults[p])
+				}
 			case ast.KindExportDeclaration:
 				fromForm := collectReExport(st, p, files, expOf[p])
 				if !fromForm {

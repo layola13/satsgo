@@ -350,3 +350,14 @@
   单测 9 项（7 新 + 2 旧转正：extends 空子类、heritage 静态跨文件）；
   真机 `sa check` 过（103/24 指令），手工对数 5==5（Dog(4,1).total()）。
   缺口政策：新增 std 原语一律立项到 sci/sa_std（禁 tsgo 原创运行时）。
+- ✅ 命名空间（`namespace_ts.go` 模块 + 薄钩子 16 处）：
+  环境块整体擦除（`declare module`/`declare global`/`declare namespace`/
+  `export as namespace`，planck src 66 文件 ModuleDeclaration 诊断 22→0）+
+  运行时拍扁（`N.f`→`N_f`，嵌套 `A.B.g` 最长匹配；函数/箭头/纯量 const/类/
+  枚举/接口/别名全成员；`NS.f()`/`NS.C`/`new NS.C()`/`NS.E.M` 全路由；
+  `export` 私有性 + 值遮蔽优先 + 重定义/合并大声拒）+
+  修出内联所有权缺口（`releaseDeeperThan`：方法/回调 join 点清理，顶层
+  `lowerReturn` 语义对齐；276 扫测输出提前释放 `!a !b`，check 放行）。
+  286 单文件扫测 285 逐字节一致 + 1 改进；单测 8 项；真机 `sa check` 过，
+  手工对数 47==47。后续切片：可变命名空间状态（并入模块状态）、合并重开、
+  import-equals、跨文件成员。

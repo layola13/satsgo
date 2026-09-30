@@ -54,14 +54,22 @@ func (e *emitter) parseHeritage(cd *ast.ClassDeclaration, st *ast.Node) (heritag
 			base := ""
 			if el.Kind == ast.KindExpressionWithTypeArguments {
 				expr := el.AsExpressionWithTypeArguments().Expression
-				if expr != nil && expr.Kind == ast.KindIdentifier {
-					base = expr.Text()
+				if expr != nil {
+					if expr.Kind == ast.KindIdentifier {
+						base = expr.Text()
+					} else if expr.Kind == ast.KindPropertyAccessExpression {
+						// Qualified bases (`extends N.B`) flatten to the
+						// namespace path (see namespace_ts.go).
+						if q, ok := dottedBaseName(expr); ok {
+							base = q
+						}
+					}
 				}
 			} else if el.Kind == ast.KindIdentifier {
 				base = el.Text()
 			}
 			if base == "" {
-				e.refuse(st, "class extends needs a plain base class name (mixins and qualified bases are not lowerable)")
+				e.refuse(st, "class extends needs a plain base class name (mixins are not lowerable)")
 				return hi, false
 			}
 			hi.base = base
@@ -268,13 +276,17 @@ func (e *emitter) inheritInterface(st *ast.Node, l *layout) {
 			iname := ""
 			switch el.Kind {
 			case ast.KindExpressionWithTypeArguments:
-				if ex := el.AsExpressionWithTypeArguments().Expression; ex != nil && ex.Kind == ast.KindIdentifier {
-					iname = ex.Text()
+				if ex := el.AsExpressionWithTypeArguments().Expression; ex != nil {
+					if ex.Kind == ast.KindIdentifier {
+						iname = ex.Text()
+					} else if ex.Kind == ast.KindPropertyAccessExpression {
+						iname, _ = dottedBaseName(ex)
+					}
 				}
 			case ast.KindTypeReference:
-				if tn := el.AsTypeReferenceNode().TypeName; tn != nil && tn.Kind == ast.KindIdentifier {
-					iname = tn.Text()
-				}
+				// Qualified names (`extends NS.J`) flatten to the path
+				// form (see namespace_ts.go).
+				iname = entityNameText(el.AsTypeReferenceNode().TypeName)
 			case ast.KindIdentifier:
 				iname = el.Text()
 			}

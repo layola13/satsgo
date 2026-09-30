@@ -334,6 +334,14 @@ type emitter struct {
 	// is being inlined (super routing context).
 	classParent    map[string]string
 	curMethodClass string
+	// Namespace flattening (see namespace_ts.go): nsStack is the active
+	// path; namespaces/nsMembers/nsExports record declared scopes, member
+	// kinds and export sets (per-file; cross-file member access is a later
+	// slice and refuses loudly).
+	nsStack    []string
+	namespaces map[string]bool
+	nsMembers  map[string]string
+	nsExports  map[string]map[string]bool
 	// staticDefs holds statics-only shells from heritage-refused classes
 	// (fold reads only; never instantiation; see recordClass).
 	staticDefs   map[string]*classDef
@@ -496,6 +504,9 @@ type inlineRetState struct {
 	slot   string
 	end    string
 	saname string
+	// scopeBase is the deepest surviving scope index at inline entry;
+	// join-point cleanup releases owned temps in deeper scopes only.
+	scopeBase int
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +604,11 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 		e.lowerVarStatement(st)
 	case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindEnumDeclaration:
 		e.lowerTypeDecl(st)
-	case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindExportAssignment:
+	case ast.KindModuleDeclaration:
+		e.lowerNamespace(st, topLevel)
+	case ast.KindImportEqualsDeclaration:
+		e.refuse(st, "import-equals aliases are not lowerable (use ES import/from)")
+	case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindExportAssignment, ast.KindNamespaceExportDeclaration:
 		e.lowerModuleDecl(st)
 	default:
 		e.lowerBlockStatement(st)
@@ -678,6 +693,9 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 			return
 		}
 	}
+	// Namespace members emit under their qualified name (identity at top
+	// level; see namespace_ts.go).
+	name = e.nsDefName(name)
 	params := fn.Parameters()
 	sig := []string{}
 	e.pushScope()
@@ -781,6 +799,7 @@ func (e *emitter) tryTopLevelArrow(st *ast.Node) bool {
 	if !ok {
 		return false
 	}
+	name = e.nsDefName(name)
 	e.lowerArrowBinding(name, init, true)
 	return !e.refused
 }
@@ -1098,14 +1117,25 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 			e.lastHash = nil
 		}
 		// `const b = new Box(...)` records the instance class for method
-		// dispatch and per-instance fn-field devirtualization.
+		// dispatch and per-instance fn-field devirtualization (namespace
+		// member classes resolve qualified, including `new NS.C()`).
 		if init.Kind == ast.KindNewExpression {
+			cname := ""
 			if nw := init.AsNewExpression(); nw.Expression.Kind == ast.KindIdentifier {
-				if _, ok := e.classDefs[nw.Expression.Text()]; ok {
+				cname = e.qualify(nw.Expression.Text())
+			} else if nw := init.AsNewExpression(); nw.Expression.Kind == ast.KindPropertyAccessExpression {
+				if q, ok := dottedBaseName(nw.Expression); ok {
+					if _, _, ok := e.splitNsQualified(q); ok {
+						cname = q
+					}
+				}
+			}
+			if cname != "" {
+				if _, ok := e.classDefs[cname]; ok {
 					if e.varClass == nil {
 						e.varClass = map[string]string{}
 					}
-					e.varClass[name] = nw.Expression.Text()
+					e.varClass[name] = cname
 					// Retarget per-instance fn fields from the result temp
 					// (lowerNewClass records under it) to the bound name.
 					if fields, ok := e.instFnFields[val]; ok {
@@ -1629,6 +1659,9 @@ func (e *emitter) lowerReturn(st *ast.Node) {
 			v, _ := e.lowerExpr(rs.Expression)
 			e.emit("store %s + 0, %s as %s", e.inlineRet.slot, v, e.inlineRet.saname)
 		}
+		// Inline-created temps die here (the slot value already joined);
+		// caller scopes stay live.
+		e.releaseDeeperThan(e.inlineRet.scopeBase, e.inlineRet.slot)
 		e.emit("jmp %s", e.inlineRet.end)
 		e.terminated = true
 		return
@@ -1719,9 +1752,11 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 			}
 			return n.Text(), tI32
 		}
-		// Top-level pure consts inline (locals shadow via scopes above).
-		if lit, ok := e.constVals[n.Text()]; ok {
-			if e.constIsStr[n.Text()] {
+		// Top-level pure consts inline (locals shadow via scopes above;
+		// namespace members resolve qualified-first).
+		qname := e.qualify(n.Text())
+		if lit, ok := e.constVals[qname]; ok {
+			if e.constIsStr[qname] {
 				return e.lowerStringLiteral(lit), tString
 			}
 			if isFloatLiteral(lit) {
@@ -1811,6 +1846,7 @@ func (e *emitter) tryTopLevelConst(st *ast.Node) bool {
 			allOk = false
 			continue
 		}
+		name = e.nsDefName(name)
 		init := d.Initializer()
 		if init == nil {
 			allOk = false
@@ -2369,7 +2405,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	}
 	// Top-level `var f = Math.g` aliases dispatch as Math.g.
 	if call.Expression.Kind == ast.KindIdentifier {
-		if g, ok := e.mathAliases[call.Expression.Text()]; ok {
+		if g, ok := e.mathAliases[e.qualify(call.Expression.Text())]; ok {
 			if v, t, ok := e.lowerMathCall(g, args, argTypes, call.Arguments, n); ok {
 				return v, t
 			}
@@ -2417,7 +2453,9 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	}
 	// new Map() is a NewExpression, not a call; plain identifier calls are user fns.
 	if call.Expression.Kind == ast.KindIdentifier {
-		fname := call.Expression.Text()
+		// Namespace members resolve qualified-first (bare `f()` inside
+		// NS; identity elsewhere, so builtins keep working).
+		fname := e.qualify(call.Expression.Text())
 		if proj, ok := globalFnProjection(fname); ok {
 			e.needImport(proj.Module)
 			t := e.freshTmp()
@@ -2641,7 +2679,7 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 // member optionals route through the method/property guards).
 func (e *emitter) lowerGuardedCall(n *ast.Node) (string, saType) {
 	call := n.AsCallExpression()
-	fname := call.Expression.Text()
+	fname := e.qualify(call.Expression.Text())
 	base := fname
 	slot := e.freshTmp()
 	e.emit("%s = alloc 8", slot)
@@ -2677,6 +2715,7 @@ func (e *emitter) lowerGuardedCall(n *ast.Node) (string, saType) {
 // lowerDirectCallee lowers a same-scope identifier call without optional
 // handling (shared by the guarded-call ok arm).
 func (e *emitter) lowerDirectCallee(fname string, args []string, n *ast.Node) string {
+	fname = e.qualify(fname)
 	if ai, ok := e.arrowAliases[fname]; ok {
 		full := append(append([]string{}, args...), ai.captures...)
 		if ai.ret == tVoid {
@@ -2736,6 +2775,12 @@ func (e *emitter) unwrapFsBuffer(buf string) (string, saType) {
 func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	pa := fn.AsPropertyAccessExpression()
 	method := pa.Name().Text()
+	// TypeScript namespaces (`NS.f(...)`, `A.B.g(...)`) route to qualified
+	// callees before receiver resolution (dotted bases never reach the
+	// value dispatch below). Value receivers shadow namespaces.
+	if v, t, ok := e.lowerNamespaceCallSite(fn, pa, method, args, argNodes, pos); ok {
+		return v, t, true
+	}
 	// `super.m(...)` routes to the base-class method on this (flattened
 	// layouts keep field offsets; see class_heritage.go).
 	if pa.Expression.Kind == ast.KindSuperKeyword {
@@ -3677,6 +3722,9 @@ func (e *emitter) callbackValue(cb *ast.Node, argVals []string, wantValue bool, 
 		e.refuse(pos, "callback declares %d parameters but only %d values are provided", len(params), len(argVals))
 		return "0", tUnknown
 	}
+	// Scopes at or below this index survive the inline (join-point
+	// cleanup releases deeper ones only).
+	scopeBase := len(e.scopes) - 1
 	e.pushScope()
 	for i, p := range params {
 		e.bindCallbackParam(p.AsNode(), argVals[i], pos)
@@ -3702,7 +3750,7 @@ func (e *emitter) callbackValue(cb *ast.Node, argVals []string, wantValue bool, 
 	e.emit("store %s + 0, 0 as ptr", slot)
 	endL := e.freshLabel("cb_end")
 	saved := e.inlineRet
-	e.inlineRet = &inlineRetState{active: true, slot: slot, end: endL, saname: "i32"}
+	e.inlineRet = &inlineRetState{active: true, slot: slot, end: endL, saname: "i32", scopeBase: scopeBase}
 	e.terminated = false
 	for _, s := range body.Statements() {
 		e.lowerBlockStatement(s)
@@ -3711,6 +3759,11 @@ func (e *emitter) callbackValue(cb *ast.Node, argVals []string, wantValue bool, 
 		}
 	}
 	e.inlineRet = saved
+	// Fallthrough join releases callback-created temps (the slot
+	// outlives into the load below).
+	if !e.terminated {
+		e.releaseDeeperThan(scopeBase, slot)
+	}
 	e.emitRaw("%s:", endL)
 	e.terminated = false
 	out := e.freshTmp()
@@ -6338,9 +6391,33 @@ func (e *emitter) lowerGuardedProperty(n *ast.Node) (string, saType) {
 
 func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 	pa := n.AsPropertyAccessExpression()
+	// Two-level namespace reads (`NS.E.M` enum folds, `NS.C.S` class
+	// statics). Struct chains fall through to lowerMemberChain below.
+	if pa.Expression.Kind == ast.KindPropertyAccessExpression {
+		if q, ok := dottedBaseName(pa.Expression); ok {
+			if members, ok := e.enums[q]; ok {
+				if ord, ok := members[pa.Name().Text()]; ok {
+					return fmt.Sprintf("%d", ord), tI32
+				}
+				e.refuse(n, "unknown enum member %s.%s", q, pa.Name().Text())
+				return "0", tUnknown
+			}
+			if ns, mem, ok := e.splitNsQualified(q); ok {
+				if sv, stok := nsStaticText(e, q, pa.Name().Text()); stok {
+					if !e.checkNsAccess(ns, mem, n) {
+						return "0", tUnknown
+					}
+					if sv.typ == tString {
+						return e.lowerStringLiteral(sv.text), tString
+					}
+					return sv.text, sv.typ
+				}
+			}
+		}
+	}
 	// Enum.Member folds to its ordinal as a value.
 	if pa.Expression.Kind == ast.KindIdentifier {
-		if members, ok := e.enums[pa.Expression.Text()]; ok {
+		if members, ok := e.enums[e.qualify(pa.Expression.Text())]; ok {
 			if ord, ok := members[pa.Name().Text()]; ok {
 				return fmt.Sprintf("%d", ord), tI32
 			}
@@ -6358,6 +6435,8 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 		if c, ok := e.varClass[clsName]; ok {
 			clsName = c
 		}
+		// Namespace member classes resolve qualified-first.
+		clsName = e.qualify(clsName)
 		if cd, ok := e.classDefs[clsName]; ok {
 			if sv, ok := cd.statics[pa.Name().Text()]; ok {
 				if sv.typ == tString {
@@ -6373,6 +6452,17 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 				}
 				return sv.text, sv.typ
 			}
+		}
+		// TypeScript namespace value reads (`NS.CONST`; a shadowing
+		// value at the root wins and falls through below).
+		if base := pa.Expression.Text(); e.namespaces[base] && !e.isValueReceiver(base) {
+			member := pa.Name().Text()
+			if e.nsMemberKind(base, member) == "" {
+				e.refuse(n, "%s has no member %s", base, member)
+				return "0", tUnknown
+			}
+			v, t, _ := e.lowerNamespaceMemberRead(base, member, n)
+			return v, t
 		}
 	}
 	// Accessor reads refuse precisely (inlining with `this` binding and
@@ -6667,7 +6757,7 @@ func (e *emitter) lowerCheckedIndex(base, idx string, optional bool) string {
 func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 	nw := n.AsNewExpression()
 	if nw.Expression.Kind == ast.KindIdentifier {
-		name := nw.Expression.Text()
+		name := e.qualify(nw.Expression.Text())
 		if _, ok := e.classDefs[name]; ok {
 			return e.lowerNewClass(name, nw, n)
 		}
@@ -6712,6 +6802,28 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 					return "0", tUnknown
 				}
 				return v, t
+			}
+		}
+	}
+	// `new NS.C()` instantiates namespace member classes (export-checked;
+	// a shadowing value at the root falls through to the generic refuse).
+	if nw.Expression.Kind == ast.KindPropertyAccessExpression {
+		if r := dottedRoot(nw.Expression); r == "" || !e.isValueReceiver(r) {
+			if q, ok := dottedBaseName(nw.Expression); ok {
+				if ns, mem, ok := e.splitNsQualified(q); ok {
+					if e.nsMemberKind(ns, mem) == "" {
+						e.refuse(n, "%s has no member %s", ns, mem)
+						return "0", tUnknown
+					}
+					if _, ok := e.classDefs[q]; ok {
+						if !e.checkNsAccess(ns, mem, n) {
+							return "0", tUnknown
+						}
+						return e.lowerNewClass(q, nw, n)
+					}
+					e.refuse(n, "%s.%s is not a class", ns, mem)
+					return "0", tUnknown
+				}
 			}
 		}
 	}
@@ -6877,12 +6989,16 @@ func (e *emitter) concatSlices(left, right string) string {
 }
 
 // rawTypeName renders a type annotation to its source-level name for
-// nested-layout resolution (e.g. field `inner: Inner`).
+// nested-layout resolution (e.g. field `inner: Inner`; qualified `NS.I`
+// flattens to the namespace path form).
 func rawTypeName(tn *ast.Node) string {
 	if tn == nil {
 		return "i32"
 	}
 	if tn.Kind == ast.KindTypeReference {
+		if flat := entityNameText(tn.AsTypeReferenceNode().TypeName); flat != "" {
+			return flat
+		}
 		return tn.AsTypeReferenceNode().TypeName.Text()
 	}
 	return saNameOfType(tn)
@@ -6981,6 +7097,10 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 	kind := ""
 	if op.Kind == ast.KindIdentifier {
 		name := op.Text()
+		// Definition maps resolve shadowed-first (an inner namespace
+		// member hides outer definitions); scope bindings above and
+		// below keep the raw name.
+		dname := e.qualify(name)
 		switch {
 		case e.strVars[name]:
 			kind = "string"
@@ -6991,11 +7111,11 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 		case e.f64Vars[name]:
 			kind = "number"
 		default:
-			if _, ok := e.arrowAliases[name]; ok {
+			if _, ok := e.arrowAliases[dname]; ok {
 				kind = "function"
-			} else if _, ok := e.funcSigs[name]; ok {
+			} else if _, ok := e.funcSigs[dname]; ok {
 				kind = "function"
-			} else if _, ok := e.constVals[name]; ok && !e.constIsStr[name] {
+			} else if _, ok := e.constVals[dname]; ok && !e.constIsStr[dname] {
 				kind = "number"
 			} else if k, ok := e.tcx.typeofKind(op); ok {
 				kind = k
@@ -7049,6 +7169,7 @@ func (e *emitter) recordEnum(st *ast.Node) {
 	if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
 		name = st.Name().Text()
 	}
+	name = e.nsDefName(name)
 	m := map[string]int64{}
 	var next int64
 	for _, mem := range st.AsEnumDeclaration().Members.Nodes {
@@ -7079,6 +7200,7 @@ func (e *emitter) recordLayout(st *ast.Node) {
 		name = st.Name().Text()
 	}
 	_ = decl
+	name = e.nsDefName(name)
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
 	// Interface extends flattens base fields first (type-only; see
 	// class_heritage.go). Missing bases skip best-effort.
@@ -7133,6 +7255,9 @@ type classDef struct {
 	// isAbstract refuses `new` precisely (TS fidelity; concrete subclasses
 	// still instantiate).
 	isAbstract bool
+	// nsSegs records the namespace path owning this class (method bodies
+	// resolve bare sibling references qualified; see namespace_ts.go).
+	nsSegs []string
 	// getters/setters record accessor bodies (reads/writes refuse
 	// precisely until inline support lands; the class itself lowers).
 	getters map[string]*ast.Node
@@ -7219,6 +7344,9 @@ func (e *emitter) recordClass(st *ast.Node) {
 		name = st.Name().Text()
 	}
 	def := &classDef{name: name, methods: map[string]*ast.Node{}}
+	def.name = e.nsDefName(def.name)
+	name = def.name
+	def.nsSegs = append([]string{}, e.nsStack...)
 	// Static literals fold regardless of heritage (no instance needed);
 	// a heritage-refused class still publishes its statics for folding.
 	for _, m := range cd.Members.Nodes {
@@ -7254,7 +7382,7 @@ func (e *emitter) recordClass(st *ast.Node) {
 		}
 		if !hi.hasExtends {
 			// Implements-only: type-erased, the class lowers normally.
-		} else if !e.inheritClass(name, hi.base, def, l, st) {
+		} else if !e.inheritClass(name, e.qualify(hi.base), def, l, st) {
 			// Statics-only shells live apart from instantiable defs so no
 			// instance path can observe a missing layout (see lowerNewClass).
 			if len(def.statics) > 0 {
@@ -7265,7 +7393,7 @@ func (e *emitter) recordClass(st *ast.Node) {
 			}
 			return
 		} else {
-			off = e.classDefs[hi.base].layout.size
+			off = e.classDefs[e.qualify(hi.base)].layout.size
 			l.size = off
 		}
 	}
@@ -7541,17 +7669,27 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 		e.refuse(pos, "%s.%s takes %d arguments", className, method, len(params))
 		return "0", tUnknown, true
 	}
+	// Scopes at or below this index survive the inline (join-point
+	// cleanup releases deeper ones only).
+	scopeBase := len(e.scopes) - 1
 	e.pushScope()
 	savedSelf := e.thisSelf
 	e.thisSelf = recv
 	savedCls := e.curMethodClass
 	e.curMethodClass = className
+	// Method bodies resolve bare namespace siblings qualified (the
+	// owner's path, not the call-site prefix).
+	savedNs := e.nsStack
+	if def != nil && len(def.nsSegs) > 0 {
+		e.nsStack = def.nsSegs
+	}
 	for i, p := range params {
 		pname, ok := bindingNameText(p.AsNode())
 		if !ok {
 			e.refuse(p.AsNode(), "destructured method parameters are not lowerable")
 			e.thisSelf = savedSelf
 			e.curMethodClass = savedCls
+			e.nsStack = savedNs
 			e.popScope()
 			return "0", tUnknown, true
 		}
@@ -7594,7 +7732,7 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	e.emit("store %s + 0, 0 as ptr", slot)
 	endL := e.freshLabel("m_end")
 	saved := e.inlineRet
-	e.inlineRet = &inlineRetState{active: true, slot: slot, end: endL, saname: "i32"}
+	e.inlineRet = &inlineRetState{active: true, slot: slot, end: endL, saname: "i32", scopeBase: scopeBase}
 	e.terminated = false
 	body := mn.Body()
 	if body != nil {
@@ -7608,6 +7746,12 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	e.inlineRet = saved
 	e.thisSelf = savedSelf
 	e.curMethodClass = savedCls
+	e.nsStack = savedNs
+	// Fallthrough join releases method-created temps (the slot outlives
+	// into the load below).
+	if !e.terminated {
+		e.releaseDeeperThan(scopeBase, slot)
+	}
 	e.emitRaw("%s:", endL)
 	e.terminated = false
 	out := e.freshTmp()
@@ -8543,6 +8687,29 @@ func (e *emitter) releaseForJump(callDepth int) {
 		for i := len(e.owned) - 1; i >= 0; i-- {
 			name := e.owned[i]
 			if top[name] == nil || done[name] {
+				continue
+			}
+			done[name] = true
+			if b := top[name]; b.heap && !b.consumed && !b.released {
+				e.emit("!%s", name)
+				b.released = true
+			}
+		}
+	}
+}
+
+// releaseDeeperThan releases owned-live bindings in scopes deeper than
+// depth, except one survivor. Inlined bodies (methods, callbacks) bypass
+// lowerReturn's exit cleanup, so their join point releases method-created
+// temps explicitly; the join slot itself outlives the body. Caller scopes
+// (at or above depth) stay live.
+func (e *emitter) releaseDeeperThan(depth int, except string) {
+	done := map[string]bool{}
+	for d := len(e.scopes) - 1; d > depth; d-- {
+		top := e.scopes[d]
+		for i := len(e.owned) - 1; i >= 0; i-- {
+			name := e.owned[i]
+			if name == except || top[name] == nil || done[name] {
 				continue
 			}
 			done[name] = true
