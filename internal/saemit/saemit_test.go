@@ -1054,3 +1054,61 @@ function main(): i32 {
 		t.Errorf("missing folded static in output:\n%s", res.SAI)
 	}
 }
+
+// Object spread copies layout-guided fields in source order (later props
+// override); literal computed keys fold; shorthand reads the binding.
+func TestObjectSpread(t *testing.T) {
+	src := `interface P {
+  x: i32;
+  y: i32;
+}
+function main(): i32 {
+  const o: P = { x: 1, y: 2 };
+  const p: P = { ...o, y: 20 };
+  const q: P = { x: 100, ...o };
+  return p.x * 1000 + p.y + q.x;
+}
+`
+	res := mustLower(t, "spread.ts", src)
+	for _, want := range []string{"load ", " as i32", "store "} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Literal computed keys and shorthand fold to static names.
+	lit := `interface P {
+  x: i32;
+  y: i32;
+}
+function main(): i32 {
+  const y = 7;
+  const o: P = { ["x"]: 1, y };
+  return o.x + o.y;
+}
+`
+	res = mustLower(t, "compkey.ts", lit)
+	if !strings.Contains(res.SAI, "return ") {
+		t.Errorf("missing return in output:\n%s", res.SAI)
+	}
+	// Dynamic keys, layout-less spreads and mismatched targets refuse.
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"dynamic key", "interface P {\n  x: i32;\n}\nfunction main(): i32 {\n  const k = \"x\";\n  const o: P = { [k]: 1 };\n  return o.x;\n}\n", "computed property names must be literals"},
+		{"spread unknown", "interface P {\n  x: i32;\n  y: i32;\n}\nfunction g(o: any): P {\n  return { ...o, y: 1 };\n}\nfunction main(): i32 {\n  return 0;\n}\n", "spread source has no recorded interface layout"},
+		{"spread mismatch", "interface P {\n  x: i32;\n  y: i32;\n}\ninterface Q {\n  x: i32;\n  z: i32;\n}\nfunction main(): i32 {\n  const o: Q = { x: 1, z: 2 };\n  const p: P = { ...o, y: 3 };\n  return p.x;\n}\n", "matches no recorded interface layout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
+			}
+		})
+	}
+}

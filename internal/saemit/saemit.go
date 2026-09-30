@@ -7419,23 +7419,132 @@ func (e *emitter) layoutOfLiteral(n *ast.Node) *layout {
 // lowerObjectLiteral materializes a struct, mirroring sa_plugin_ts:
 // dest = alloc size, zero-init every field, then store each entry at its
 // static offset with the field's SA type.
+// objPropName resolves one object-literal key: plain identifiers,
+// literal computed keys (`{["x"]: 1}` folds like a static name), and
+// shorthand names. Dynamic keys refuse loudly (static layouts have no
+// runtime key dispatch).
+func objPropName(p *ast.Node) (string, bool) {
+	nm := p.Name()
+	if nm == nil {
+		return "", false
+	}
+	switch nm.Kind {
+	case ast.KindIdentifier:
+		return nm.Text(), true
+	case ast.KindStringLiteral:
+		return stringLiteralText(nm)
+	case ast.KindComputedPropertyName:
+		expr := nm.AsComputedPropertyName().Expression
+		if expr == nil {
+			return "", false
+		}
+		switch expr.Kind {
+		case ast.KindStringLiteral:
+			return stringLiteralText(expr)
+		case ast.KindNumericLiteral:
+			return expr.Text(), true
+		}
+	}
+	return "", false
+}
+
 func (e *emitter) lowerObjectLiteral(n *ast.Node) (string, saType) {
-	l := e.layoutOfLiteral(n)
+	ol := n.AsObjectLiteralExpression()
+	// Phase 1: lower spread sources (handles + layouts stay live for the
+	// copies below) and resolve every key. Later properties override
+	// earlier ones, so replay stays in source order (phase 3).
+	type spreadSrc struct {
+		h string
+		l *layout
+	}
+	type op struct {
+		spread int // index into spreads, -1 for a plain store
+		fname  string
+		init   *ast.Node // value node for plain stores (nil for spreads)
+	}
+	spreads := []spreadSrc{}
+	ops := []op{}
+	names := []string{}
+	for _, p := range ol.Properties.Nodes {
+		if p.Kind == ast.KindSpreadAssignment {
+			sv, _ := e.lowerExpr(p.AsSpreadAssignment().Expression)
+			if e.refused {
+				return "0", tUnknown
+			}
+			sl := e.layoutOfVar(sv)
+			if sl == nil {
+				e.refuse(p, "spread source has no recorded interface layout (spread an interface-typed object)")
+				return "0", tUnknown
+			}
+			spreads = append(spreads, spreadSrc{h: sv, l: sl})
+			ops = append(ops, op{spread: len(spreads) - 1})
+			names = append(names, sl.fields...)
+			continue
+		}
+		fname, ok := objPropName(p)
+		if !ok {
+			e.refuse(p, "computed property names must be literals (dynamic keys have no static layout)")
+			return "0", tUnknown
+		}
+		var init *ast.Node
+		switch p.Kind {
+		case ast.KindPropertyAssignment:
+			init = p.AsPropertyAssignment().Initializer
+		case ast.KindShorthandPropertyAssignment:
+			// `{x}` reads the in-scope binding (same value an explicit
+			// `: x` would lower).
+			init = p.Name()
+		default:
+			e.refuse(p, "object literal property %s is not lowerable", p.Kind.String())
+			return "0", tUnknown
+		}
+		ops = append(ops, op{spread: -1, fname: fname, init: init})
+		names = append(names, fname)
+	}
+	// Match on the key set (overrides duplicate names; matchLayout
+	// compares set membership but also counts entries).
+	seen := map[string]bool{}
+	uniq := names[:0]
+	for _, nm := range names {
+		if !seen[nm] {
+			seen[nm] = true
+			uniq = append(uniq, nm)
+		}
+	}
+	l := e.matchLayout(uniq)
 	if l == nil {
 		e.refuse(n, "object literal matches no recorded interface layout (declare the interface first)")
 		return "0", tUnknown
 	}
-	ol := n.AsObjectLiteralExpression()
 	h := e.freshTmp()
 	e.emit("%s = alloc %d", h, l.size)
 	for _, f := range l.fields {
 		e.emit("store %s + %d, 0 as %s", h, l.offsets[f], l.types[f])
 	}
-	for _, p := range ol.Properties.Nodes {
-		pa := p.AsPropertyAssignment()
-		fname, _ := bindingNameText(p)
-		v, _ := e.lowerExpr(pa.Initializer)
-		e.emit("store %s + %d, %s as %s", h, l.offsets[fname], v, l.types[fname])
+	for _, o := range ops {
+		if o.spread >= 0 {
+			src := spreads[o.spread]
+			for _, f := range src.l.fields {
+				dstOff, ok := l.offsets[f]
+				if !ok {
+					e.refuse(n, "spread field %s is not in the target layout", f)
+					return "0", tUnknown
+				}
+				if src.l.types[f] != l.types[f] {
+					e.refuse(n, "spread field %s type mismatch (%s vs %s)", f, src.l.types[f], l.types[f])
+					return "0", tUnknown
+				}
+				t := e.freshTmp()
+				e.emit("%s = load %s + %d as %s", t, src.h, src.l.offsets[f], src.l.types[f])
+				e.emit("store %s + %d, %s as %s", h, dstOff, t, l.types[f])
+			}
+			continue
+		}
+		v, _ := e.lowerExpr(o.init)
+		if e.refused {
+			return "0", tUnknown
+		}
+		e.emit("store %s + %d, %s as %s", h, l.offsets[o.fname], v, l.types[o.fname])
 	}
 	e.declareOwned(h)
 	if e.varLayouts == nil {
