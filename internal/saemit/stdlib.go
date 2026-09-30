@@ -322,6 +322,12 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "Deno.osRelease", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_os_release", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	// Deno.env.* needs two-level namespace routing (Deno.env.get) and
+	// stays refused; direct file surfaces reuse string1/fire.
+	{TS: "Deno.readTextFile", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_read_text_file", Ret: tString,
+		NodeOut: "string1", Note: "one path slice; status-checked"},
+	{TS: "Deno.writeTextFile", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_write_text_file", Ret: tVoid,
+		NodeOut: "fire", Note: "path+data slices; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

@@ -146,6 +146,8 @@ fi
 deno_symbols=(
   sa_deno_plugin_hostname
   sa_deno_plugin_os_release
+  sa_deno_plugin_read_text_file
+  sa_deno_plugin_write_text_file
 )
 
 if [[ ${#deno_symbols[@]} -gt 0 ]]; then

@@ -210,6 +210,9 @@
   node/deno 同 u32-status 形状；无线束清单，以 `deno.sai` + Zig 实现双验
   为契约，check 脚本加 deno 区）：`Deno.*` 全局直达，形状对齐；
   deno 契约 2/2；单测 1 项（成功 + 未知成员拒）。bun 仍无插件，不动。
+- ✅ deno 文件批（`readTextFile` 经 string1，`writeTextFile` 经 fire 双 slice；
+  `Deno.env.*` 需两级命名空间路由，单测锁定拒绝）：deno 契约 4/4；
+  形状校验通过；单测扩展 2 项。
 - ✅ node Buffer 批（`node_buffer.go` 模块）：`byteLength` 经新 `NodeOut "u64out"`
   （1 slice + u64 出槽 + 状态检查）；`concat` 仅接字面量元素（标识符/字符串，
   绕过存不下 slice 的数组模型，直接打包静态 argv，动态数组/非串元素大声拒）。
