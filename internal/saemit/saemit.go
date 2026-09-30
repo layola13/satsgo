@@ -337,6 +337,10 @@ type emitter struct {
 	importEnv     map[string]string
 	importRet     map[string]saType
 	nsImports     map[string]string
+	// domVars/domTemps track airlock DOM handles by binding name and by
+	// call-result temp (see dom_proj.go).
+	domVars  map[string]bool
+	domTemps map[string]bool
 	// defNSImports marks default imports of object defaults
 	// (`import D from` where the target is `export default {..}`);
 	// D.member routes through importEnv like namespace members.
@@ -1203,6 +1207,8 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 			e.arrElems[name] = "i32"
 		}
 	}
+	// DOM handles from document.createElement (see dom_proj.go).
+	trackDomBinding(e, name, init)
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,6 +2838,21 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 			return v, t, true
 		}
 		// Unknown method: fall through to array/string surfaces, then refuse.
+	}
+	// document.createElement lowers to the airlock DOM backend; DOM
+	// handles dispatch to sax_dom_* (see dom_proj.go).
+	if recv == "document" && method == "createElement" {
+		v, t := e.lowerDocumentCreate(args, types, pos)
+		if e.refused {
+			return "0", tUnknown, true
+		}
+		return v, t, true
+	}
+	if _, ok := e.domVars[recv]; ok {
+		if v, t, ok := e.lowerDomMethod(recv, method, args, types, pos); ok {
+			return v, t, true
+		}
+		return "", tUnknown, false
 	}
 	// Map/Set handles dispatch to the sa_std btree backends (never
 	// simulated; keys encode via mapKeySlice).

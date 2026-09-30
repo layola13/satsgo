@@ -25,7 +25,8 @@
    （`useEffect(fn, [])`：fn 无参无返回，体仅 `setX(整数/布尔字面量)`，
    直存 state 槽 + 一次 render；空体出裸块；非空 deps/缺 deps/cleanup/
    其他 hooks/计算参数大声拒；单测 1 项；286 零回退。）
-7. [ ] DOM 投影表（`createElement/appendChild/setAttribute` → airlock extern），相当于给浏览器环境再做一套投影。
+7. [x] DOM 投影表（`createElement/appendChild/setAttribute` → airlock extern），相当于给浏览器环境再做一套投影。
+   （p1：三件套 + i64 句柄追踪；query/text/attrs 系与 p3 解构另立项；extern 由构建侧提供；单测 1 项；286 零回退。）
 8. [ ] JSX → 直接 SA 调用（`createElement` 内联），绕过 `.sax` 中间态（可选优化，不阻塞）。
 
 ## 交付数字

@@ -172,6 +172,12 @@
   setter 常量体直存 state 槽 + 一次 render；非空/缺 deps、cleanup 返回、
   其他 hooks、计算参数大声拒。途中抓到 setterOf 键值反转 bug（调试打印定位）。
   单测 1 项（成功 + 空体 + 4 拒绝）；全量单测过。
+- ✅ DOM 投影 p1（路二任务 7，`dom_proj.go` 模块）：`document.createElement`/
+  `appendChild`/`setAttribute` 对 airlock `sax_dom_*`（i64 句柄经
+  `domVars`/`domTemps` 追踪，非句柄/非 string/未知方法大声拒；
+  extern 由 `sa react build` 侧提供如 `sax_get_time`）。
+  形状与 airlock 契约逐位对齐；单测 1 项（3 形状 + 嵌套 + 3 拒绝）。
+  注：vm edit 在个别大文件出现幻写成功，已改“写后必验”（单测即验）。
 - ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
   log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
   缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`
