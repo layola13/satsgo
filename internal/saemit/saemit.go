@@ -348,6 +348,9 @@ type emitter struct {
 	// mapVars/setVars mark Map/Set handles for backend dispatch.
 	mapVars map[string]bool
 	setVars map[string]bool
+	// dateVars marks Date millis bindings (new Date() narrows to i64;
+	// getTime is the identity on them).
+	dateVars map[string]bool
 	// hashAcc tracks crypto Hash accumulators by binding name: each
 	// entry buffers fed bytes as a plain string slice (updates fold via
 	// sa_string_concat) until digest() routes algo+buffer through the
@@ -1150,6 +1153,8 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 		}
 	}
 	// new Map()/new Set() handles remember their kind for method dispatch.
+	// new Date() narrows to i64 millis for getTime (argued forms refuse
+	// in lowerNew, so marking here is harmless either way).
 	if init != nil && init.Kind == ast.KindNewExpression {
 		if nw := init.AsNewExpression(); nw.Expression.Kind == ast.KindIdentifier {
 			switch nw.Expression.Text() {
@@ -1163,6 +1168,11 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 					e.setVars = map[string]bool{}
 				}
 				e.setVars[name] = true
+			case "Date":
+				if e.dateVars == nil {
+					e.dateVars = map[string]bool{}
+				}
+				e.dateVars[name] = true
 			}
 		}
 	}
@@ -2728,6 +2738,24 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 				return "0", tUnknown, true
 			}
 			return v, t, true
+		}
+	}
+	// Date.now() lowers to sa_time_unix_ms (no import; Date is global).
+	// Anything else on Date falls through to loud refusal below.
+	if recv == "Date" && method == "now" && len(args) == 0 {
+		if proj, ok := projectionByTS("Date.now"); ok {
+			v, t := e.emitProjCall(proj, args, pos)
+			if e.refused {
+				return "0", tUnknown, true
+			}
+			return v, t, true
+		}
+	}
+	// Date millis bindings answer getTime as the identity (the value
+	// already is i64 millis); other methods fall through to refusal.
+	if e.dateVars[recv] {
+		if method == "getTime" && len(args) == 0 {
+			return recv, tI64, true
 		}
 	}
 	// Class methods inline at the call site (no vtables in SA-ASM).
@@ -6415,8 +6443,23 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 			lenOp, _ := e.lowerExpr(nw.Arguments.Nodes[0])
 			return e.newSizedArray(lenOp), tArray
 		}
+		// new Date() narrows to i64 millis (Date.now shape); argued
+		// forms (parse/format territory) refuse loudly.
+		if name == "Date" {
+			if nw.Arguments != nil && len(nw.Arguments.Nodes) != 0 {
+				e.refuse(n, "new Date(x) is not lowerable (only arg-less now-shape)")
+				return "0", tUnknown
+			}
+			if proj, ok := projectionByTS("Date.now"); ok {
+				v, t := e.emitProjCall(proj, nil, n)
+				if e.refused {
+					return "0", tUnknown
+				}
+				return v, t
+			}
+		}
 	}
-	e.refuse(n, "new expressions other than new Map() / new Array(n) are not lowerable")
+	e.refuse(n, "new expressions other than new Map() / new Array(n) / new Date() are not lowerable")
 	return "0", tUnknown
 }
 

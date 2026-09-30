@@ -106,6 +106,10 @@
   （入参为任意值而 `expandSlice` 无类型守卫）、`isDeepStrictEqual`
   （缺 bool-out 分支）、`formatWithOptions`（插件符号表无）四项保持大声拒，
   单测锁定 3 项拒绝。node 契约 31/31 全过；全量单测过。
+- ✅ Date MVP（`Date.now()` + 无参 `new Date()` + `getTime` 恒等）：直调既有
+  `sa_time_unix_ms`（sci time.sai 早于参考 Date 支持，属补齐非分叉）；
+  Date 对象窄化为 i64 millis（文档注明）；`new Date(x)`/parse/toISOString
+  大声拒。sa_std 契约 50/50；单测 4 项（1 成功 + 3 拒绝）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

@@ -169,6 +169,12 @@ var StdProjectionTable = []StdProjection{
 	{TS: "async/await", Module: "sa_std/async.sla", Symbol: "(ready-future handle)", Ret: tArray,
 		Note: "Phase 2: async fn returns 16-byte {state,value}; await unwraps; async main driven by sync @main"},
 
+	// ---- time: Date.now()/new Date().getTime() over sa_std/time.sai ----
+	// Date objects narrow to i64 millis (documented); parsing/formatting
+	// (Date.parse/toISOString/new Date(x)) refuse loudly until a
+	// formatting primitive lands in sci.
+	{TS: "Date.now", Module: "sa_std/time.sai", Symbol: "sa_time_unix_ms", Ret: tI64,
+		Note: "zero-arg direct call; also backs new Date()"},
 	// ---- node plugin backend (pilot): native os surfaces ---------------
 	// Convention per node.sai: u32 status + &out slots; nonzero panics.
 	{TS: "os.platform", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_platform", Ret: tString,

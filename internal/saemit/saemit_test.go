@@ -481,6 +481,28 @@ func TestLowerNodeUtil(t *testing.T) {
 	}
 }
 
+func TestLowerDate(t *testing.T) {
+	src := "function main(): i64 {\n  const t: i64 = Date.now();\n  const d = new Date();\n  return t + d.getTime();\n}\n"
+	res := mustLower(t, "d1.ts", src)
+	for _, want := range []string{
+		"call @sa_time_unix_ms",
+		`@import "sa_std/time.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	for _, src := range []string{
+		"function main(): i64 {\n  const d = new Date(\"2024-01-01\");\n  return d.getTime();\n}\n",
+		"function main(): i64 {\n  return Date.parse(\"2024-01-01\");\n}\n",
+		"function main(): string {\n  const d = new Date();\n  return d.toISOString();\n}\n",
+	} {
+		if r := Lower("d2.ts", src); !r.Refused {
+			t.Fatalf("expected refusal, got:\n%s", r.SAI)
+		}
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

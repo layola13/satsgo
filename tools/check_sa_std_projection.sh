@@ -44,6 +44,7 @@ symbols=(
   sa_fs_remove_file sa_fs_make_dir
   sa_net_tcp_connect sa_net_tcp_listener_bind sa_net_tcp_listener_accept
   sa_net_tcp_stream_read sa_net_tcp_stream_write sa_net_tcp_stream_close
+  sa_time_unix_ms
 )
 
 fail=0
