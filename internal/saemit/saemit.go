@@ -2716,6 +2716,11 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 	} else if pa.Expression.Kind == ast.KindIdentifier {
 		recv = pa.Expression.Text()
 	} else {
+		// Two-level namespaces (Deno.env.get) route in their module;
+		// anything else stays loudly unroutable.
+		if v, t, ok := routeDenoEnvChain(e, pa.Expression, method, args, types, pos); ok {
+			return v, t, true
+		}
 		return "", tUnknown, false
 	}
 	// Object-default member routing lives in link_nsobject.
@@ -7531,8 +7536,64 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// "string" takes no arguments; "string1"/"string2"/"string3" take
 	// one/two/three string slices expanded to (&ptr, len) in-params
 	// ahead of the outs; "fire" passes slices by value with no outs;
-	// "fireF64" adds one f64 out slot; "u64out" adds one u64 out slot.
-	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64" || proj.NodeOut == "u64out") {
+	// "fireF64" adds one f64 out slot; "u64out" adds one u64 out slot;
+	// "nullable" wraps string outs with status 1 mapping to null "0".
+	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64" || proj.NodeOut == "u64out" || proj.NodeOut == "nullable") {
+		if proj.NodeOut == "nullable" {
+			// One slice in, string out; status 1 maps to null "0"
+			// (subset null mapping), other nonzero panics. Both arms
+			// join on one result temp (rebind at the join, like loops).
+			if len(args) != 1 {
+				e.refuse(pos, "%s takes exactly 1 argument", proj.TS)
+				return "0", tUnknown
+			}
+			np, nl := e.expandSlice(args[0])
+			nps := e.freshTmp()
+			nls := e.freshTmp()
+			e.emit("%s = alloc 8", nps)
+			e.emit("%s = alloc 8", nls)
+			e.ownTemp(nps)
+			e.ownTemp(nls)
+			nst := e.freshTmp()
+			e.emit("%s = call @%s(&%s, %s, &%s, &%s)", nst, proj.Symbol, np, nl, nps, nls)
+			e.ownTemp(nst)
+			nres := e.freshTmp()
+			zeroL := e.freshLabel("node_null")
+			chkL := e.freshLabel("node_chk")
+			wrapL := e.freshLabel("node_wrap")
+			endL := e.freshLabel("node_end")
+			badL := e.freshLabel("node_bad")
+			isnull := e.freshTmp()
+			e.emit("%s = eq %s, 1", isnull, nst)
+			e.emit("br %s -> %s, %s", isnull, zeroL, chkL)
+			e.emitRaw("%s:", zeroL)
+			e.releaseIfOwnedTemp(nps)
+			e.releaseIfOwnedTemp(nls)
+			e.emit("%s = 0", nres)
+			e.emit("jmp %s", endL)
+			e.emitRaw("%s:", chkL)
+			isbad := e.freshTmp()
+			e.emit("%s = ne %s, 0", isbad, nst)
+			e.emit("br %s -> %s, %s", isbad, badL, wrapL)
+			e.emitRaw("%s:", badL)
+			e.emit("panic")
+			e.terminated = true
+			e.emitRaw("%s:", wrapL)
+			e.terminated = false
+			nptr := e.freshTmp()
+			e.emit("%s = load %s + 0 as ptr", nptr, nps)
+			nln := e.freshTmp()
+			e.emit("%s = load %s + 0 as u64", nln, nls)
+			e.emit("%s = alloc 16", nres)
+			e.emit("store %s + 0, %s as ptr", nres, nptr)
+			e.emit("store %s + 8, %s as u64", nres, nln)
+			e.declareOwned(nres)
+			e.releaseIfOwnedTemp(nps)
+			e.releaseIfOwnedTemp(nls)
+			e.emit("jmp %s", endL)
+			e.emitRaw("%s:", endL)
+			return nres, tString
+		}
 		if proj.NodeOut == "u64out" {
 			// One slice in, u64 out (Buffer.byteLength shape).
 			if len(args) != 1 {

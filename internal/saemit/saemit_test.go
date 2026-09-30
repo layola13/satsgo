@@ -587,11 +587,6 @@ func TestLowerDeno(t *testing.T) {
 	if r := Lower("dn2.ts", bad); !r.Refused {
 		t.Fatalf("expected unknown-member refusal, got:\n%s", r.SAI)
 	}
-	// Two-level namespaces refuse (Deno.env.get needs ns routing).
-	env := "function main(): string {\n  return Deno.env.get(\"HOME\");\n}\n"
-	if r := Lower("dn3.ts", env); !r.Refused {
-		t.Fatalf("expected ns refusal, got:\n%s", r.SAI)
-	}
 	files := "function main(): i32 {\n  const t: string = Deno.readTextFile(\"/tmp/a.txt\");\n  Deno.writeTextFile(\"/tmp/b.txt\", t);\n  return t.length;\n}\n"
 	res = mustLower(t, "dn4.ts", files)
 	for _, want := range []string{
@@ -601,6 +596,22 @@ func TestLowerDeno(t *testing.T) {
 		if !strings.Contains(res.SAI, want) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
+	}
+	envOk := "function main(): i32 {\n  const v: string = Deno.env.get(\"HOME\");\n  Deno.env.set(\"X\", \"1\");\n  Deno.env.delete(\"X\");\n  return v.length;\n}\n"
+	res = mustLower(t, "dn5.ts", envOk)
+	for _, want := range []string{
+		"call @sa_deno_plugin_env_get",
+		"call @sa_deno_plugin_env_set",
+		"call @sa_deno_plugin_env_delete",
+		"panic",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	other := "function main(): i32 {\n  const x = Deno.foo.bar();\n  return 1;\n}\n"
+	if r := Lower("dn6.ts", other); !r.Refused {
+		t.Fatalf("expected ns refusal, got:\n%s", r.SAI)
 	}
 }
 

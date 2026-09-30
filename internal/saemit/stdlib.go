@@ -60,8 +60,9 @@ type StdProjection struct {
 	// requested size (e.g. randomBytes); "string2"/"string3" expand
 	// two/three leading string slices ahead of the outs; "fire" passes
 	// all string args by value with no outs; "fireF64" adds one f64 out;
-	// "u64out" expands one slice ahead of one u64 out slot.
-	// Nonzero status panics (loud).
+	// "u64out" expands one slice ahead of one u64 out slot; "nullable"
+	// wraps string outs with status 1 mapping to null "0".
+	// Nonzero status panics (loud; nullable exempts status 1).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
@@ -322,12 +323,18 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "Deno.osRelease", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_os_release", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
-	// Deno.env.* needs two-level namespace routing (Deno.env.get) and
-	// stays refused; direct file surfaces reuse string1/fire.
+	// Deno.env.* routes through routeDenoEnvChain (two-level receiver;
+	// see node_deno.go); direct file surfaces reuse string1/fire.
 	{TS: "Deno.readTextFile", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_read_text_file", Ret: tString,
 		NodeOut: "string1", Note: "one path slice; status-checked"},
 	{TS: "Deno.writeTextFile", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_write_text_file", Ret: tVoid,
 		NodeOut: "fire", Note: "path+data slices; status-checked"},
+	{TS: "Deno.env.get", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_env_get", Ret: tString,
+		NodeOut: "nullable", Note: "one key slice; 1->null, other nonzero panics"},
+	{TS: "Deno.env.set", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_env_set", Ret: tVoid,
+		NodeOut: "fire", Note: "key+value slices; status-checked"},
+	{TS: "Deno.env.delete", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_env_delete", Ret: tVoid,
+		NodeOut: "fire", Note: "one key slice; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

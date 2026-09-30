@@ -148,6 +148,9 @@ deno_symbols=(
   sa_deno_plugin_os_release
   sa_deno_plugin_read_text_file
   sa_deno_plugin_write_text_file
+  sa_deno_plugin_env_get
+  sa_deno_plugin_env_set
+  sa_deno_plugin_env_delete
 )
 
 if [[ ${#deno_symbols[@]} -gt 0 ]]; then

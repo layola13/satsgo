@@ -220,6 +220,11 @@
 - ✅ deno 文件批（`readTextFile` 经 string1，`writeTextFile` 经 fire 双 slice；
   `Deno.env.*` 需两级命名空间路由，单测锁定拒绝）：deno 契约 4/4；
   形状校验通过；单测扩展 2 项。
+- ✅ deno env 两级路由（`node_deno.go` 模块 + `NodeOut "nullable"`）：
+  `get/set/delete` 经 `Deno.env` 链分发（元数 + string 类型双检）；
+  缺失（status 1）映射 null `0`（子集一致），其余非零 panic，
+  双臂在单 temp 上 join；其他 `Deno.x` 链大声拒。deno 契约 7/7；
+  形状校验通过；单测扩展 2 项（成功三调用 + 未知链拒）。
 - ✅ 命名空间对象 p3（`const {a, b: c} = NS` 解构，直达 qualified）：
   缺省/嵌套/spread/计算键大声拒；spread/动态键仍另立项。单测 1 项
   （成功 + 改名 + 未知成员拒 + 缺省拒）；全量单测过。
