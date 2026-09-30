@@ -2818,14 +2818,14 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 	// primitives (i64 by value), and getTimezoneOffset as constant 0
 	// (UTC-only subset); other methods fall through to refusal.
 	if e.dateVars[recv] {
-		if method == "getTime" && len(args) == 0 {
+		if (method == "getTime" || method == "valueOf") && len(args) == 0 {
 			return recv, tI64, true
 		}
 		if method == "getTimezoneOffset" && len(args) == 0 {
 			return "0", tI32, true
 		}
 		if len(args) == 0 {
-			for _, m := range []string{"toISOString", "getFullYear", "getMonth", "getDate", "getHours", "getMinutes", "getSeconds", "getMilliseconds", "getDay"} {
+			for _, m := range []string{"toISOString", "getFullYear", "getMonth", "getDate", "getHours", "getMinutes", "getSeconds", "getMilliseconds", "getDay", "toString", "toDateString", "toTimeString", "toUTCString"} {
 				if method != m {
 					continue
 				}

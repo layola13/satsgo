@@ -196,6 +196,13 @@ var StdProjectionTable = []StdProjection{
 	{TS: "Date.getSeconds", Module: "sa_std/time.sai", Symbol: "sa_time_get_seconds", Ret: tI64, Note: ""},
 	{TS: "Date.getMilliseconds", Module: "sa_std/time.sai", Symbol: "sa_time_get_milliseconds", Ret: tI64, Note: ""},
 	{TS: "Date.getDay", Module: "sa_std/time.sai", Symbol: "sa_time_get_day", Ret: tI64, Note: ""},
+	// Date toString family routes only through dateVars method dispatch;
+	// the format id rides Extra (contract order ms, fmt — appends last,
+	// verified). toLocale* refuse (locale-dependent, no backend).
+	{TS: "Date.toString", Module: "sa_std/time.sai", Symbol: "sa_time_format_utc", Ret: tString, Extra: "0", Note: ""},
+	{TS: "Date.toDateString", Module: "sa_std/time.sai", Symbol: "sa_time_format_utc", Ret: tString, Extra: "1", Note: ""},
+	{TS: "Date.toTimeString", Module: "sa_std/time.sai", Symbol: "sa_time_format_utc", Ret: tString, Extra: "2", Note: ""},
+	{TS: "Date.toUTCString", Module: "sa_std/time.sai", Symbol: "sa_time_format_utc", Ret: tString, Extra: "3", Note: ""},
 	// Date setters route only through dateVars method dispatch; the field
 	// id is spliced by the branch (contract order ms, field, value), the
 	// receiver rebinds to the new millis (mutate + return, like Hash.update).

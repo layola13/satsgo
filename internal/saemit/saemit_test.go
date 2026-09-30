@@ -552,6 +552,22 @@ func TestLowerDate(t *testing.T) {
 	if r := Lower("d9.ts", setArity); !r.Refused {
 		t.Fatalf("expected setter-arity refusal, got:\n%s", r.SAI)
 	}
+	strs := "function main(): i64 {\n  const d = new Date();\n  const a: string = d.toString();\n  const b: string = d.toDateString();\n  const c: string = d.toTimeString();\n  const e: string = d.toUTCString();\n  return a.length + b.length + c.length + e.length;\n}\n"
+	res = mustLower(t, "d10.ts", strs)
+	for _, want := range []string{
+		"call @sa_time_format_utc",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	if c := strings.Count(res.SAI, "call @sa_time_format_utc"); c != 4 {
+		t.Errorf("want 4 format calls, got %d:\n%s", c, res.SAI)
+	}
+	loc := "function main(): string {\n  const d = new Date();\n  return d.toLocaleString();\n}\n"
+	if r := Lower("d11.ts", loc); !r.Refused {
+		t.Fatalf("expected locale refusal, got:\n%s", r.SAI)
+	}
 }
 
 func TestLowerDeno(t *testing.T) {
