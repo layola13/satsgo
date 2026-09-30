@@ -14,6 +14,7 @@
 - 约束：扫测门禁、拒则大声、复用 `sci/sa_std`；新符号进 `StdProjectionTable` + `check_sa_std_projection.sh`。
 - 分模块开发：新特性独立成文件（如 `link_nsobject.go`、`link_erasure.go`），
   `saemit.go`/`program.go` 只留 thin hook；单文件超约 500 行或职责超两项即拆分。
+  实现与测试同模块迁移（`link_erasure_test.go`）；旧文件历史格式问题不顺手重排。
 - 复用面已扩展：`sa_plugin_node`（`node.sai`/`node.sal` + `all_exported_symbols.txt` 共 408 符号，
   fs/buffer/crypto/net/dns/http/os/path/process… 原生后端）优先于自造；
   `deno.sai`/`bun.sai` 同理（`Deno.*`/`Bun.*` 命名空间）。投影表需加 Backend 维度
@@ -144,6 +145,11 @@
   `fileExports.defNS`/`modResolution.defNS`/`defNSImports` 三件套，
   复用 nsImports 绑定形状；planck program 口径 **56 文件链接**（此前 0）。
   单测 1 项；全量单测过。
+- ✅ 命名空间对象 p2（`export default ns` 透传，`link_nsobject.go` 模块）：
+  图循环记录 ns 别名 → 导出扫描认领 → links 期按 reexpQualified 展开播种；
+  planck `main.ts` 形环/默认告警清零。单测 1 项；全量单测过。
+- ✅ 用法擦除模块化（`link_erasure.go` + `link_erasure_test.go`，实现随测试
+  同迁；旧文件历史 gofmt 问题不碰）：零行为变更，全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
