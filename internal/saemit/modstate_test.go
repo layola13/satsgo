@@ -1,0 +1,220 @@
+package saemit
+
+import (
+	"strings"
+	"testing"
+)
+
+// Top-level mutable module state lowers to the sci slot registry
+// (sa_std/modstate.sai value externs); assignments never fold.
+// See modstate.go.
+func TestModStateCounter(t *testing.T) {
+	src := `let counter: i32 = 0;
+function bump(): i32 {
+  counter = counter + 1;
+  return counter;
+}
+function main(): i32 {
+  bump();
+  return bump();
+}
+`
+	res := mustLower(t, "counter.ts", src)
+	for _, want := range []string{
+		`@import "sa_std/modstate.sai"`,
+		"call @sa_modstate_get_u64(",
+		"call @sa_modstate_set_u64(",
+		"trunc ",
+		" as i32",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// The old fold-then-rebind shape emitted a register copy for the
+	// module name (silently wrong across calls); it must be gone.
+	if strings.Contains(res.SAI, "counter = t_") || strings.Contains(res.SAI, "\ncounter = ") {
+		t.Errorf("register assignment to module state leaked through:\n%s", res.SAI)
+	}
+}
+
+func TestModStateZeroInitHasNoEnsureBranch(t *testing.T) {
+	src := `let counter: i32 = 0;
+function main(): i32 {
+  counter = 41;
+  return counter;
+}
+`
+	res := mustLower(t, "zeroinit.ts", src)
+	if strings.Contains(res.SAI, "ms_init") || strings.Contains(res.SAI, "ms_done") {
+		t.Errorf("zero-init var must skip the lazy-ensure branch:\n%s", res.SAI)
+	}
+}
+
+func TestModStateNonZeroInitLaziesOnce(t *testing.T) {
+	src := `let step = 5;
+function main(): i32 {
+  step = step + 1;
+  return step;
+}
+`
+	res := mustLower(t, "lazinit.ts", src)
+	for _, want := range []string{
+		"ms_init", "ms_done",
+		"call @sa_modstate_set_u64(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestModStateIncDec(t *testing.T) {
+	src := `let n: i32 = 10;
+function main(): i32 {
+  n++;
+  ++n;
+  return n;
+}
+`
+	res := mustLower(t, "incdec.ts", src)
+	for _, want := range []string{
+		"call @sa_modstate_get_u64(",
+		"= add ",
+		"call @sa_modstate_set_u64(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestModStateUnassignedStillFolds(t *testing.T) {
+	src := `let K = 42;
+function main(): i32 {
+  return K + 1;
+}
+`
+	res := mustLower(t, "fold.ts", src)
+	if strings.Contains(res.SAI, "sa_modstate") {
+		t.Errorf("unassigned top-level let must keep the const fold:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "add 42, 1") {
+		t.Errorf("missing folded add in output:\n%s", res.SAI)
+	}
+}
+
+func TestModStateShadowedLocalStaysLocal(t *testing.T) {
+	src := `let x = 0;
+function f(x: i32): i32 {
+  x = x + 1;
+  return x;
+}
+function main(): i32 {
+  x = 5;
+  return f(x);
+}
+`
+	res := mustLower(t, "shadow.ts", src)
+	// The module slot exists (main stores through it) ...
+	if !strings.Contains(res.SAI, "call @sa_modstate_set_u64(") {
+		t.Errorf("missing module slot store in output:\n%s", res.SAI)
+	}
+	// ... but f's parameter assignment stays a register copy.
+	if !strings.Contains(res.SAI, "x = ") {
+		t.Errorf("shadowed parameter lost its register assignment:\n%s", res.SAI)
+	}
+}
+
+func TestModStateRefusals(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"string state", "let s = \"hi\";\nfunction main(): i32 {\n s = \"yo\";\n return 0;\n}\n", "string module state"},
+		{"effectful init", "function g(): i32 { return 1; }\nlet x = g();\nfunction main(): i32 {\n x = 2;\n return x;\n}\n", "move state into function scope"},
+		{"annotation mismatch", "let x: i32 = 1.5;\nfunction main(): i32 {\n x = 2;\n return x;\n}\n", "does not match its annotation"},
+		{"redefinition", "let x = 0;\nlet x = 1;\nfunction main(): i32 {\n x = 2;\n return x;\n}\n", "already declared"},
+		{"const reassign", "const K = 1;\nfunction main(): i32 {\n K = 2;\n return K;\n}\n", "cannot reassign const"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
+			}
+		})
+	}
+}
+
+func TestModStateNamespaceLet(t *testing.T) {
+	src := `namespace N {
+  export let x = 0;
+  export function inc(): i32 {
+    x = x + 1;
+    return x;
+  }
+}
+function main(): i32 {
+  N.x = 41;
+  return N.inc();
+}
+`
+	res := mustLower(t, "nslet.ts", src)
+	for _, want := range []string{
+		`@import "sa_std/modstate.sai"`,
+		"call @sa_modstate_get_u64(",
+		"call @sa_modstate_set_u64(",
+		"call @N_inc()",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestModStateNamespacePrivacy(t *testing.T) {
+	src := `namespace N {
+  let hidden = 0;
+  export function get(): i32 {
+    return hidden;
+  }
+}
+function main(): i32 {
+  N.hidden = 1;
+  return N.get();
+}
+`
+	res := Lower("nspriv.ts", src)
+	if !res.Refused {
+		t.Fatalf("expected privacy refusal, lowered:\n%s", res.SAI)
+	}
+	if !strings.Contains(diagText(res), "not exported") {
+		t.Errorf("missing privacy diagnostic:\n%s", diagText(res))
+	}
+}
+
+func TestModStateI64AndF64Widths(t *testing.T) {
+	src := `let big: i64 = 0;
+let ratio = 1.5;
+function main(): i32 {
+  big = 7;
+  ratio = 2.5;
+  return 0;
+}
+`
+	res := mustLower(t, "widths.ts", src)
+	for _, want := range []string{
+		"sext ",
+		" as u64",
+		" as f64",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+}

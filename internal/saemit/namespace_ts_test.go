@@ -172,7 +172,8 @@ func TestLowerNamespaceRefusals(t *testing.T) {
 		name string
 		src  string
 	}{
-		{"mutable state", "namespace M {\n export let x = 1;\n}\nfunction main(): i32 { return 0; }\n"},
+		// "mutable state" turned positive: namespace `export let` lowers
+		// to module-state slots (see TestModStateNamespaceLet).
 		{"merging", "namespace M {\n export const a = 1;\n}\nnamespace M {\n export const b = 2;\n}\nfunction main(): i32 { return 0; }\n"},
 		{"import equals", "namespace N {\n export const x = 1;\n}\nimport y = N.x;\nfunction main(): i32 { return 0; }\n"},
 		{"unknown member", "namespace N {\n export const x = 1;\n}\nfunction main(): i32 {\n return N.y;\n}\n"},

@@ -394,9 +394,16 @@ type emitter struct {
 	// constVals folds top-level pure literals (name -> literal text plus a
 	// string flag); mathAliases maps top-level `var f = Math.g` to g.
 	// Reassignment drops the entry (then normal declaration applies).
+	// Names assigned anywhere in the file never fold: they lower to
+	// module-state slots instead (see modstate.go).
 	constVals   map[string]string
 	constIsStr  map[string]bool
 	mathAliases map[string]string
+	// modAssigned collects whole-file assigned bare names (pre-scan, so
+	// fold decisions precede later assignments); modVars holds lowered
+	// module-state slots by qualified name (see modstate.go).
+	modAssigned map[string]bool
+	modVars     map[string]*modState
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -515,6 +522,12 @@ type inlineRetState struct {
 
 func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	stmts := sf.AsSourceFile().Statements.Nodes
+	// Pre-scan: whole-file assigned names, so top-level fold-vs-slot
+	// decisions precede later assignments (see modstate.go).
+	e.modAssigned = assignedNames(stmts)
+	// Pre-register assigned top-level scalar declarators, so forward
+	// reads from earlier functions resolve to slots.
+	e.preRegisterModStates(stmts)
 	// Pre-scan: register function signatures (forward calls resolve; void
 	// callees known before first use), interfaces and enums. Program links
 	// pre-seed cross-file signatures, so only create when absent.
@@ -591,6 +604,12 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 			// A top-level `const f = (...) => ...` is a file-scope callback
 			// (mirrors sa_plugin_ts parseTopLevelArrowFn): emit @f directly.
 			if e.tryTopLevelArrow(st) {
+				return
+			}
+			// Assigned top-level `let`/`var` scalars lower to
+			// module-state slots (see modstate.go); unassigned names
+			// fall through to the const fold below.
+			if e.tryModState(st) {
 				return
 			}
 			// Top-level pure bindings (`var K = 1.5`, `var nativeMax =
@@ -1094,7 +1113,10 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 			atype = vtype
 		}
 		_ = atype
-		e.assign(name, val, operandKind(val, init), vtype, d)
+		// Declaration site: always a fresh local binding, even when a
+		// same-named module slot exists (shadowing; assignLocal never
+		// routes to slots).
+		e.assignLocal(name, val, operandKind(val, init), vtype, d)
 		e.trackBinding(name, d.AsVariableDeclaration().Type, init, vtype)
 		// Adopt a staged crypto Hash/Hmac accumulator onto the bound name.
 		// The callee may be an import alias (`import { createHash as ch}`),
@@ -1420,7 +1442,8 @@ func (e *emitter) lowerForOf(st *ast.Node) {
 		}
 	} else {
 		binding := foBindingName(fo)
-		e.assign(binding, elemT, "temp", tI32, st)
+		// Loop-variable declaration: shadowing local, never a slot store.
+		e.assignLocal(binding, elemT, "temp", tI32, st)
 	}
 	e.terminated = false
 	e.lowerBranchBody(fo.Statement)
@@ -1462,7 +1485,8 @@ func (e *emitter) lowerForIn(st *ast.Node) {
 	e.emitRaw("%s:", bodyL)
 	e.pushScope()
 	binding := foBindingName(fo)
-	e.assign(binding, idx, "named", tI32, st)
+	// Loop-variable declaration: shadowing local, never a slot store.
+	e.assignLocal(binding, idx, "named", tI32, st)
 	e.declarePlain(binding)
 	e.terminated = false
 	e.lowerBranchBody(fo.Statement)
@@ -1764,6 +1788,11 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 			}
 			return lit, tI32
 		}
+		// Module-state slots read through the registry (locals shadow via
+		// scopes above; namespace members resolve qualified-first).
+		if ms := e.modStateOf(n.Text()); ms != nil {
+			return e.emitModLoad(ms, n)
+		}
 		return n.Text(), tI32
 	case ast.KindBinaryExpression:
 		return e.lowerBinary(n)
@@ -1928,7 +1957,20 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	if op == ast.KindEqualsToken {
 		rhs, rtype := e.lowerExpr(bin.Right)
 		if bin.Left.Kind == ast.KindIdentifier {
-			e.assign(bin.Left.Text(), rhs, operandKind(rhs, bin.Right), rtype, n)
+			name := bin.Left.Text()
+			// Module-state assignment stores through the registry and
+			// yields the stored operand (chained assignments keep a real
+			// value); scope bindings prefer locals via assign below.
+			if e.lookupBinding(name) == nil {
+				if ms := e.modStateOf(name); ms != nil {
+					v, t, ok := e.emitModStore(ms, rhs, operandKind(rhs, bin.Right), rtype, n)
+					if !ok {
+						return "0", tUnknown
+					}
+					return v, t
+				}
+			}
+			e.assign(name, rhs, operandKind(rhs, bin.Right), rtype, n)
 			return bin.Left.Text(), tI32
 		}
 		if bin.Left.Kind == ast.KindElementAccessExpression {
@@ -1942,6 +1984,21 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 					return rhs, tI32
 				}
 				return "0", tUnknown
+			}
+			// Mutable namespace members store through their slot
+			// (privacy enforced; unregistered members fall through to
+			// the loud refusal below, same as consts today).
+			if q, ns, mem, ok := e.nsLetTarget(bin.Left); ok {
+				if ms := e.modVars[q]; ms != nil {
+					if !e.checkNsAccess(ns, mem, n) {
+						return "0", tUnknown
+					}
+					v, t, ok := e.emitModStore(ms, rhs, operandKind(rhs, bin.Right), rtype, n)
+					if !ok {
+						return "0", tUnknown
+					}
+					return v, t
+				}
 			}
 			if e.lowerFieldStore(bin.Left, rhs) {
 				return rhs, tI32
@@ -2218,6 +2275,24 @@ func (e *emitter) lowerCompoundAssign(bin *ast.BinaryExpression, op ast.Kind) {
 	}
 	if bin.Left.Kind == ast.KindIdentifier {
 		e.assign(bin.Left.Text(), t, "temp", tI32, bin.Left)
+	} else if bin.Left.Kind == ast.KindPropertyAccessExpression {
+		// Mutable namespace members compound through their slot (the
+		// switch above emitted integer arithmetic, same as locals; f64
+		// slots refuse loudly instead of mis-storing).
+		if q, ns, mem, ok := e.nsLetTarget(bin.Left); ok {
+			if ms := e.modVars[q]; ms != nil {
+				if !e.checkNsAccess(ns, mem, bin.Left) {
+					return
+				}
+				if ms.w == "f64" {
+					e.refuse(bin.Left, "compound assignment on f64 module state %s is not lowerable (use plain assignment)", q)
+					return
+				}
+				_, _, _ = e.emitModStore(ms, t, "temp", ms.saType(), bin.Left)
+				return
+			}
+		}
+		e.refuse(bin.Left, "compound assignment target is not lowerable")
 	} else {
 		e.refuse(bin.Left, "compound assignment target is not lowerable")
 	}
@@ -2269,6 +2344,15 @@ func (e *emitter) lowerIncDec(operand *ast.Node, up, postfix bool, pos *ast.Node
 	// the static offset / indexed slot, add/sub, store back (mirrors
 	// sa_plugin_ts member-update and arr[i]++/-- write-back).
 	if operand.Kind == ast.KindPropertyAccessExpression {
+		// Mutable namespace members inc/dec through their slot.
+		if q, ns, mem, ok := e.nsLetTarget(operand); ok {
+			if ms := e.modVars[q]; ms != nil {
+				if !e.checkNsAccess(ns, mem, pos) {
+					return "0", tUnknown
+				}
+				return e.emitModIncDec(ms, up, postfix, pos)
+			}
+		}
 		pa := operand.AsPropertyAccessExpression()
 		if pa.Expression.Kind == ast.KindIdentifier {
 			if l := e.layoutOfVar(pa.Expression.Text()); l != nil {
@@ -2315,6 +2399,13 @@ func (e *emitter) lowerIncDec(operand *ast.Node, up, postfix bool, pos *ast.Node
 		return "0", tUnknown
 	}
 	name := operand.Text()
+	// Module-state inc/dec loads, adds, and stores back through the
+	// registry (scope bindings prefer locals below).
+	if e.lookupBinding(name) == nil {
+		if ms := e.modStateOf(name); ms != nil {
+			return e.emitModIncDec(ms, up, postfix, pos)
+		}
+	}
 	one := "1"
 	if postfix {
 		// Snapshot old (postfix delivers pre-increment value), compute new,
@@ -3966,7 +4057,8 @@ func (e *emitter) bindPatternName(nm *ast.Node, v, src string, idx int, pos *ast
 		if isTempName(v) {
 			kind = "temp"
 		}
-		e.assign(nm.Text(), v, kind, tI32, pos)
+		// Destructured declaration: fresh local, never a slot store.
+		e.assignLocal(nm.Text(), v, kind, tI32, pos)
 		e.trackBinding(nm.Text(), nil, nil, tI32)
 		return
 	}
@@ -6413,6 +6505,18 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 					return sv.text, sv.typ
 				}
 			}
+			// Nested mutable member reads (`A.B.x`) load through the slot
+			// (single-level `N.x` routes below; unregistered members fall
+			// through to the loud refusal like consts).
+			if q, ns, mem, ok := e.nsLetTarget(n); ok {
+				if ms := e.modVars[q]; ms != nil {
+					if !e.checkNsAccess(ns, mem, n) {
+						return "0", tUnknown
+					}
+					v, t := e.emitModLoad(ms, n)
+					return v, t
+				}
+			}
 		}
 	}
 	// Enum.Member folds to its ordinal as a value.
@@ -7110,6 +7214,12 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 			kind = "object"
 		case e.f64Vars[name]:
 			kind = "number"
+		case e.modStateOf(name) != nil:
+			if e.modStateOf(name).isBool {
+				kind = "boolean"
+			} else {
+				kind = "number"
+			}
 		default:
 			if _, ok := e.arrowAliases[dname]; ok {
 				kind = "function"
@@ -8481,16 +8591,44 @@ func (e *emitter) rebindRelease(dst string) {
 // srcKind is "imm" (immediate), "temp" (fresh SSA temp) or "named".
 // srcType guides the snapshot op for named sources (f64 uses fadd).
 // pos supplies diagnostic context for handle-copy refusals.
+//
+// Scope bindings win: a declared local/param/alias never routes to a
+// same-named module slot (declaration sites call assignLocal directly).
+// Otherwise a module-state name stores through the registry, and an
+// assignment to a folded const refuses loudly (invalid TS that used to
+// miscompile silently via fold-then-rebind).
 func (e *emitter) assign(dst, src, srcKind string, srcType saType, pos *ast.Node) {
+	if e.lookupBinding(dst) == nil {
+		if ms := e.modStateOf(dst); ms != nil {
+			_, _, _ = e.emitModStore(ms, src, srcKind, srcType, pos)
+			return
+		}
+		if _, ok := e.constVals[dst]; ok {
+			e.refuse(pos, "cannot reassign const %s (folded literals are immutable)", dst)
+			return
+		}
+		if q := e.qualify(dst); q != dst {
+			if _, ok := e.constVals[q]; ok {
+				e.refuse(pos, "cannot reassign const %s (folded literals are immutable)", q)
+				return
+			}
+		}
+		// True global rebinding drops alias folds (normal declaration
+		// applies from here on); declarations route through assignLocal
+		// and must never disturb file-scope folds they shadow.
+		delete(e.mathAliases, dst)
+	}
+	e.assignLocal(dst, src, srcKind, srcType, pos)
+}
+
+// assignLocal is the register-target assignment core (declaration sites
+// and scope-bound names; never routes to module-state slots, never
+// disturbs file-scope folds shadowed by locals).
+func (e *emitter) assignLocal(dst, src, srcKind string, srcType saType, pos *ast.Node) {
 	// Rebinding an alias drops the alias (the name becomes a fresh value).
 	if b := e.lookupBinding(dst); b != nil && b.alias != "" {
 		b.alias = ""
 	}
-	// Reassignment drops top-level const/alias folds (normal declaration
-	// applies from here on).
-	delete(e.constVals, dst)
-	delete(e.constIsStr, dst)
-	delete(e.mathAliases, dst)
 	fresh := e.lookupBinding(dst) == nil
 	if srcKind == "named" {
 		if _, ok := e.handleNamed(src); ok {

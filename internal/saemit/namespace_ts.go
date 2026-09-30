@@ -32,6 +32,7 @@ const (
 	nsKindFunc      = "func"
 	nsKindArrow     = "arrow"
 	nsKindConst     = "const"
+	nsKindLet       = "let"
 	nsKindClass     = "class"
 	nsKindEnum      = "enum"
 	nsKindInterface = "interface"
@@ -227,10 +228,23 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 			if len(dl.Declarations.Nodes) != 1 {
 				continue
 			}
-			// Only `const` members fold (lets would go stale on
-			// reassignment; the lowering pass refuses them loudly).
+			// Only `const` members fold (mutable scalar members lower to
+			// module-state slots; anything else refuses at lowering).
 			if m.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst == 0 {
-				continue
+				d := dl.Declarations.Nodes[0]
+				nm, ok := bindingNameText(d)
+				if !ok {
+					continue
+				}
+				// Arrow lets stay callees (lowering refuses them as
+				// state, same as today); scalar lets record for
+				// qualified-first resolution and slot lowering.
+				if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+					continue
+				}
+				raw = nm
+				kind = nsKindLet
+				break
 			}
 			d := dl.Declarations.Nodes[0]
 			nm, ok := bindingNameText(d)
@@ -302,6 +316,9 @@ func (e *emitter) nsNameTaken(q string) bool {
 		return true
 	}
 	if _, ok := e.constVals[q]; ok {
+		return true
+	}
+	if _, ok := e.modVars[q]; ok {
 		return true
 	}
 	if _, ok := e.classDefs[q]; ok {
@@ -389,10 +406,29 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 		}
 		e.lowerFunction(m)
 	case ast.KindVariableStatement:
-		// Only `const` members fold (lets would go stale on reassignment;
-		// mutable namespace state is the module-state slice).
+		// Mutable scalar members lower to module-state slots (same
+		// mechanism as file-scope `let`; see modstate.go). `const`
+		// members keep the fold/arrow path below. Registration happens
+		// here (member order, like const folds): reads from earlier
+		// members refuse loudly at check time, same as consts today.
 		if m.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst == 0 {
-			e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+			dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+			if len(dl.Declarations.Nodes) != 1 {
+				e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+				return
+			}
+			d := dl.Declarations.Nodes[0]
+			nm, ok := bindingNameText(d)
+			if !ok {
+				e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+				return
+			}
+			if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+				e.refuse(m, "mutable namespace state is not lowerable yet (const literals and arrows only)")
+				return
+			}
+			// Declarations emit no code; use sites call the registry.
+			e.registerModDeclarator(d, e.nsDefName(nm))
 			return
 		}
 		// Arrow consts emit callees; pure literals fold (both qualified
@@ -602,8 +638,45 @@ func (e *emitter) lowerNamespaceMemberRead(ns, member string, n *ast.Node) (stri
 		// Math aliases are callable, not readable (first-class values
 		// refuse like top-level aliases at call sites).
 	}
+	// Mutable members read through their slot (nil when the declaration
+	// was refused or sorts after this use: fall through to the loud
+	// refusal below, same as consts today).
+	if kind == nsKindLet {
+		if ms := e.modVars[q]; ms != nil {
+			v, t := e.emitModLoad(ms, n)
+			return v, t, true
+		}
+	}
 	e.refuse(n, "%s.%s is not a value (only const members read as values)", ns, member)
 	return "0", tUnknown, true
+}
+
+// nsLetTarget resolves a dotted access to a mutable namespace member:
+// qualified slot name plus its namespace/member split ("", "", "", false
+// when the target is not a let member). Single `N.x` honors value
+// shadowing; nested `A.B.x` resolves longest-namespace-first (mirrors
+// call-site routing).
+func (e *emitter) nsLetTarget(n *ast.Node) (q, ns, member string, ok bool) {
+	if n.Kind != ast.KindPropertyAccessExpression {
+		return "", "", "", false
+	}
+	pa := n.AsPropertyAccessExpression()
+	if pa.Expression.Kind == ast.KindIdentifier {
+		base := pa.Expression.Text()
+		if e.namespaces[base] && !e.isValueReceiver(base) {
+			if e.nsMemberKind(base, pa.Name().Text()) == nsKindLet {
+				return base + "_" + pa.Name().Text(), base, pa.Name().Text(), true
+			}
+		}
+	}
+	if full, ok := dottedBaseName(n); ok {
+		if ns, mem, ok := e.splitNsQualified(full); ok {
+			if e.nsMemberKind(ns, mem) == nsKindLet {
+				return ns + "_" + mem, ns, mem, true
+			}
+		}
+	}
+	return "", "", "", false
 }
 
 // entityNameText flattens type-level entity names to the namespace path

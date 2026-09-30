@@ -361,3 +361,20 @@
   286 单文件扫测 285 逐字节一致 + 1 改进；单测 8 项；真机 `sa check` 过，
   手工对数 47==47。后续切片：可变命名空间状态（并入模块状态）、合并重开、
   import-equals、跨文件成员。
+- ✅ 顶层可变模块状态（`modstate.go` 模块 + 薄钩子 20 处；sci 先行
+  `8c07ecd8`：`modstate.sai` + TLS 注册表值语义 `get/set_u64`，Zig 5/5）：
+  标量 `let`/`var`（i32/i64/u64/f64，bool 按 i32）经注册表槽共享跨函数状态，
+  零值免 init（注册表零填）、非零字面量第二 flag 槽 use-site 懒 init 一次
+  （`??` join 形）；赋值全文件预扫，被赋值的名永不进 constVals 折叠——修出
+  静默误编译（counter：`sa=1` vs `node=2`，check 曾放行）；命名空间
+  `export let` 同解（拍扁名 + `checkNsAccess`，单层/嵌套读写、`+=`/`++` 全路由）；
+  串/数组/effectful 初始化/跨文件变量/const 重赋一律大声拒（旧命名空间
+  `export let` 拒测转正 1 项）；声明位走 `assignLocal`（遮蔽不再摘全局折叠，
+  旧折叠误伤顺手修）；`@const` 可写与指针穿越两条死路已探否决
+  （AOT 只读/`Locked_Mut`），`panic(1403)`  沿 14xx 分配失败族。
+  286 单文件扫测 286 逐字节一致 + `sa check` 286 全过；单测 10 项（拒测含 5 子项）；
+  新形状 `sa check` 全过（计数器/命名空间/宽/循环/分支/program 前缀隔离 4 键）；
+  Zig 胶水以真实发射 key 驱动计数器 0→1→2 与懒 init 协议 2/2。
+  JEV blast-radius local_only 97%。
+  缺口序列：串/对象模块状态（双槽 + 生命周期）、effectful 初始化、
+  顶层可执行语句入口、 bare `panic` 8 处潜雷（本二进制拒，286 未触及）。
