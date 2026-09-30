@@ -121,3 +121,11 @@ backlog：基于用法的擦除（binder 查值位引用，无则消边），独
   从 0 文件推进到 **56 文件链接**，残留顶层变量/typeof 等单文件已知聚类。
   单测 1 项（成功/改名/未知成员拒/方法值拒）；全量单测过。p2（`export default ns`
   透传）与 p3（解构/展开/动态键）另立项。
+- ✅ 类型-only 具名符擦除（2026-09-30，`lowerImport` 逐符擦除）：
+  `import { Vec2, Vec2Value }` 中零值使用的接口符跳过绑定（显式
+  `import { type X }` 恒跳过；`e.link.valueUsed` 为逐文件预扫集；
+  误跳过恒以大声 `import it first` 暴露，永不错译）。
+  planck program 口径 692→620（-72，全为类型-only 误拒清零，
+  零新增；残留 25 经核全为真值缺口：跨文件 const/enum 值导入另立项）。
+  单测 1 项（擦除 + 显式 type + 值误绑仍大声）；286 零 diff；
+  链接产物真机 check + run 差分一致（7==7）。

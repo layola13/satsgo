@@ -9075,6 +9075,19 @@ func (e *emitter) lowerImport(st *ast.Node) {
 					if remote == "" {
 						remote = local
 					}
+					// Type-only specifiers erase (esbuild
+					// importsNotUsedAsValues): explicit `import { type X }`
+					// always; otherwise when the local name has no
+					// value-position use in this file (the link phase
+					// precomputed valueUsed per file). A wrongly skipped
+					// name surfaces as a loud "import it first" refusal
+					// at its use, never a silent miscompile.
+					if sp.IsTypeOnly {
+						continue
+					}
+					if e.link != nil && e.link.valueUsed != nil && !e.link.valueUsed[local] {
+						continue
+					}
 					if _, ok := res.exports[remote]; !ok {
 						e.refuse(el, "%s is not exported by %s", remote, mod)
 						continue

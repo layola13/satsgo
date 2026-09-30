@@ -378,3 +378,40 @@ func TestLowerProgramLocalShadowsImport(t *testing.T) {
 		t.Errorf("shadowed import must not be called, got:\n%s", res.SAI)
 	}
 }
+
+// Type-only named specifiers erase at import lowering (esbuild
+// importsNotUsedAsValues): an interface used only in annotations binds
+// nothing and reports nothing, while the value-used sibling still links.
+func TestLowerProgramTypeOnlySpecifierErasure(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { mk, Vec2Value } from \"./vec\";\nfunction sum(v: Vec2Value): i32 {\n  return v.x + v.y;\n}\nfunction main(): i32 {\n  return sum(mk(3, 4));\n}\n",
+		"vec.ts":  "export interface Vec2Value { x: i32; y: i32 }\nexport function mk(x: i32, y: i32): Vec2Value {\n  return { x, y };\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if !strings.Contains(res.SAI, "call @vec__mk(3, 4)") {
+		t.Errorf("value sibling must still link, got:\n%s", res.SAI)
+	}
+	for _, d := range res.Diagnostics {
+		if strings.Contains(d, "not exported") {
+			t.Errorf("type-only specifier must erase silently, got: %s", d)
+		}
+	}
+	// Explicit `import { type Ghost }` skips before the exports check.
+	ghost := map[string]string{
+		"main.ts": "import { type Ghost } from \"./vec\";\nfunction main(): i32 {\n  return 1;\n}\n",
+		"vec.ts":  "export function mk(x: i32): i32 {\n  return x;\n}\n",
+	}
+	mustLowerProgram(t, "main.ts", ghost)
+	// A value-used but unexported name stays loud (no over-erasure).
+	loud := map[string]string{
+		"main.ts": "import { zzz } from \"./vec\";\nfunction main(): i32 {\n  return zzz(1);\n}\n",
+		"vec.ts":  "export function mk(x: i32): i32 {\n  return x;\n}\n",
+	}
+	r := LowerProgram("main.ts", loud)
+	if !r.Refused {
+		t.Fatalf("expected unexported-value refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(strings.Join(r.Diagnostics, "\n"), "not exported") {
+		t.Errorf("missing not-exported diagnostic: %v", r.Diagnostics)
+	}
+}

@@ -216,6 +216,16 @@
   （`declaredAt` + `linkRoute`），无残留。
   边界锁 `TestLowerProgramLocalShadowsImport`（局部参遮蔽同名导入，
   干净胜出零诊断）；全套件绿、286 sweep 零 diff。
+- ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
+  整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
+  `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。
+  现零值使用符/显式 `type` 符跳过绑定（逐文件 `valueUsed` 预扫集已就绪，
+  纯加法；误跳过恒大声）。planck program 口径 692→620（-72 全为误拒清零，
+  零新增；残留 25 核为真值缺口：跨文件 const/enum 值导入另立项，
+  枚举值用例证伪了过度擦除）。
+  JEV-(a)字面语义（命名空间 spread/动态键）经实测证伪：planck src 零用例
+  且 p2/p3 早落地，故不做推测实现，改收敛实测最大项（JEV s1 79%）。
+  全套件绿、286 sweep 零 diff；链接产物真机 check + run 差分一致（7==7）。
 - ✅ 访问器记录 + 精确拒（`classDef.getters/setters`，读经
   `lowerPropertyAccessInner`，写经 `lowerFieldStore`，`classDefOf` 三路解析）：
   未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，
