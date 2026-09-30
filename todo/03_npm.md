@@ -83,3 +83,26 @@ checker 回退在真实 JS 上成立）。
 ## 风险
 
 - B 通道覆盖率若低于 30%，即收缩，只保留聚合报错机制，不再投转译特性。
+
+## 附：planck.js 实测（2026-09-30，纯 TS 物理引擎，66 文件，`/content/planck.js`）
+
+单文件口径（`tsgo-sa` 逐文件，`__test__` 除外 60 文件）：**7 通过 / 53 拒绝 /
+0 崩溃**（鲁棒性门禁保持：hostile 级真实代码零 panic）。
+
+拒绝聚类（首因计数）：
+
+| # | 首因 | 含义 |
+|---|---|---|
+| 242 | 顶层变量 | 模块级 `export const`，program 口径 + 顶层折叠可收 |
+| 83 | 一阶函数值 | 回调存/传（contact listener 类），Phase 2 已知缺口 |
+| 75+14 | 不可赋值目标（含复合） | 待逐个看，多为跨文件类型缺失的连带 |
+| 66+66 | `.x`/`.y` 不可访问 | **单文件假象**：`Vec2Value` 是普通 interface，跨文件布局缺失所致，program 口径应消除 |
+| 29 | Getter | `get length()` 类，class 子集缺口 |
+| 28 | `.TYPE` | 静态枚举式访问，待定 |
+| 22 | ModuleDeclaration | `namespace` 块，未立项 |
+| 其它 | typeof min/max 别名、`testbed` 重载签名、无布局字面量 | 零散 |
+
+program 口径现状：`tsgo-sa build src` 撞上真实值循环
+`Fixture ↔ Body`（双向 value import；`Shape → Body` 仅为 `import type` 可擦除）。
+ backlog：链接图忽略 `import type` 边；值循环是否可按 SA 扁平合并容忍（需论证，
+ 保守仍拒）。本轮不展开，先记。
