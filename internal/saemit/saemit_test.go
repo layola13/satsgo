@@ -613,6 +613,18 @@ func TestLowerDeno(t *testing.T) {
 	if r := Lower("dn6.ts", other); !r.Refused {
 		t.Fatalf("expected ns refusal, got:\n%s", r.SAI)
 	}
+	// version/build objects stay refused: no direct TS spelling maps to
+	// the *_json strings without inventing an object shape (documented;
+	// member reads like Deno.version.deno need object materialisation).
+	for _, src := range []string{
+		"function main(): string {\n  return Deno.version;\n}\n",
+		"function main(): string {\n  return Deno.version.deno;\n}\n",
+		"function main(): string {\n  return Deno.build.os;\n}\n",
+	} {
+		if r := Lower("dn7.ts", src); !r.Refused {
+			t.Fatalf("expected version refusal, got:\n%s", r.SAI)
+		}
+	}
 }
 
 func TestLowerArrowCaptureSharedWalk(t *testing.T) {
