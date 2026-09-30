@@ -118,12 +118,24 @@ func (e *emitter) inheritClass(name, base string, def *classDef, l *layout, st *
 		l.offsets[f] = bdef.layout.offsets[f]
 	}
 	// Methods/getters/setters/statics inherit by copy (child overrides).
+	// methodOwner follows the node: inherited members keep the base as
+	// their lexical owner for private resolution (mirrors ctorOwner).
+	if def.methodOwner == nil {
+		def.methodOwner = map[string]string{}
+	}
 	if def.methods == nil {
 		def.methods = map[string]*ast.Node{}
 	}
 	for k, v := range bdef.methods {
 		if _, ok := def.methods[k]; !ok {
 			def.methods[k] = v
+			if _, ok := def.methodOwner[k]; !ok {
+				owner := base
+				if o, ok := bdef.methodOwner[k]; ok {
+					owner = o
+				}
+				def.methodOwner[k] = owner
+			}
 		}
 	}
 	if def.getters == nil {

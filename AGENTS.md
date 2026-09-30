@@ -486,3 +486,12 @@
   既有大声家族；28 处消除）。
   JEV blast-radius safe_to_apply 86%（首审 needs_regression_tests 52%，
   planck 门禁加固后翻转）。
+- ✅ 私有字段 `#x`（owner 改名 + 词法归属）：`#x` 按属主改名（`#C#x`，
+  遮蔽天然分槽）；`methodOwner` 记录定义类（继承方法保 base，与 `ctorOwner`
+  同例；`curMethodClass`/super 语义不动）；读经 memberChain、写经
+  fieldStore、构造器经 wiring owner、静态经折叠位、`in` 作品牌检查；
+  super 下/方法外/他类/未声明皆大声拒。
+  单测 1 项（读写/品牌/私有静态 + 4 拒形）；类系 18 项回归绿；
+  全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 15/33 双对数
+  （含继承遮蔽：base 方法读 base 槽、子类方法读子类槽）；planck 零移动。
+  JEV blast-radius safe_to_apply 89%。

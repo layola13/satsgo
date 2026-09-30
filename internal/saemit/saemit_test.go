@@ -1206,3 +1206,94 @@ function main(): i32 {
 		t.Errorf("missing heritage diagnostic:\n%s", diagText(bad))
 	}
 }
+
+// Private fields mangle by owner (`#x` → `#Owner#x`): own-method access
+// lowers, shadowing owners keep distinct slots, outsiders refuse loudly.
+func TestPrivateFields(t *testing.T) {
+	src := `class C {
+  #x: i32 = 0;
+  constructor(n: i32) {
+    this.#x = n;
+  }
+  get(): i32 {
+    return this.#x;
+  }
+  add(o: C): i32 {
+    return this.#x + o.#x;
+  }
+}
+function main(): i32 {
+  const c = new C(5);
+  return c.get() + c.add(c);
+}
+`
+	res := mustLower(t, "priv.ts", src)
+	// Mangled keys live in the layout table (numeric offsets in SAI);
+	// assert the lowered shape instead: ctor store plus two method loads.
+	for _, want := range []string{"store t_1 + 0, 5 as i32", "load c + 0 as i32", "return "} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	if strings.Contains(res.SAI, "computed field names") {
+		t.Errorf("stale refusal leaked:\n%s", res.SAI)
+	}
+	// Brand checks fold statically against the owner.
+	brand := `class C {
+  #x: i32 = 0;
+  has(o: C): i32 {
+    if (#x in o) {
+      return 1;
+    }
+    return 0;
+  }
+}
+function main(): i32 {
+  const c = new C();
+  return c.has(c);
+}
+`
+	res = mustLower(t, "privbrand.ts", brand)
+	if !strings.Contains(res.SAI, "return ") {
+		t.Errorf("missing return in output:\n%s", res.SAI)
+	}
+	// Private statics fold behind the owner (read from an instance
+	// method via the class name; static methods stay unsupported).
+	stat := `class C {
+  static #K = 7;
+  v: i32 = 0;
+  getK(): i32 {
+    return C.#K + this.v;
+  }
+}
+function main(): i32 {
+  const c = new C();
+  return c.getK();
+}
+`
+	res = mustLower(t, "privstatic.ts", stat)
+	if !strings.Contains(res.SAI, "add 7, ") {
+		t.Errorf("missing folded private static in output:\n%s", res.SAI)
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"outside read", "class C {\n  #x: i32 = 0;\n}\nfunction main(): i32 {\n  const c = new C();\n  return c.#x;\n}\n", "not accessible outside a class method"},
+		{"subclass read", "class B {\n  #x: i32 = 0;\n  get(): i32 {\n    return this.#x;\n  }\n}\nclass S extends B {\n  probe(): i32 {\n    return this.#x;\n  }\n}\nfunction main(): i32 {\n  const s = new S();\n  return s.probe();\n}\n", "not declared in class S"},
+		{"super read", "class B {\n  #x: i32 = 0;\n  get(): i32 {\n    return this.#x;\n  }\n}\nclass S extends B {\n  probe(): i32 {\n    return super.#x;\n  }\n}\nfunction main(): i32 {\n  const s = new S();\n  return s.probe();\n}\n", "not accessible via super"},
+		{"outside static", "class C {\n  static #K = 7;\n}\nfunction main(): i32 {\n  return C.#K;\n}\n", "not accessible outside a class method"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
+			}
+		})
+	}
+}

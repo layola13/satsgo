@@ -471,8 +471,15 @@ func (e *emitter) splitNsQualified(q string) (ns, member string, ok bool) {
 }
 
 // nsStaticText folds class static literals (instantiable defs and heritage
-// shells alike).
+// shells alike). Private statics mangle by the lexical owner; without one
+// (or without a match) the caller falls through to its loud refusal.
 func nsStaticText(e *emitter, cls, field string) (staticVal, bool) {
+	if strings.HasPrefix(field, "#") {
+		if e.curMethodOwner == "" {
+			return staticVal{}, false
+		}
+		field = privFieldKey(e.curMethodOwner, field)
+	}
 	if cd, ok := e.classDefs[cls]; ok {
 		if sv, ok := cd.statics[field]; ok {
 			return sv, true

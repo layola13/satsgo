@@ -353,9 +353,12 @@ type emitter struct {
 	classDefs    map[string]*classDef
 	// classParent maps a subclass to its direct base (single inheritance;
 	// see class_heritage.go). curMethodClass is the class whose method body
-	// is being inlined (super routing context).
+	// is being inlined (super routing context). curMethodOwner is the
+	// LEXICAL defining class (via methodOwner, defaulting to curMethodClass
+	// at inline sites): private `#x` resolves against it (`#x` → `#Owner#x`).
 	classParent    map[string]string
 	curMethodClass string
+	curMethodOwner string
 	// Namespace flattening (see namespace_ts.go): nsStack is the active
 	// path; namespaces/nsMembers/nsExports record declared scopes, member
 	// kinds and export sets (per-file; cross-file member access is a later
@@ -2211,7 +2214,24 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	// materialises into a temp (br takes registers, not immediates).
 	if op == ast.KindInKeyword {
 		verdict := ""
-		if bin.Left.Kind == ast.KindStringLiteral {
+		// Brand checks (`#x in obj`) resolve against the lexical owner
+		// (checker-backed layouts cover class-annotated params, which
+		// carry no varLayouts entry; mirrors lowerMemberChain).
+		if bin.Left.Kind == ast.KindPrivateIdentifier {
+			if bin.Right.Kind == ast.KindIdentifier {
+				if l := e.layoutOfNode(bin.Right.Text(), bin.Right); l != nil {
+					if key, ok := e.privResolve(l, bin.Left.Text(), n); ok {
+						if _, ok := l.offsets[key]; ok {
+							verdict = "1"
+						} else {
+							verdict = "0"
+						}
+					} else {
+						return "0", tUnknown
+					}
+				}
+			}
+		} else if bin.Left.Kind == ast.KindStringLiteral {
 			if s, ok := stringLiteralText(bin.Left); ok {
 				if bin.Right.Kind == ast.KindIdentifier {
 					if l := e.layoutOfVar(bin.Right.Text()); l != nil {
@@ -6907,20 +6927,50 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 		}
 		// Namespace member classes resolve qualified-first.
 		clsName = e.qualify(clsName)
-		if cd, ok := e.classDefs[clsName]; ok {
-			if sv, ok := cd.statics[pa.Name().Text()]; ok {
-				if sv.typ == tString {
-					return e.lowerStringLiteral(sv.text), tString
+		// Class-name (or instance-aliased) bases fold private statics
+		// through the lexical owner; anything else (locals, params)
+		// falls through to the member-chain layout path below.
+		if _, isClass := e.classDefs[clsName]; isClass {
+			staticName := pa.Name().Text()
+			if strings.HasPrefix(staticName, "#") {
+				if e.curMethodOwner == "" {
+					e.refuse(n, "private static %s is not accessible outside a class method", staticName)
+					return "0", tUnknown
 				}
-				return sv.text, sv.typ
+				staticName = privFieldKey(e.curMethodOwner, staticName)
 			}
-		}
-		if cd, ok := e.staticDefs[clsName]; ok {
-			if sv, ok := cd.statics[pa.Name().Text()]; ok {
-				if sv.typ == tString {
-					return e.lowerStringLiteral(sv.text), tString
+			if cd, ok := e.classDefs[clsName]; ok {
+				if sv, ok := cd.statics[staticName]; ok {
+					if sv.typ == tString {
+						return e.lowerStringLiteral(sv.text), tString
+					}
+					return sv.text, sv.typ
 				}
-				return sv.text, sv.typ
+			}
+			if strings.HasPrefix(pa.Name().Text(), "#") {
+				e.refuse(n, "private static %s is not declared in class %s", pa.Name().Text(), e.curMethodOwner)
+				return "0", tUnknown
+			}
+		} else if _, isShell := e.staticDefs[clsName]; isShell {
+			staticName := pa.Name().Text()
+			if strings.HasPrefix(staticName, "#") {
+				if e.curMethodOwner == "" {
+					e.refuse(n, "private static %s is not accessible outside a class method", staticName)
+					return "0", tUnknown
+				}
+				staticName = privFieldKey(e.curMethodOwner, staticName)
+			}
+			if cd, ok := e.staticDefs[clsName]; ok {
+				if sv, ok := cd.statics[staticName]; ok {
+					if sv.typ == tString {
+						return e.lowerStringLiteral(sv.text), tString
+					}
+					return sv.text, sv.typ
+				}
+			}
+			if strings.HasPrefix(pa.Name().Text(), "#") {
+				e.refuse(n, "private static %s is not declared in class %s", pa.Name().Text(), e.curMethodOwner)
+				return "0", tUnknown
 			}
 		}
 		// TypeScript namespace value reads (`NS.CONST`; a shadowing
@@ -6985,6 +7035,43 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 
 // lowerMemberChain lowers a.b.c... to nested static-offset loads. It returns
 // false when the base has no recorded layout.
+// privFieldKey mangles a private field to its owner (`#x` in C → `#C#x`,
+// so shadowing owners keep distinct slots); public names pass through.
+func privFieldKey(owner, fname string) string {
+	if !strings.HasPrefix(fname, "#") {
+		return fname
+	}
+	return "#" + owner + fname
+}
+
+// privResolveOwned maps a `#`-prefixed member to its owner-mangled layout
+// key, verifying the field exists (undeclared/illegal access refuses
+// loudly with the owner named). Public names pass through untouched.
+func (e *emitter) privResolveOwned(l *layout, raw, owner string, pos *ast.Node) (string, bool) {
+	if !strings.HasPrefix(raw, "#") {
+		return raw, true
+	}
+	q := privFieldKey(owner, raw)
+	if _, ok := l.offsets[q]; !ok {
+		e.refuse(pos, "private field %s is not declared in class %s", raw, owner)
+		return "", false
+	}
+	return q, true
+}
+
+// privResolve is privResolveOwned against the lexical method owner;
+// outside a method body there is no owner to resolve with.
+func (e *emitter) privResolve(l *layout, raw string, pos *ast.Node) (string, bool) {
+	if !strings.HasPrefix(raw, "#") {
+		return raw, true
+	}
+	if e.curMethodOwner == "" {
+		e.refuse(pos, "private field %s is not accessible outside a class method", raw)
+		return "", false
+	}
+	return e.privResolveOwned(l, raw, e.curMethodOwner, pos)
+}
+
 func (e *emitter) lowerMemberChain(n *ast.Node) (string, saType, bool) {
 	segs := []string{}
 	cur := n
@@ -7015,20 +7102,34 @@ func (e *emitter) lowerMemberChain(n *ast.Node) (string, saType, bool) {
 	if l == nil {
 		return "", tUnknown, false
 	}
+	// Private fields never cross `super` (TS: always an error there);
+	// resolve the rest against the lexical owner per segment.
+	if cur.Kind == ast.KindSuperKeyword {
+		for _, s := range segs[1:] {
+			if strings.HasPrefix(s, "#") {
+				e.refuse(n, "private field %s is not accessible via super", s)
+				return "0", tUnknown, true
+			}
+		}
+	}
 	base, _ := e.lowerExpr(cur)
 	curOp := base
 	for i := 1; i < len(segs); i++ {
-		off, ok := l.offsets[segs[i]]
+		key, ok := e.privResolve(l, segs[i], n)
+		if !ok {
+			return "0", tUnknown, true
+		}
+		off, ok := l.offsets[key]
 		if !ok {
 			return "", tUnknown, false
 		}
-		saname := l.types[segs[i]]
+		saname := l.types[key]
 		t := e.freshTmp()
 		e.emit("%s = load %s + %d as %s", t, curOp, off, saname)
 		curOp = t
 		if i+1 < len(segs) {
 			// Intermediate segment: descend into the nested layout.
-			nl, ok := e.layouts[l.ftypes[segs[i]]]
+			nl, ok := e.layouts[l.ftypes[key]]
 			if !ok {
 				return "", tUnknown, false
 			}
@@ -7076,23 +7177,39 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 	if l == nil {
 		return false
 	}
+	// Private fields never cross `super` (TS: always an error there).
+	if cur.Kind == ast.KindSuperKeyword {
+		for _, s := range segs[1:] {
+			if strings.HasPrefix(s, "#") {
+				e.refuse(target, "private field %s is not accessible via super", s)
+				return true
+			}
+		}
+	}
 	base, _ := e.lowerExpr(cur)
 	curOp := base
 	for i := 1; i+1 < len(segs); i++ {
-		off, ok := l.offsets[segs[i]]
+		key, ok := e.privResolve(l, segs[i], target)
+		if !ok {
+			return true
+		}
+		off, ok := l.offsets[key]
 		if !ok {
 			return false
 		}
 		t := e.freshTmp()
 		e.emit("%s = load %s + %d as ptr", t, curOp, off)
 		curOp = t
-		nl, ok := e.layouts[l.ftypes[segs[i]]]
+		nl, ok := e.layouts[l.ftypes[key]]
 		if !ok {
 			return false
 		}
 		l = nl
 	}
-	last := segs[len(segs)-1]
+	last, ok := e.privResolve(l, segs[len(segs)-1], target)
+	if !ok {
+		return true
+	}
 	off, ok := l.offsets[last]
 	if !ok {
 		return false
@@ -7852,6 +7969,10 @@ type classDef struct {
 	// its own ctor inherits the base node; super() inside it targets the
 	// owner's parent chain).
 	ctorOwner string
+	// methodOwner names the declaring class per method/getter/setter
+	// (inherited members keep their lexical owner, mirroring ctorOwner).
+	// Private `#x` resolves against it: `#x` → `#Owner#x`.
+	methodOwner map[string]string
 	// isAbstract refuses `new` precisely (TS fidelity; concrete subclasses
 	// still instantiate).
 	isAbstract bool
@@ -8038,7 +8159,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			continue
 		}
 		pd := m.AsPropertyDeclaration()
-		if m.Name() == nil || m.Name().Kind != ast.KindIdentifier {
+		if m.Name() == nil || (m.Name().Kind != ast.KindIdentifier && m.Name().Kind != ast.KindPrivateIdentifier) {
 			continue
 		}
 		if !hasModifier(m, ast.KindStaticKeyword) {
@@ -8048,7 +8169,9 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			if def.statics == nil {
 				def.statics = map[string]staticVal{}
 			}
-			def.statics[m.Name().Text()] = staticVal{text: text, typ: typ}
+			// Private statics mangle by owner (name is final here:
+			// nsDefName applied above).
+			def.statics[privFieldKey(name, m.Name().Text())] = staticVal{text: text, typ: typ}
 		}
 	}
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
@@ -8090,13 +8213,16 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 		switch m.Kind {
 		case ast.KindPropertyDeclaration:
 			pd := m.AsPropertyDeclaration()
-			fname := ""
-			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
-				fname = m.Name().Text()
+			raw := ""
+			if m.Name() != nil && (m.Name().Kind == ast.KindIdentifier || m.Name().Kind == ast.KindPrivateIdentifier) {
+				raw = m.Name().Text()
 			} else {
 				e.refuse(m, "computed field names are not lowerable")
 				continue
 			}
+			// Private fields mangle by owner (`#x` → `#C#x`, so
+			// shadowing owners keep distinct slots); name is final.
+			fname := privFieldKey(name, raw)
 			// Static literal members fold (never instance slots).
 			if hasModifier(m, ast.KindStaticKeyword) {
 				if text, typ, ok := staticLiteralText(pd.Initializer); ok {
@@ -8144,6 +8270,12 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 					def.methods = map[string]*ast.Node{}
 				}
 				def.methods[m.Name().Text()] = m
+				// Lexical owner for private resolution (inherited
+				// members keep the base owner; see inheritClass).
+				if def.methodOwner == nil {
+					def.methodOwner = map[string]string{}
+				}
+				def.methodOwner[m.Name().Text()] = name
 			}
 		case ast.KindGetAccessor, ast.KindSetAccessor:
 			// Accessors record bodies for precise read/write refusal;
@@ -8299,8 +8431,13 @@ func (e *emitter) wireCtorStatement(h, className string, s *ast.Node, paramArg m
 		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
 		return false
 	}
-	field := pa.Name().Text()
 	def := e.classDefs[className]
+	// Private fields mangle by the constructor's owner (wireCtorStatement
+	// carries it explicitly, like ctorOwner for super).
+	field, ok := e.privResolveOwned(def.layout, pa.Name().Text(), className, s)
+	if !ok {
+		return false
+	}
 	off, ok := def.layout.offsets[field]
 	if !ok {
 		e.refuse(s, "field %s is not in the %s layout", field, className)
@@ -8363,6 +8500,13 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	e.thisSelf = recv
 	savedCls := e.curMethodClass
 	e.curMethodClass = className
+	savedOwner := e.curMethodOwner
+	// Lexical owner for private resolution (inherited members keep the
+	// base owner; unrecorded methods fall back to the receiver class).
+	e.curMethodOwner = className
+	if o, ok := def.methodOwner[method]; ok {
+		e.curMethodOwner = o
+	}
 	// Method bodies resolve bare namespace siblings qualified (the
 	// owner's path, not the call-site prefix).
 	savedNs := e.nsStack
@@ -8375,6 +8519,7 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 			e.refuse(p.AsNode(), "destructured method parameters are not lowerable")
 			e.thisSelf = savedSelf
 			e.curMethodClass = savedCls
+			e.curMethodOwner = savedOwner
 			e.nsStack = savedNs
 			e.popScope()
 			return "0", tUnknown, true
@@ -8432,6 +8577,7 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	e.inlineRet = saved
 	e.thisSelf = savedSelf
 	e.curMethodClass = savedCls
+	e.curMethodOwner = savedOwner
 	e.nsStack = savedNs
 	// Fallthrough join releases method-created temps (the slot outlives
 	// into the load below).
