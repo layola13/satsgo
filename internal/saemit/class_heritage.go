@@ -121,6 +121,9 @@ func (e *emitter) inheritClass(name, base string, def *classDef, l *layout, st *
 		if t, ok := bdef.layout.ftypes[f]; ok {
 			l.ftypes[f] = t
 		}
+		if d, ok := bdef.layout.fdefs[f]; ok {
+			l.fdefs[f] = d
+		}
 		l.offsets[f] = bdef.layout.offsets[f]
 	}
 	// Methods/getters/setters/statics inherit by copy (child overrides).

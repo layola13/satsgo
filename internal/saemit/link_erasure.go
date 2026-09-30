@@ -135,6 +135,116 @@ func valueUsedNames(stmts []*ast.Node) map[string]bool {
 	return used
 }
 
+// typeUsedNames collects identifier texts occurring inside pure-type
+// subtrees (type references, literals, unions, function types...): names
+// needed for layouts, never for values. Structure mirrors valueUsedNames
+// (imports/exports/meta skipped, binding names skipped); only identifiers
+// under a pure-type ancestor are recorded.
+func typeUsedNames(stmts []*ast.Node) map[string]bool {
+	used := map[string]bool{}
+	var walk func(n *ast.Node, inType bool)
+	walk = func(n *ast.Node, inType bool) {
+		if n == nil {
+			return
+		}
+		// Import/export declarations bind or re-export; their names are
+		// never local type uses (explicit `import type` edges erase
+		// before this runs).
+		if n.Kind == ast.KindImportDeclaration || n.Kind == ast.KindMetaProperty {
+			return
+		}
+		if n.Kind == ast.KindExportDeclaration {
+			if n.IsTypeOnly() {
+				return
+			}
+			ed := n.AsExportDeclaration()
+			if ed.ModuleSpecifier != nil {
+				return
+			}
+			for ch := range n.IterChildren() {
+				if ch.Kind == ast.KindExportSpecifier {
+					if ch.IsTypeOnly() {
+						continue
+					}
+				}
+				walk(ch, inType)
+			}
+			return
+		}
+		if n.Kind == ast.KindIdentifier {
+			if inType {
+				used[n.Text()] = true
+			}
+			return
+		}
+		if pureTypeKinds[n.Kind] {
+			inType = true
+		}
+		var skip *ast.Node
+		if bindingNameKinds[n.Kind] {
+			if nm := n.Name(); nm != nil {
+				skip = nm
+			}
+		}
+		for ch := range n.IterChildren() {
+			if skip != nil && ch == skip {
+				continue
+			}
+			walk(ch, inType)
+		}
+	}
+	for _, st := range stmts {
+		walk(st, false)
+	}
+	return used
+}
+
+// importDeclTypeEdge reports whether an import declaration carries a
+// type-only edge: the default name, the namespace name, or at least one
+// non-type-only named specifier is type-used. Mirrors importDeclValueEdge
+// over the type-use set; explicit `import type` never reaches here.
+func importDeclTypeEdge(st *ast.Node, used map[string]bool) bool {
+	cl := st.AsImportDeclaration().ImportClause
+	if cl == nil {
+		return false
+	}
+	clause := cl.AsImportClause()
+	if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+		if used[nm.Text()] {
+			return true
+		}
+	}
+	nb := clause.NamedBindings
+	if nb == nil {
+		return false
+	}
+	if nb.Kind == ast.KindNamespaceImport {
+		return used[nb.AsNamespaceImport().Name().Text()]
+	}
+	edge := false
+	var walk func(n *ast.Node)
+	walk = func(n *ast.Node) {
+		if edge || n == nil {
+			return
+		}
+		if n.Kind == ast.KindImportSpecifier {
+			sp := n.AsImportSpecifier()
+			if sp.IsTypeOnly {
+				return
+			}
+			if nm := n.Name(); nm != nil && nm.Kind == ast.KindIdentifier && used[nm.Text()] {
+				edge = true
+			}
+			return
+		}
+		for ch := range n.IterChildren() {
+			walk(ch)
+		}
+	}
+	walk(nb)
+	return edge
+}
+
 // importDeclValueEdge reports whether an import declaration carries a
 // runtime edge: side-effect imports always do; otherwise the default name,
 // the namespace name, or at least one non-type-only named specifier must

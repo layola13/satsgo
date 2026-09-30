@@ -7530,6 +7530,11 @@ func (e *emitter) lowerElementAccess(n *ast.Node) (string, saType) {
 	return e.lowerCheckedIndex(base, idx, optional), tI32
 }
 
+// lowerElemAddress (struct-element address join) was prototyped here and
+// reverted: array literals store element pointers in i32 slots, so no
+// 64-bit-clean read-back exists until the creation model changes (see
+// AGENTS record). Element layouts still resolve via fdefs for future work.
+
 func (e *emitter) lowerElementStore(target *ast.Node, rhs string) {
 	ea := target.AsElementAccessExpression()
 	base, _ := e.lowerExpr(ea.Expression)
@@ -8687,7 +8692,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			def.statics[privFieldKey(name, m.Name().Text())] = staticVal{text: text, typ: typ}
 		}
 	}
-	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
+	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
 	off := 0
 	if heritage != nil && len(heritage.Nodes) > 0 {
 		// Only declarations reach here (expressions with heritage
@@ -8762,6 +8767,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 				l.types[fname] = saname
 				if pd.Type != nil {
 					l.ftypes[fname] = rawTypeName(pd.Type)
+					l.fdefs[fname] = pd.Type
 				}
 				_ = prevOff
 				continue
@@ -8772,6 +8778,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			l.types[fname] = saname
 			if pd.Type != nil {
 				l.ftypes[fname] = rawTypeName(pd.Type)
+				l.fdefs[fname] = pd.Type
 			}
 			l.offsets[fname] = off
 			off += size

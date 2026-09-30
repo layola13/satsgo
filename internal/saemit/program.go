@@ -167,12 +167,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	// passthrough) and value-position identifier uses per file.
 	nsAliasOf := map[string]map[string]string{}
 	usedOf := map[string]map[string]bool{}
+	typeUsedOf := map[string]map[string]bool{}
 	for p, sf := range parsed {
 		usedOf[p] = valueUsedNames(sf.AsSourceFile().Statements.Nodes)
+		typeUsedOf[p] = typeUsedNames(sf.AsSourceFile().Statements.Nodes)
 	}
 	// Import graph over relative specifiers.
 	graph := map[string][]string{}
 	specOf := map[string]map[string]string{} // file -> spec -> target
+	typeSpecOf := map[string]map[string]string{} // file -> spec -> target (layouts only)
 	unresolved := map[string]bool{}
 	isBuiltinMod := func(spec string) bool {
 		switch spec {
@@ -224,7 +227,17 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			// use carries no runtime edge (esbuild importsNotUsedAsValues
 			// semantics; planck Shape<->Distance shape). Bare third-party
 			// specifiers keep their unresolved marks above regardless.
+			// Type-only-used imports keep a layouts-only edge instead:
+			// interface/class layouts lower field accesses, so the target
+			// must join prescan and the checker set (but never fuses
+			// cycles, links code, or binds values).
 			if st.Kind == ast.KindImportDeclaration && !importDeclValueEdge(st, usedOf[p]) {
+				if importDeclTypeEdge(st, typeUsedOf[p]) {
+					if typeSpecOf[p] == nil {
+						typeSpecOf[p] = map[string]string{}
+					}
+					typeSpecOf[p][spec] = tgt
+				}
 				continue
 			}
 			graph[p] = append(graph[p], tgt)
@@ -270,6 +283,38 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		res.Refused = true
 		res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("import cycle: %s", strings.Join(cycle, " -> ")))
 		return res
+	}
+	// Layouts-only closure over type edges (transitive fixpoint, no cycle
+	// check: these files feed prescan maps and the checker set, never
+	// codegen or linking, so cycles cannot fuse).
+	inReachSet := map[string]bool{}
+	for _, p := range reachable {
+		inReachSet[p] = true
+	}
+	typeReached := []string{}
+	typeSeen := map[string]bool{}
+	queue := append([]string{}, reachable...)
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		// Value edges out of type-reached files matter too: a base
+		// class (heritage is a runtime dep) lives behind one. Both
+		// edge kinds only feed prescan maps and the checker set.
+		seen := map[string]bool{}
+		for _, q := range graph[p] {
+			seen[q] = true
+		}
+		for _, q := range typeSpecOf[p] {
+			seen[q] = true
+		}
+		for q := range seen {
+			if inReachSet[q] || typeSeen[q] {
+				continue
+			}
+			typeSeen[q] = true
+			typeReached = append(typeReached, q)
+			queue = append(queue, q)
+		}
 	}
 	// Prefixes: entry keeps "", others sanitize the path.
 	prefixOf := map[string]string{}
@@ -357,6 +402,13 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		globalDefaults[p] = map[string][]bool{}
 		text := files[p]
 		scratch := &emitter{file: p, src: text, lines: lineOffsets(text)}
+		// Type maps are shared across the prescan (reachable is
+		// post-order, leaves first): cross-file heritage bases and
+		// aliased layouts resolve instead of silently missing.
+		scratch.layouts = sharedLayouts
+		scratch.classDefs = sharedClassDefs
+		scratch.staticDefs = sharedStaticDefs
+		scratch.enums = sharedEnums
 		for _, st := range parsed[p].AsSourceFile().Statements.Nodes {
 			switch st.Kind {
 			case ast.KindFunctionDeclaration:
@@ -541,6 +593,50 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			sharedEnums[k] = v
 		}
 	}
+	// Layouts-only prescan for type-reached files (never lowered): harvest
+	// interfaces, aliases, enums and classes into the shared maps so
+	// cross-file field/method/ordinal folds resolve. No signatures, no
+	// links, no diagnostics; scratch refusals stay silent (unrecordable
+	// shapes simply don't share). Fixpoint iteration (bounded by file
+	// count): heritage chains resolve base-first regardless of order,
+	// and true cycles converge to unrecorded instead of hanging.
+	for pass := 0; pass < len(typeReached)+1; pass++ {
+		before := len(sharedLayouts) + len(sharedClassDefs) + len(sharedStaticDefs) + len(sharedEnums)
+		for _, p := range typeReached {
+			text := files[p]
+			scratch := &emitter{file: p, src: text, lines: lineOffsets(text)}
+			// Type maps are shared across the prescan: cross-file
+			// heritage bases and aliased layouts resolve instead of
+			// silently missing.
+			scratch.layouts = sharedLayouts
+			scratch.classDefs = sharedClassDefs
+			scratch.staticDefs = sharedStaticDefs
+			scratch.enums = sharedEnums
+			for _, st := range parsed[p].AsSourceFile().Statements.Nodes {
+				switch st.Kind {
+				case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindEnumDeclaration:
+					scratch.lowerTypeDecl(st)
+				case ast.KindClassDeclaration:
+					scratch.recordClass(st)
+				}
+			}
+			for k, l := range scratch.layouts {
+				sharedLayouts[k] = l
+			}
+			for k, c := range scratch.classDefs {
+				sharedClassDefs[k] = c
+			}
+			for k, c := range scratch.staticDefs {
+				sharedStaticDefs[k] = c
+			}
+			for k, v := range scratch.enums {
+				sharedEnums[k] = v
+			}
+		}
+		if len(sharedLayouts)+len(sharedClassDefs)+len(sharedStaticDefs)+len(sharedEnums) == before {
+			break
+		}
+	}
 	// Diagnostic-only name index over UNREACHABLE files: a miss can name
 	// a defining file the user hasn't imported yet (importing it then
 	// works through the normal link). Reachable files win ties below;
@@ -680,9 +776,14 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	order := append([]string{}, reachable...)
 	res.Files = order
 	// Shared binder/checker over the reachable set (nil-safe fallback).
+	// Type-reached files join the set so cross-file types resolve, even
+	// though their bodies never lower.
 	tcx := newTypeCtx(func() map[string]string {
 		m := map[string]string{}
 		for _, p := range reachable {
+			m[p] = files[p]
+		}
+		for _, p := range typeReached {
 			m[p] = files[p]
 		}
 		return m

@@ -277,6 +277,27 @@
   全套件绿、286 sweep 零 diff；planck 477→465（-12 全为枚举，
   零新增-kind，残留 not-exported 仅剩 stats 对象×3）；
   真机 check + run 差分一致（20==20）。
+- ✅ 类型边布局共享（`typeUsedNames`/`importDeclTypeEdge`/`typeSpecOf`/
+  typeReached 闭包 + 类型预扫不动点 + typeCtx 扩集 + 共享预扫；
+  `link_erasure.go` + `program.go`，单测 2 项）。
+  注解位导入（`import { P }` 仅用于 `v: P`）此前整文件不可达，
+  布局/类/枚举全丢；现目标文件进类型闭包（预扫映射 + checker 集，
+  永不融合环/链接/绑定），值边语义不动（环单测全绿）。
+  途中修出预扫共享深坑：逐文件 scratch 使跨文件继承基永远不可见，
+  改共享映射（post-order 天然 base-first；类型闭包不动点收敛）。
+  全套件绿、286 sweep 零 diff；planck 465→465（零新增-kind；
+  注解位点仍被下游真缺口挡住，见下）；真机 check + run 差分一致（7==7）。
+- ⏸ 数组内存模型与索引结构体（JEV-(a) 调查结论，不 ship 代码）：
+  实测证伪两条：① 数组 `!buf` 在构造处释放属 use-after-free，
+  但挪后则泄漏/越界陷阱——线性释放无法表达 header 拥有 buffer
+  （逃逸/增长数组无解，需 sci 侧 arena/GC；`sa` 现二进制裸数组读
+  全挂，demo052 亦然，与本片无关）；② 结构体数组创建把元素指针
+  存进 i32 槽，64 位读回恒陷阱（手写 SAI 证伪）。
+  已实现又回滚：`lowerElemAddress` 地址 join（设计存档待创建模型修复）、
+  return-消费标记（跨臂污染 bindings，被 5 个 sweep diff 抓获 revert）、
+  buffer-declareOwned（循环缓冲 scope 陷阱 revert）。
+  保留 4 行无害元数据：类 `fdefs` 记录（286 零 diff 实证）。
+  后续：sci 侧先定数组内存模型，再做索引读写。
   附带修出：switch 臂 return-call 结果 `!` 落终结符后
   （`releaseScope` 终结守卫，一处改全臂；286 零 diff 说明旧语料无覆盖，
   新形状由 enum e2e 真机锁定）。
