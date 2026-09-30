@@ -1481,9 +1481,35 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 // Control flow (br always carries BOTH targets; break/continue are jmp)
 // ---------------------------------------------------------------------------
 
+// materializeCond turns an integer-immediate condition into a register:
+// br takes registers, never immediates (`br 0` traps UnknownRegister,
+// the latent `if (1)` / const-bool-if shape). Truthiness follows the
+// subset (nonzero is true) via a single `ne 0` test. Non-immediates
+// (registers, including bool-typed ones) pass through untouched.
+func (e *emitter) materializeCond(cond string) string {
+	isInt := len(cond) > 0
+	for i := 0; i < len(cond) && isInt; i++ {
+		c := cond[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if i == 0 && c == '-' && len(cond) > 1 {
+			continue
+		}
+		isInt = false
+	}
+	if !isInt {
+		return cond
+	}
+	t := e.freshTmp()
+	e.emit("%s = ne %s, 0", t, cond)
+	return t
+}
+
 func (e *emitter) lowerIf(st *ast.Node) {
 	is := st.AsIfStatement()
 	cond, _ := e.lowerExpr(is.Expression)
+	cond = e.materializeCond(cond)
 	thenL := e.freshLabel("then")
 	elseL := e.freshLabel("else")
 	endL := e.freshLabel("endif")
@@ -1544,6 +1570,7 @@ func (e *emitter) lowerWhile(st *ast.Node) {
 	e.pushLoopTargets(endL, topL)
 	e.emitRaw("%s:", topL)
 	cond, _ := e.lowerExpr(ws.Expression)
+	cond = e.materializeCond(cond)
 	e.emit("br %s -> %s, %s", cond, bodyL, endL)
 	e.emitRaw("%s:", bodyL)
 	e.pushScope()
@@ -1594,6 +1621,7 @@ func (e *emitter) lowerFor(st *ast.Node) {
 	e.emitRaw("%s:", topL)
 	if fs.Condition != nil {
 		cond, _ := e.lowerExpr(fs.Condition)
+		cond = e.materializeCond(cond)
 		e.emit("br %s -> %s, %s", cond, bodyL, endL)
 	} else {
 		e.emit("jmp %s", bodyL)
@@ -1761,6 +1789,7 @@ func (e *emitter) lowerDoWhile(st *ast.Node) {
 	} else if cond == "0" || cond == "false" {
 		// Falls through to the end.
 	} else {
+		cond = e.materializeCond(cond)
 		e.emit("br %s -> %s, %s", cond, loopL, endL)
 	}
 	e.emitRaw("%s:", endL)
@@ -2122,6 +2151,10 @@ func (e *emitter) tryTopLevelConst(st *ast.Node) bool {
 			allOk = false
 			continue
 		}
+		// Env-probe ternaries (`typeof G === "undefined" ? lit : G`)
+		// fold to their taken arm first: the AST-level const fold below
+		// only sees literals, and the untaken arm may not exist.
+		init = e.probeFoldedInit(init)
 		switch init.Kind {
 		case ast.KindNumericLiteral, ast.KindStringLiteral, ast.KindTrueKeyword, ast.KindFalseKeyword:
 			if e.constVals == nil {
@@ -7434,7 +7467,14 @@ func (e *emitter) lowerElementStore(target *ast.Node, rhs string) {
 // (arms must agree; mixed int/float refuses loudly).
 func (e *emitter) lowerTernary(n *ast.Node) (string, saType) {
 	ce := n.AsConditionalExpression()
+	// Env probes (`typeof G === "undefined" ? A : B` with G undeclared)
+	// fold to the taken arm before anything lowers: the untaken arm may
+	// name a value that does not exist.
+	if arm, ok := e.envProbeArm(n); ok {
+		return e.lowerExpr(arm)
+	}
 	cond, _ := e.lowerExpr(ce.Condition)
+	cond = e.materializeCond(cond)
 	tv, tt := e.lowerExpr(ce.WhenTrue)
 	fv, ft := e.lowerExpr(ce.WhenFalse)
 	// Mixed int/float arms promote the integer side via sitofp so the join

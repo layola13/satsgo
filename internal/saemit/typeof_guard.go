@@ -113,23 +113,23 @@ func scalarTypeofKind(tn *ast.Node) (string, bool) {
 	return "", false
 }
 
-// lowerTypeofGuard handles typeof-against-"undefined" comparisons.
-// Reports (value, type, handled); unhandled shapes return false so normal
-// lowering (and its diagnostics) apply.
-func (e *emitter) lowerTypeofGuard(n *ast.Node) (string, saType, bool) {
+// splitTypeofCompare finds a (typeof X, "string") comparison pair in
+// either operand order for ==/===/!=/!==. Reports the typeof node, the
+// literal text and the negation polarity. Shared by the undefined guard,
+// the constant fold and the env-probe fold so the pair shape cannot drift.
+func splitTypeofCompare(n *ast.Node) (typeOp *ast.Node, lit string, neg bool, ok bool) {
+	if n == nil || n.Kind != ast.KindBinaryExpression {
+		return nil, "", false, false
+	}
 	bin := n.AsBinaryExpression()
-	op := bin.OperatorToken.Kind
-	neg := false
-	switch op {
+	switch bin.OperatorToken.Kind {
 	case ast.KindEqualsEqualsToken, ast.KindEqualsEqualsEqualsToken:
 		neg = false
 	case ast.KindExclamationEqualsToken, ast.KindExclamationEqualsEqualsToken:
 		neg = true
 	default:
-		return "", tUnknown, false
+		return nil, "", false, false
 	}
-	// Find the (typeof v, "undefined") pair in either order.
-	var target *ast.Node
 	for _, side := range []*ast.Node{bin.Left, bin.Right} {
 		other := bin.Right
 		if side == bin.Right {
@@ -141,21 +141,29 @@ func (e *emitter) lowerTypeofGuard(n *ast.Node) (string, saType, bool) {
 		if other.Kind != ast.KindStringLiteral {
 			continue
 		}
-		lit, ok := stringLiteralText(other)
-		if !ok || lit != "undefined" {
+		l, good := stringLiteralText(other)
+		if !good {
 			continue
 		}
-		inner := side.AsTypeOfExpression().Expression
-		if inner == nil || inner.Kind != ast.KindIdentifier {
-			e.refuse(n, "typeof guard needs a plain identifier")
-			return "0", tUnknown, true
-		}
-		target = inner
-		break
+		return side, l, neg, true
 	}
-	if target == nil {
+	return nil, "", false, false
+}
+
+// lowerTypeofGuard handles typeof-against-"undefined" comparisons.
+// Reports (value, type, handled); unhandled shapes return false so normal
+// lowering (and its diagnostics) apply.
+func (e *emitter) lowerTypeofGuard(n *ast.Node) (string, saType, bool) {
+	typeOp, lit, neg, ok := splitTypeofCompare(n)
+	if !ok || lit != "undefined" {
 		return "", tUnknown, false
 	}
+	inner := typeOp.AsTypeOfExpression().Expression
+	if inner == nil || inner.Kind != ast.KindIdentifier {
+		e.refuse(n, "typeof guard needs a plain identifier")
+		return "0", tUnknown, true
+	}
+	target := inner
 	v, _ := e.lowerExpr(target)
 	if e.refused {
 		return "0", tUnknown, true
@@ -167,6 +175,50 @@ func (e *emitter) lowerTypeofGuard(n *ast.Node) (string, saType, bool) {
 		e.emit("%s = eq %s, 0", t, v)
 	}
 	return t, tI32, true
+}
+
+// envProbeArm folds `typeof G === "undefined" ? A : B` (any equality,
+// either order) to the taken arm when G is a binder-invisible plain
+// identifier: SA has no ambient globals, so an undeclared probe name is
+// definitionally undefined (planck's `typeof ASSERT === "undefined" ?
+// false : ASSERT` idiom). Declared names, non-identifier operands and
+// non-ternary shapes return !ok and the normal lowering (with its loud
+// diagnostics) applies. The untaken arm is never lowered, so its
+// possibly-undeclared value reference cannot trap.
+func (e *emitter) envProbeArm(n *ast.Node) (*ast.Node, bool) {
+	if n.Kind != ast.KindConditionalExpression {
+		return nil, false
+	}
+	typeOp, lit, neg, ok := splitTypeofCompare(n.AsConditionalExpression().Condition)
+	if !ok || lit != "undefined" {
+		return nil, false
+	}
+	inner := typeOp.AsTypeOfExpression().Expression
+	if inner == nil || inner.Kind != ast.KindIdentifier {
+		return nil, false
+	}
+	// Binder authority required: in syntax-only fallback everything
+	// looks undeclared, and folding there would invent facts.
+	if e.tcx == nil || e.tcx.declaredAt(inner) {
+		return nil, false
+	}
+	ce := n.AsConditionalExpression()
+	if !neg {
+		return ce.WhenTrue, true
+	}
+	return ce.WhenFalse, true
+}
+
+// probeFoldedInit applies the env-probe fold to a declarator initializer
+// (module const/let slots examine the AST directly and never reach the
+// ternary lowering). Returns init unchanged when no probe applies.
+func (e *emitter) probeFoldedInit(init *ast.Node) *ast.Node {
+	if init != nil && init.Kind == ast.KindConditionalExpression {
+		if arm, ok := e.envProbeArm(init); ok {
+			return arm
+		}
+	}
+	return init
 }
 
 // lowerTypeofConstFold folds `typeof X === "<kind>"` (any side order,
@@ -182,37 +234,11 @@ func (e *emitter) lowerTypeofGuard(n *ast.Node) (string, saType, bool) {
 // (`eq/ne 1, 1`, both `sa check`-clean) because br takes registers,
 // never immediates (`br 1 -> ...` traps UnknownRegister).
 func (e *emitter) lowerTypeofConstFold(n *ast.Node) (string, saType, bool) {
-	bin := n.AsBinaryExpression()
-	op := bin.OperatorToken.Kind
-	neg := false
-	switch op {
-	case ast.KindEqualsEqualsToken, ast.KindEqualsEqualsEqualsToken:
-		neg = false
-	case ast.KindExclamationEqualsToken, ast.KindExclamationEqualsEqualsToken:
-		neg = true
-	default:
+	typeOp, lit, neg, ok := splitTypeofCompare(n)
+	if !ok {
 		return "", tUnknown, false
 	}
-	var typeOp, litOp *ast.Node
-	for _, side := range []*ast.Node{bin.Left, bin.Right} {
-		other := bin.Right
-		if side == bin.Right {
-			other = bin.Left
-		}
-		if side.Kind != ast.KindTypeOfExpression {
-			continue
-		}
-		if other.Kind != ast.KindStringLiteral {
-			continue
-		}
-		typeOp, litOp = side, other
-		break
-	}
-	if typeOp == nil {
-		return "", tUnknown, false
-	}
-	lit, ok := stringLiteralText(litOp)
-	if !ok || lit == "undefined" {
+	if lit == "undefined" {
 		return "", tUnknown, false
 	}
 	inner := typeOp.AsTypeOfExpression().Expression

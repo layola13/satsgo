@@ -342,7 +342,9 @@ func (e *emitter) registerModDeclarator(d *ast.Node, qual string) {
 		e.registerModObject(d, qual)
 		return
 	}
-	imm, iw, noInit, ok := modInitOf(d.Initializer())
+	// Env-probe ternaries fold to their taken arm before slot
+	// classification (same guarantee as the const fold).
+	imm, iw, noInit, ok := modInitOf(e.probeFoldedInit(d.Initializer()))
 	if !ok {
 		e.refuse(d, "module state %s needs a scalar or string literal initializer", qual)
 		return

@@ -35,6 +35,14 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    `any` 源仍大声；外层目标键集匹配不动，错配仍拒）。
    单测 1 项（双翻转 + 速记注解 + any 拒）；286 零 diff；
    真机 check + run 差分一致（120==120）。
+   第四刀（2026-09-30 落地）：env-probe 折叠 `envProbeArm` +
+   常量条件具化 `materializeCond`（`splitTypeofCompare` 抽取三处共享；
+   `typeof G === "undefined" ? A : B` *g* 不可见即取当臂，未取臂永不 lowering；
+   `br` 只吃寄存器故整数立即条件经 `ne 0` 进暂存，`if/while/for-test/do/ternary`
+   五位；`if (1)` 家族潜伏陷阱一并修复）。
+   单测 1 项（模块/函数探针 + 声明名不折 + 常量分支 + 非二元三元防 panic 回归）；
+   286 零 diff；planck 620→567（top-level-variable 240→186，零新增）；
+   真机 check + run 差分一致（6==6）。
    元数/类型拒绝已按需加（既有）。
 7. [x] 自建 scope 评估收尾（2026-09-30 全站审计结论：删无可删，永久保留）。
    首刀：`declaredAt` 可见性 helper + typeof 尾部分支；单测 2 项。

@@ -181,3 +181,52 @@ func TestTypeofScalarAnnotation(t *testing.T) {
 		t.Fatalf("expected unannotated refusal, got:\n%s", r.SAI)
 	}
 }
+
+func TestEnvProbeFold(t *testing.T) {
+	// Module-scope env probe (planck's `typeof ASSERT` idiom): the
+	// undeclared name is definitionally undefined, so the const folds
+	// to the taken arm and downstream uses see a literal.
+	src := "const _ASSERT = typeof ASSERT === \"undefined\" ? false : ASSERT;\nfunction main(): i32 {\n  if (_ASSERT) {\n    return 1;\n  }\n  return 0;\n}\n"
+	res := mustLower(t, "e1.ts", src)
+	if strings.Contains(res.SAI, "ASSERT") {
+		t.Errorf("probe must erase the undeclared name, got:\n%s", res.SAI)
+	}
+	if strings.Contains(res.SAI, "index_of") {
+		t.Errorf("probe must not build strings, got:\n%s", res.SAI)
+	}
+	// Negated probes take the false arm.
+	neg := "const HAS = typeof NOPE !== \"undefined\" ? true : false;\nfunction main(): i32 {\n  if (HAS) {\n    return 1;\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "e2.ts", neg)
+	if strings.Contains(res.SAI, "NOPE") {
+		t.Errorf("probe must erase the undeclared name, got:\n%s", res.SAI)
+	}
+	// Declared names never fold (normal null-check path survives).
+	decl := "function f(g: i32): i32 {\n  return typeof g === \"undefined\" ? 0 : g;\n}\nfunction main(): i32 {\n  return f(5);\n}\n"
+	res = mustLower(t, "e3.ts", decl)
+	if !strings.Contains(res.SAI, "eq g, 0") {
+		t.Errorf("declared probe must keep the null check, got:\n%s", res.SAI)
+	}
+	// Function-scope probes fold the same way.
+	fn := "function main(): i32 {\n  const t = typeof NOPE === \"undefined\" ? 3 : 4;\n  return t;\n}\n"
+	res = mustLower(t, "e4.ts", fn)
+	if strings.Contains(res.SAI, "NOPE") || strings.Contains(res.SAI, "br ") {
+		t.Errorf("function-scope probe must fold to a constant, got:\n%s", res.SAI)
+	}
+	// Constant conditions materialise into registers (br takes no
+	// immediates): const-bool if/while lower check-clean.
+	cc := "const NO = false;\nconst YES = true;\nfunction main(): i32 {\n  if (NO) {\n    return 1;\n  }\n  while (NO) {\n    return 2;\n  }\n  if (YES) {\n    return 3;\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "e5.ts", cc)
+	if strings.Contains(res.SAI, "br 0") || strings.Contains(res.SAI, "br 1") {
+		t.Errorf("constant conditions must materialise, got:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "ne 0, 0") || !strings.Contains(res.SAI, "ne 1, 0") {
+		t.Errorf("want ne-materialised conditions, got:\n%s", res.SAI)
+	}
+	// Non-binary ternary conditions must not panic the probe scanner
+	// (regression: identifier conditions hit AsBinaryExpression).
+	idc := "function f(x: i32): i32 {\n  return x ? 1 : 0;\n}\nfunction main(): i32 {\n  return f(5);\n}\n"
+	res = mustLower(t, "e6.ts", idc)
+	if !strings.Contains(res.SAI, "return ") {
+		t.Errorf("want lowered ternary, got:\n%s", res.SAI)
+	}
+}

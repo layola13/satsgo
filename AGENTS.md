@@ -216,6 +216,19 @@
   （`declaredAt` + `linkRoute`），无残留。
   边界锁 `TestLowerProgramLocalShadowsImport`（局部参遮蔽同名导入，
   干净胜出零诊断）；全套件绿、286 sweep 零 diff。
+- ✅ env-probe 折叠 + 常量条件具化（`envProbeArm`/`materializeCond`/
+  `splitTypeofCompare`，`typeof_guard.go` 内 + 薄钩 8 处，todo/02#6 第四刀，
+  planck 顶层变量簇收敛）：`typeof G === "undefined" ? A : B`（G binder 不可见，
+  syntax-only 回退除外）取当臂，未取臂永不 lowering（planck `typeof ASSERT`
+  惯用法；模块 const 经 `tryTopLevelConst`/`registerModDeclarator` 预折，
+  余位经 `lowerTernary` 钩）；整数立即条件经 `ne 0` 进暂存
+  （`br` 只吃寄存器，`if (1)`/const-bool-if 家族潜伏陷阱一并修复，
+  `if/while/for-test/do/ternary` 五位）。
+  途中抓到真 panic 回归（`splitTypeofCompare` 首版对三元非二元条件无守卫，
+  281 demo 扫测拦截；单测锁定非二元三元）。
+  单测 1 项（模块/函数探针 + 声明名不折 + 常量分支 + 防 panic 回归）；
+  全套件绿、286 sweep 零 diff；planck 620→567（top-level-variable 240→186，
+  零新增-kind）；真机 `sa check` 过 + `sa run` exit 6 与 node 差分一致。
 - ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
   整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
   `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。
