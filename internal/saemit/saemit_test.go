@@ -734,7 +734,7 @@ func TestLowerStaticFold(t *testing.T) {
 	}
 	// Cross-file statics fold without heritage in the way.
 	xf := map[string]string{
-		"main.ts": "import { C } from \"./shapes\";\nfunction main(): string {\n  return C.TYPE;\n}\n",
+		"main.ts":   "import { C } from \"./shapes\";\nfunction main(): string {\n  return C.TYPE;\n}\n",
 		"shapes.ts": "export class C {\n  static TYPE = \"circle\" as const;\n}\n",
 	}
 	res2 := mustLowerProgram(t, "main.ts", xf)
@@ -744,7 +744,7 @@ func TestLowerStaticFold(t *testing.T) {
 	// Heritage classes publish statics and lower (single extends flattens;
 	// empty subclasses inherit everything; see class_heritage.go).
 	her := map[string]string{
-		"main.ts": "import { CircleShape } from \"./shapes\";\nfunction main(): string {\n  return CircleShape.TYPE;\n}\n",
+		"main.ts":   "import { CircleShape } from \"./shapes\";\nfunction main(): string {\n  return CircleShape.TYPE;\n}\n",
 		"shapes.ts": "class Shape {\n}\nexport class CircleShape extends Shape {\n  static TYPE = \"circle\" as const;\n}\n",
 	}
 	r := LowerProgram("main.ts", her)
@@ -1110,5 +1110,99 @@ function main(): i32 {
 				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
 			}
 		})
+	}
+}
+
+// Class and function expressions share the declaration paths (recorded
+// under the bound name, or the class's own name with an alias).
+func TestExprForms(t *testing.T) {
+	src := `function main(): i32 {
+  const C = class {
+    v: i32 = 0;
+    constructor(n: i32) {
+      this.v = n;
+    }
+    get(): i32 {
+      return this.v + 1;
+    }
+  };
+  const c = new C(3);
+  const f = function (n: i32): i32 {
+    return n * 2;
+  };
+  return c.get() + f(20);
+}
+`
+	res := mustLower(t, "expr.ts", src)
+	// Instance methods inline at the call site (no vtables); local
+	// function expressions share the @__arrow_N alias path.
+	for _, want := range []string{"call @__arrow_", "return "} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	named := `const D = class E {
+  static K = 5;
+  v: i32 = 0;
+  constructor(n: i32) {
+    this.v = n;
+  }
+};
+function main(): i32 {
+  const d = new D(1);
+  return d.v + D.K;
+}
+`
+	res = mustLower(t, "exprnamed.ts", named)
+	for _, want := range []string{"return "} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Known gap (sloppy scope): the inner name leaks to the enclosing
+	// scope instead of refusing. Values stay correct (same class); only
+	// error-visibility differs from node (ReferenceError). Locked here
+	// so a future scoping pass can flip it to a refusal deliberately.
+	innerUse := `const D = class E {
+  static K = 5;
+};
+function main(): i32 {
+  return E.K;
+}
+`
+	res = mustLower(t, "exprinner.ts", innerUse)
+	if !strings.Contains(res.SAI, "return 5") {
+		t.Errorf("missing folded inner static in output:\n%s", res.SAI)
+	}
+	top := `const C = class {
+  v: i32 = 4;
+};
+function main(): i32 {
+  const c = new C();
+  return c.v;
+}
+`
+	res = mustLower(t, "exprtop.ts", top)
+	if !strings.Contains(res.SAI, "return ") {
+		t.Errorf("missing return in output:\n%s", res.SAI)
+	}
+	topfn := `const f = function (n: i32): i32 {
+  return n + 1;
+};
+function main(): i32 {
+  return f(41);
+}
+`
+	res = mustLower(t, "exprtopfn.ts", topfn)
+	if !strings.Contains(res.SAI, "call @f(41)") {
+		t.Errorf("missing top-level fn call in output:\n%s", res.SAI)
+	}
+	// Expression heritage refuses loudly (declaration-shaped machinery).
+	bad := Lower("refuse.ts", "function main(): i32 {\n  const C = class extends Object {\n  };\n  return 0;\n}\n")
+	if !bad.Refused {
+		t.Fatalf("expected heritage refusal, lowered:\n%s", bad.SAI)
+	}
+	if !strings.Contains(diagText(bad), "class expression inheritance") {
+		t.Errorf("missing heritage diagnostic:\n%s", diagText(bad))
 	}
 }

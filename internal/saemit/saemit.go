@@ -680,11 +680,16 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 			return
 		}
 		if topLevel {
-			// A top-level `const f = (...) => ...` is a file-scope callback
-			// (mirrors sa_plugin_ts parseTopLevelArrowFn): emit @f directly.
-			if e.tryTopLevelArrow(st) {
-				return
-			}
+		// A top-level `const f = (...) => ...` is a file-scope callback
+		// (mirrors sa_plugin_ts parseTopLevelArrowFn): emit @f directly.
+		if e.tryTopLevelArrow(st) {
+			return
+		}
+		// A top-level `const C = class ...` records the class (no code,
+		// like arrows); instances resolve via classDefs.
+		if e.tryTopLevelClassExpr(st) {
+			return
+		}
 			// Assigned top-level `let`/`var` scalars lower to
 			// module-state slots (see modstate.go); unassigned names
 			// fall through to the const fold below.
@@ -894,8 +899,8 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 // scope). Direct calls lower exactly; first-class passing still refuses.
 // ---------------------------------------------------------------------------
 
-// tryTopLevelArrow emits `const f = (...) => ...` at file scope as @f.
-// Reports whether the statement was consumed.
+// tryTopLevelArrow emits `const f = (...) => ...` (or `= function...`)
+// at file scope as @f. Reports whether the statement was consumed.
 func (e *emitter) tryTopLevelArrow(st *ast.Node) bool {
 	dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
 	if len(dl.Declarations.Nodes) != 1 {
@@ -903,7 +908,7 @@ func (e *emitter) tryTopLevelArrow(st *ast.Node) bool {
 	}
 	d := dl.Declarations.Nodes[0]
 	init := d.Initializer()
-	if init == nil || init.Kind != ast.KindArrowFunction {
+	if init == nil || (init.Kind != ast.KindArrowFunction && init.Kind != ast.KindFunctionExpression) {
 		return false
 	}
 	name, ok := bindingNameText(d)
@@ -915,11 +920,41 @@ func (e *emitter) tryTopLevelArrow(st *ast.Node) bool {
 	return !e.refused
 }
 
-// lowerArrowBinding builds @gen(params..., captures...) for one arrow and
-// records the name as a call alias. Top-level arrows keep the source name
-// (reference behavior); locals get @__arrow_N.
+// tryTopLevelClassExpr records a top-level `const C = class ...`
+// (anonymous under the bound name, named under its own name with the
+// bound name aliased). Reports whether the statement was consumed.
+func (e *emitter) tryTopLevelClassExpr(st *ast.Node) bool {
+	dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) != 1 {
+		return false
+	}
+	d := dl.Declarations.Nodes[0]
+	init := d.Initializer()
+	if init == nil || init.Kind != ast.KindClassExpression {
+		return false
+	}
+	name, ok := bindingNameText(d)
+	if !ok {
+		return false
+	}
+	e.lowerClassExpression(name, init, d)
+	return !e.refused
+}
+
+// lowerArrowBinding builds @gen(params..., captures...) for one arrow or
+// function expression and records the name as a call alias. Top-level
+// callees keep the source name (reference behavior); locals get @__arrow_N.
 func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool) {
-	af := arrow.AsArrowFunction()
+	var retNode *ast.Node
+	switch arrow.Kind {
+	case ast.KindArrowFunction:
+		retNode = arrow.AsArrowFunction().Type
+	case ast.KindFunctionExpression:
+		retNode = arrow.AsFunctionExpression().Type
+	default:
+		e.refuse(arrow, "function value %s is not lowerable (arrow or function expression only)", name)
+		return
+	}
 	params := arrow.Parameters()
 	pnames := make([]string, 0, len(params))
 	psig := make([]string, 0, len(params))
@@ -944,15 +979,15 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	// Return type: explicit annotation wins; otherwise an expression body
 	// or any parameter means a value function (reference value_fn rule).
 	ret := tVoid
-	if af.Type != nil {
-		ret = annotationType(af.Type)
+	if retNode != nil {
+		ret = annotationType(retNode)
 		if ret == tUnknown {
 			ret = tI32
 		}
 	} else {
 		body := arrow.Body()
 		if body == nil {
-			e.refuse(arrow, "arrow function %s has no body", name)
+			e.refuse(arrow, "function value %s has no body", name)
 			return
 		}
 		if body.Kind != ast.KindBlock || len(pnames) > 0 {
@@ -1207,9 +1242,17 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		}
 		atype := annotationType(d.AsVariableDeclaration().Type)
 		// `let f = (x) => ...` desugars to an out-of-line callee; the
-		// name becomes a call alias, not a register binding.
-		if init.Kind == ast.KindArrowFunction {
+		// name becomes a call alias, not a register binding. Named
+		// function expressions share the path (the inner name, if any,
+		// binds only inside the body per JS; recursion uses the alias).
+		if init.Kind == ast.KindArrowFunction || init.Kind == ast.KindFunctionExpression {
 			e.lowerArrowBinding(name, init, false)
+			continue
+		}
+		// Class expressions record under the bound name (anonymous) or
+		// their own name (named, aliased for `new` via the bound name).
+		if init.Kind == ast.KindClassExpression {
+			e.lowerClassExpression(name, init, d)
 			continue
 		}
 		val, vtype := e.lowerExpr(init)
@@ -7895,10 +7938,78 @@ func (e *emitter) classDefOf(base string) *classDef {
 // single extends flattens (see class_heritage.go), implements erases;
 // accessors and static blocks refuse loudly.
 func (e *emitter) recordClass(st *ast.Node) {
-	cd := st.AsClassDeclaration()
-	name := "<anon>"
-	if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
-		name = st.Name().Text()
+	e.recordClassNamed(st, "")
+}
+
+// lowerClassExpression records `const C = class ...` under the bound
+// name (anonymous) or the class's own name (named, with the bound name
+// aliased for `new` and static reads). Like arrows, the name becomes a
+// type-ish binding, not a register: declarations emit no code.
+func (e *emitter) lowerClassExpression(name string, init, pos *ast.Node) {
+	_ = pos
+	own := ""
+	if init.Name() != nil && init.Name().Kind == ast.KindIdentifier {
+		own = init.Name().Text()
+	}
+	eff := name
+	if own != "" {
+		eff = own
+	}
+	e.recordClassNamed(init, eff)
+	if e.refused {
+		return
+	}
+	// Named expressions keep their identity; alias the bound name to
+	// the same def so `new D` / `D.K` resolve (mirrors declaration
+	// resolution, which keys off the recorded name).
+	if own != "" && own != name {
+		qOwn := e.nsDefName(own)
+		qBound := e.nsDefName(name)
+		if def, ok := e.classDefs[qOwn]; ok {
+			if e.classDefs == nil {
+				e.classDefs = map[string]*classDef{}
+			}
+			e.classDefs[qBound] = def
+		}
+		if sd, ok := e.staticDefs[qOwn]; ok {
+			if e.staticDefs == nil {
+				e.staticDefs = map[string]*classDef{}
+			}
+			e.staticDefs[qBound] = sd
+		}
+	}
+}
+
+// recordClassNamed records a class declaration or expression. forceName
+// overrides the declared name (anonymous class expressions record under
+// their bound const name). Class expressions refuse heritage loudly:
+// parseHeritage/inheritClass are declaration-shaped (see class_heritage.go).
+func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
+	var members []*ast.Node
+	var heritage *ast.NodeList
+	switch st.Kind {
+	case ast.KindClassDeclaration:
+		cd := st.AsClassDeclaration()
+		members = cd.Members.Nodes
+		heritage = cd.HeritageClauses
+	case ast.KindClassExpression:
+		ce := st.AsClassExpression()
+		members = ce.Members.Nodes
+		heritage = ce.HeritageClauses
+		if heritage != nil && len(heritage.Nodes) > 0 {
+			e.refuse(st, "class expression inheritance is not lowerable yet (use a class declaration)")
+			return
+		}
+	default:
+		e.refuse(st, "class record of %s is not lowerable", st.Kind.String())
+		return
+	}
+	name := forceName
+	if name == "" {
+		name = "<anon>"
+		if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+			name = st.Name().Text()
+		}
 	}
 	def := &classDef{name: name, methods: map[string]*ast.Node{}}
 	def.name = e.nsDefName(def.name)
@@ -7906,7 +8017,7 @@ func (e *emitter) recordClass(st *ast.Node) {
 	def.nsSegs = append([]string{}, e.nsStack...)
 	// Member/parameter decorators run arbitrary code at definition
 	// time; silently dropping them would change program behavior.
-	for _, m := range cd.Members.Nodes {
+	for _, m := range members {
 		if len(m.Decorators()) > 0 {
 			e.refuse(m, "member decorators are not lowerable (definition-time effects have no SA-ASM form)")
 			return
@@ -7922,7 +8033,7 @@ func (e *emitter) recordClass(st *ast.Node) {
 	}
 	// Static literals fold regardless of heritage (no instance needed);
 	// a heritage-refused class still publishes its statics for folding.
-	for _, m := range cd.Members.Nodes {
+	for _, m := range members {
 		if m.Kind != ast.KindPropertyDeclaration {
 			continue
 		}
@@ -7942,8 +8053,10 @@ func (e *emitter) recordClass(st *ast.Node) {
 	}
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
 	off := 0
-	if cd.HeritageClauses != nil && len(cd.HeritageClauses.Nodes) > 0 {
-		hi, ok := e.parseHeritage(cd, st)
+	if heritage != nil && len(heritage.Nodes) > 0 {
+		// Only declarations reach here (expressions with heritage
+		// refuse above), so the declaration assert is safe.
+		hi, ok := e.parseHeritage(st.AsClassDeclaration(), st)
 		if !ok {
 			if len(def.statics) > 0 {
 				if e.staticDefs == nil {
@@ -7973,7 +8086,7 @@ func (e *emitter) recordClass(st *ast.Node) {
 	if hasModifier(st, ast.KindAbstractKeyword) {
 		def.isAbstract = true
 	}
-	for _, m := range cd.Members.Nodes {
+	for _, m := range members {
 		switch m.Kind {
 		case ast.KindPropertyDeclaration:
 			pd := m.AsPropertyDeclaration()

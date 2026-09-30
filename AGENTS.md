@@ -472,3 +472,17 @@
   单测 1 项（3 形状 + 5 拒形 + 顺序复用）；全套件绿、286 sweep 零 diff +
   check 全过；真机 `sa run` 六对数（3/1/7/10/4/2，含无标签 continue 修后值）。
   JEV blast-radius local_only 99%。
+- ✅ 类/函数表达式（`recordClassNamed` kind 无关化 + `lowerClassExpression` +
+  `tryTopLevelClassExpr` + `lowerArrowBinding` 泛化 + program 导出扫描补函数
+  表达式）：函数表达式共享 arrow 别名路径（含顶层）；类表达式匿名记 bound
+  名、具名记 own 名 + bound 别名（`new`/静态同解）；表达式 heritage 拒
+  （声明形 machinery）；program 侧函数表达式与 arrow 同等出口
+  （`import { Distance }` 贯通）。已知缺口如实锁定：实例字段初始化缺失
+  （既有，旧测试 `= 0` 掩盖）、内名外泄（值正确，可见性宽）。
+  单测 1 项（成功 + 具名 + 顶层双形 + heritage 拒 + 内名锁定）；
+  类系 18 项回归全绿；286 sweep 零回退 + check 全过；真机 `sa run` 44 对数；
+  planck program 口径拒文件 49→48（`util/Timer` 修好，顶层 let + 展开），
+  零 base-干净文件新增诊断（171 条新增全为既有伞拒打开后的真缺口，同属
+  既有大声家族；28 处消除）。
+  JEV blast-radius safe_to_apply 86%（首审 needs_regression_tests 52%，
+  planck 门禁加固后翻转）。

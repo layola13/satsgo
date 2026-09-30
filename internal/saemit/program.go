@@ -339,7 +339,10 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			case ast.KindVariableStatement:
 				dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
 				for _, d := range dl.Declarations.Nodes {
-					if d.Initializer() == nil || d.Initializer().Kind != ast.KindArrowFunction {
+					// Arrow and function-expression callees share the
+					// alias path (see lowerArrowBinding); both export.
+					if d.Initializer() == nil || (d.Initializer().Kind != ast.KindArrowFunction &&
+						d.Initializer().Kind != ast.KindFunctionExpression) {
 						continue
 					}
 					name, ok := bindingNameText(d)
