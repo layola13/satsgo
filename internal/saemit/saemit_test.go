@@ -631,6 +631,25 @@ func TestLowerDeno(t *testing.T) {
 	if r := Lower("dn6.ts", other); !r.Refused {
 		t.Fatalf("expected ns refusal, got:\n%s", r.SAI)
 	}
+	fs := "function main(): i32 {\n  const c: string = Deno.cwd();\n  Deno.chdir(\"/tmp\");\n  Deno.mkdir(\"/tmp/d\");\n  Deno.remove(\"/tmp/d\");\n  const e: string = btoa(\"hi\");\n  const d: string = atob(e);\n  return c.length + d.length;\n}\n"
+	res = mustLower(t, "dn7.ts", fs)
+	for _, want := range []string{
+		"call @sa_deno_plugin_cwd",
+		"call @sa_deno_plugin_chdir",
+		"call @sa_deno_plugin_mkdir",
+		"call @sa_deno_plugin_remove",
+		"call @sa_deno_plugin_btoa",
+		"call @sa_deno_plugin_atob",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// mkdir takes exactly one path (options objects refuse).
+	opts := "function main(): i32 {\n  Deno.mkdir(\"/tmp/a\", \"/tmp/b\");\n  return 1;\n}\n"
+	if r := Lower("dn8.ts", opts); !r.Refused {
+		t.Fatalf("expected mkdir-arity refusal, got:\n%s", r.SAI)
+	}
 	// version/build objects stay refused: no direct TS spelling maps to
 	// the *_json strings without inventing an object shape (documented;
 	// member reads like Deno.version.deno need object materialisation).

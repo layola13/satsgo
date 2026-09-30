@@ -2329,6 +2329,19 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			return e.lowerConsoleTime(m, args, n)
 		}
 	}
+	// Bare btoa/atob (Web globals) via the deno plugin; user definitions
+	// shadow (checked first, like timers).
+	if call.Expression.Kind == ast.KindIdentifier {
+		fname := call.Expression.Text()
+		if fname == "btoa" || fname == "atob" {
+			_, isArrow := e.arrowAliases[fname]
+			_, isImport := e.importEnv[fname]
+			_, isFunc := e.funcSigs[fname]
+			if !isArrow && !isImport && !isFunc && !e.localDefs[fname] {
+				return e.lowerBareBtoa(fname, args, argTypes, n)
+			}
+		}
+	}
 	// Math.* inline idioms (reference math_surface; trig etc. refuse).
 	if name, ok := mathMethod(call.Expression); ok {
 		if v, t, ok := e.lowerMathCall(name, args, argTypes, call.Arguments, n); ok {
@@ -2786,6 +2799,12 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 	}
 	if recv == "Deno" {
+		if method == "mkdir" || method == "remove" {
+			if v, t, ok := routeDenoFs(e, method, args, types, pos); ok {
+				return v, t, true
+			}
+			return "0", tUnknown, true
+		}
 		if proj, ok := projectionByTS("Deno." + method); ok && isPluginBackend(proj) {
 			v, t := e.emitProjCall(proj, args, pos)
 			if e.refused {
@@ -7816,6 +7835,10 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 			for _, a := range args {
 				ap, al := e.expandSlice(a)
 				ins = append(ins, ap, al)
+			}
+			// Fixed trailing immediates (e.g. recursive=0 for mkdir).
+			if proj.Extra != "" {
+				ins = append(ins, proj.Extra)
 			}
 			fslot := ""
 			if proj.NodeOut == "fireF64" {

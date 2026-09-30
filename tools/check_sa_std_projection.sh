@@ -151,6 +151,12 @@ deno_symbols=(
   sa_deno_plugin_env_get
   sa_deno_plugin_env_set
   sa_deno_plugin_env_delete
+  sa_deno_plugin_cwd
+  sa_deno_plugin_chdir
+  sa_deno_plugin_mkdir
+  sa_deno_plugin_remove
+  sa_deno_plugin_btoa
+  sa_deno_plugin_atob
 )
 
 if [[ ${#deno_symbols[@]} -gt 0 ]]; then

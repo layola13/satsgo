@@ -335,6 +335,21 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "fire", Note: "key+value slices; status-checked"},
 	{TS: "Deno.env.delete", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_env_delete", Ret: tVoid,
 		NodeOut: "fire", Note: "one key slice; status-checked"},
+	// Deno fs: cwd/chdir direct; mkdir/remove take exactly one path
+	// (options objects out of subset; recursive defaults to 0).
+	{TS: "Deno.cwd", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_cwd", Ret: tString,
+		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	{TS: "Deno.chdir", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_chdir", Ret: tVoid,
+		NodeOut: "fire", Note: "one path slice; status-checked"},
+	{TS: "Deno.mkdir", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_mkdir", Ret: tVoid,
+		NodeOut: "fire", Extra: "0", Note: "one path slice; non-recursive"},
+	{TS: "Deno.remove", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_remove", Ret: tVoid,
+		NodeOut: "fire", Extra: "0", Note: "one path slice; non-recursive"},
+	// Web globals (also Node ≥16): base64 ASCII only per spec.
+	{TS: "btoa", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_btoa", Ret: tString,
+		NodeOut: "string1", Note: "bare global; strings only"},
+	{TS: "atob", Module: "deno.sai", Backend: "deno", Symbol: "sa_deno_plugin_atob", Ret: tString,
+		NodeOut: "string1", Note: "bare global; strings only"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

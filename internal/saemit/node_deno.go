@@ -8,6 +8,57 @@ import (
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
+// routeDenoFs lowers Deno.mkdir/remove with exactly one path (options
+// objects are out of subset; recursive defaults to 0 via table Extra).
+// Reports (value, type, handled); other methods return handled=false.
+func routeDenoFs(e *emitter, method string, args []string, types []saType, pos *ast.Node) (string, saType, bool) {
+	if method != "mkdir" && method != "remove" {
+		return "", tUnknown, false
+	}
+	if len(args) != 1 {
+		e.refuse(pos, "Deno.%s takes exactly 1 path (options objects are out of subset)", method)
+		return "0", tUnknown, true
+	}
+	if len(types) > 0 && types[0] != tString {
+		e.refuse(pos, "Deno.%s takes a string path", method)
+		return "0", tUnknown, true
+	}
+	key := "Deno." + method
+	proj, ok := projectionByTS(key)
+	if !ok {
+		e.refuse(pos, "%s is not a projected std surface (see StdProjectionTable)", key)
+		return "0", tUnknown, true
+	}
+	v, t := e.emitProjCall(proj, args, pos)
+	if e.refused {
+		return "0", tUnknown, true
+	}
+	return v, t, true
+}
+
+// lowerBareBtoa lowers bare btoa/atob calls (Web globals) with user
+// shadowing preserved (checked by the caller before routing here).
+func (e *emitter) lowerBareBtoa(fname string, args []string, types []saType, pos *ast.Node) (string, saType) {
+	if len(args) != 1 {
+		e.refuse(pos, "%s takes exactly 1 argument", fname)
+		return "0", tUnknown
+	}
+	if len(types) > 0 && types[0] != tString {
+		e.refuse(pos, "%s takes a string", fname)
+		return "0", tUnknown
+	}
+	proj, ok := projectionByTS(fname)
+	if !ok {
+		e.refuse(pos, "%s is not a projected std surface (see StdProjectionTable)", fname)
+		return "0", tUnknown
+	}
+	v, t := e.emitProjCall(proj, args, pos)
+	if e.refused {
+		return "0", tUnknown
+	}
+	return v, t
+}
+
 // routeDenoEnvChain lowers Deno.env.<m>(...) for get/set/delete.
 // Reports (value, type, handled); non-env chains return handled=false so
 // the standard refusal path applies.
