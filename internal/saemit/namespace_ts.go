@@ -54,14 +54,19 @@ func (e *emitter) nsDefName(raw string) string {
 }
 
 // qualify resolves a bare reference qualified-first: the innermost
-// namespace prefix wins, then outer prefixes, then the bare name (TS
-// shadowing; identity outside namespaces and on misses).
+// namespace prefix wins, then outer prefixes, then import-equals aliases
+// (`import x = N.y` records x → N_y), then the bare name (TS shadowing;
+// identity outside namespaces and on misses). All callers are use
+// positions (reads, calls, lookups); definitions register via nsDefName.
 func (e *emitter) qualify(name string) string {
 	for i := len(e.nsStack); i > 0; i-- {
 		q := strings.Join(e.nsStack[:i], "_") + "_" + name
 		if _, ok := e.nsMembers[q]; ok {
 			return q
 		}
+	}
+	if q, ok := e.eqAliases[name]; ok {
+		return q
 	}
 	return name
 }
@@ -163,6 +168,8 @@ func (e *emitter) lowerNamespace(st *ast.Node, topLevel bool) {
 		e.nsExports[full] = map[string]bool{}
 	}
 	e.nsStack = append(e.nsStack, name)
+	// Members prescanned file-wide (see prescanNamespaces); the drain
+	// replays recording idempotently, so rescan here unconditionally.
 	e.nsPreScan(members)
 	if e.refused {
 		e.nsStack = e.nsStack[:len(e.nsStack)-1]
@@ -173,6 +180,38 @@ func (e *emitter) lowerNamespace(st *ast.Node, topLevel bool) {
 		members: members,
 	})
 	e.nsStack = e.nsStack[:len(e.nsStack)-1]
+}
+
+// prescanNamespaces registers every top-level namespace scope and its
+// members before any lowering (nested scopes recurse inside nsPreScan).
+// Ambient blocks and string-named modules skip, mirroring lowerNamespace.
+func (e *emitter) prescanNamespaces(stmts []*ast.Node) {
+	for _, st := range stmts {
+		if st.Kind != ast.KindModuleDeclaration || isAmbientModule(st) {
+			continue
+		}
+		name, ok := moduleDeclName(st)
+		if !ok {
+			continue
+		}
+		if e.namespaces == nil {
+			e.namespaces = map[string]bool{}
+		}
+		e.namespaces[name] = true
+		if e.nsExports == nil {
+			e.nsExports = map[string]map[string]bool{}
+		}
+		if e.nsExports[name] == nil {
+			e.nsExports[name] = map[string]bool{}
+		}
+		saved := e.nsStack
+		e.nsStack = append([]string{}, name)
+		e.nsPreScan(moduleMemberStmts(st))
+		e.nsStack = saved
+		if e.refused {
+			return
+		}
+	}
 }
 
 // pendingNsBody is one namespace body's deferred member lowering: the
@@ -324,17 +363,20 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 			continue
 		}
 		q := e.nsDefName(raw)
-		// Nested bodies pre-scan twice (outer recursion + own pass):
-		// same-node re-registration is idempotent. A DIFFERENT node
-		// under an occupied member name is a duplicate (reopening or
-		// not, TS rejects it); fresh collisions with outside
-		// definitions refuse as before.
+		// Prescans repeat (file-wide pass plus per-body passes): same-node
+		// re-registration skips wholesale (slot registration refuses
+		// duplicates, so replaying it would false-refuse). A DIFFERENT
+		// node under an occupied member name is a duplicate (reopening or
+		// not, TS rejects it); fresh collisions with outside definitions
+		// refuse as before.
 		if prev, ok := e.nsMemberNodes[q]; ok {
 			if prev != m {
 				e.refuse(m, "namespace member %s is already declared (duplicates are not lowerable)", q)
 				return
 			}
-		} else if e.nsNameTaken(q) {
+			continue
+		}
+		if e.nsNameTaken(q) {
 			e.refuse(m, "namespace member %s collides with an existing definition", q)
 			return
 		}
@@ -682,6 +724,111 @@ func (e *emitter) nsMemberKind(ns, member string) string {
 	return e.nsMembers[ns+"_"+member]
 }
 
+// lowerImportEquals lowers `import x = N.y` to a file-scope alias
+// (x → flattened N_y; `import M = N` aliases the namespace path).
+// All use positions route through qualify() (member aliases) plus two
+// namespace-receiver branches below; declarations emit no code. Type-only
+// aliases erase. Cross-file targets (`import {N} from` then `N.y`) and
+// `require()` forms refuse loudly (listed gaps: cross-file members,
+// bare imports).
+func (e *emitter) lowerImportEquals(st *ast.Node) {
+	ed := st.AsImportEqualsDeclaration()
+	if ed.IsTypeOnly {
+		return
+	}
+	if st.Name() == nil || st.Name().Kind != ast.KindIdentifier {
+		e.refuse(st, "import-equals needs a plain local name")
+		return
+	}
+	name := st.Name().Text()
+	if _, dup := e.eqAliases[name]; dup {
+		e.refuse(st, "import %s is already declared (duplicates are not lowerable)", name)
+		return
+	}
+	if e.nsNameTaken(name) {
+		e.refuse(st, "import %s collides with an existing definition", name)
+		return
+	}
+	mr := ed.ModuleReference
+	if mr == nil {
+		e.refuse(st, "import-equals needs a module reference")
+		return
+	}
+	if mr.Kind == ast.KindExternalModuleReference {
+		e.refuse(st, "import %s = require(...) is not lowerable (bare third-party imports are Phase 3)", name)
+		return
+	}
+	// A bare identifier (`import M = N`) aliases the whole namespace;
+	// longer paths go through entityNameText (`A.B.y` → `A_B_y`).
+	dotted := ""
+	if mr.Kind == ast.KindIdentifier {
+		dotted = mr.Text()
+	} else if mr.Kind == ast.KindQualifiedName {
+		dotted = entityNameText(mr.AsNode())
+	} else {
+		e.refuse(st, "import-equals needs a qualified namespace path (N.y)")
+		return
+	}
+	if dotted == "" {
+		e.refuse(st, "import-equals needs a plain dotted path (computed segments are not lowerable)")
+		return
+	}
+	// Whole-namespace alias (`import M = N`): the receiver branches
+	// below rewrite M to N for calls and reads.
+	if e.namespaces[dotted] {
+		if e.eqAliases == nil {
+			e.eqAliases = map[string]string{}
+		}
+		e.eqAliases[name] = dotted
+		return
+	}
+	// Member alias (`import x = N.y`, nested `A.B.y` included): the
+	// namespace must exist, the member must exist and be exported
+	// (privacy enforced at the alias, like the use site).
+	ns, member, ok := e.splitNsQualified(dotted)
+	if !ok {
+		if e.isCrossFileRoot(dotted) {
+			e.refuse(st, "import %s = %s is not lowerable (cross-file member aliases: import the member's module directly)", name, dotted)
+		} else {
+			e.refuse(st, "import %s = %s names no declared namespace", name, dotted)
+		}
+		return
+	}
+	if e.nsMemberKind(ns, member) == "" {
+		e.refuse(st, "%s has no member %s", ns, member)
+		return
+	}
+	if exps, ok := e.nsExports[ns]; !ok || !exps[member] {
+		e.refuse(st, "%s.%s is not exported by its namespace", ns, member)
+		return
+	}
+	if e.eqAliases == nil {
+		e.eqAliases = map[string]string{}
+	}
+	e.eqAliases[name] = ns + "_" + member
+}
+
+// isCrossFileRoot reports dotted paths whose root is an imported name
+// (as opposed to a typo'd same-file namespace).
+func (e *emitter) isCrossFileRoot(dotted string) bool {
+	for name := range e.importedNames {
+		if dotted == name || strings.HasPrefix(dotted, name+"_") {
+			return true
+		}
+	}
+	for ns := range e.nsImports {
+		if dotted == ns || strings.HasPrefix(dotted, ns+"_") {
+			return true
+		}
+	}
+	for spec := range e.importEnv {
+		if dotted == spec || strings.HasPrefix(dotted, spec+"_") {
+			return true
+		}
+	}
+	return false
+}
+
 // isValueReceiver reports runtime value bindings that shadow namespace
 // interpretation at call sites (instances, slices, handles, locals).
 func (e *emitter) isValueReceiver(name string) bool {
@@ -719,6 +866,11 @@ func (e *emitter) lowerNamespaceCallSite(fn *ast.Node, pa *ast.PropertyAccessExp
 	}
 	if pa.Expression.Kind == ast.KindIdentifier {
 		recv := pa.Expression.Text()
+		// Namespace aliases (`import M = N`) rewrite the receiver;
+		// a shadowing local value still wins (checked on the original).
+		if q, ok := e.eqAliases[recv]; ok && e.namespaces[q] && !e.isValueReceiver(recv) {
+			recv = q
+		}
 		if e.namespaces[recv] && !e.isValueReceiver(recv) {
 			if e.nsMemberKind(recv, method) == "" {
 				e.refuse(pos, "%s has no member %s", recv, method)

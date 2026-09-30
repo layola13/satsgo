@@ -373,6 +373,10 @@ type emitter struct {
 	// file's definition pass completes (see namespace_ts.go).
 	nsMemberNodes map[string]*ast.Node
 	pendingNs     []pendingNsBody
+	// eqAliases maps `import x = N.y` locals to their flattened targets
+	// ("N_y", or a namespace path for `import M = N`); qualify() routes
+	// all use positions through it (see namespace_ts.go).
+	eqAliases map[string]string
 	// staticDefs holds statics-only shells from heritage-refused classes
 	// (fold reads only; never instantiation; see recordClass).
 	staticDefs   map[string]*classDef
@@ -647,6 +651,12 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 			e.recordEnum(st)
 		}
 	}
+	// Namespace scopes prescan file-wide (before any lowering): member
+	// kinds, signatures, folds, slots, classes and nested scopes all
+	// resolve regardless of declaration order (reopened bodies,
+	// import-equals aliases above their namespace, cross-body calls).
+	// Member BODIES still lower deferred (see lowerPendingNamespaces).
+	e.prescanNamespaces(stmts)
 	// Two-pass lowering: definitions first (executables skipped), then
 	// deferred namespace members (cross-body forward refs resolved),
 	// then the entry body (see entry_top.go). Files without executables
@@ -730,7 +740,7 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 	case ast.KindModuleDeclaration:
 		e.lowerNamespace(st, topLevel)
 	case ast.KindImportEqualsDeclaration:
-		e.refuse(st, "import-equals aliases are not lowerable (use ES import/from)")
+		e.lowerImportEquals(st)
 	case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindExportAssignment, ast.KindNamespaceExportDeclaration:
 		e.lowerModuleDecl(st)
 	default:
@@ -6993,14 +7003,19 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 			}
 		}
 		// TypeScript namespace value reads (`NS.CONST`; a shadowing
-		// value at the root wins and falls through below).
-		if base := pa.Expression.Text(); e.namespaces[base] && !e.isValueReceiver(base) {
+		// value at the root wins and falls through below). Namespace
+		// aliases (`import M = N`) rewrite the receiver first.
+		nsBase := pa.Expression.Text()
+		if q, ok := e.eqAliases[nsBase]; ok && e.namespaces[q] && !e.isValueReceiver(nsBase) {
+			nsBase = q
+		}
+		if e.namespaces[nsBase] && !e.isValueReceiver(nsBase) {
 			member := pa.Name().Text()
-			if e.nsMemberKind(base, member) == "" {
-				e.refuse(n, "%s has no member %s", base, member)
+			if e.nsMemberKind(nsBase, member) == "" {
+				e.refuse(n, "%s has no member %s", nsBase, member)
 				return "0", tUnknown
 			}
-			v, t, _ := e.lowerNamespaceMemberRead(base, member, n)
+			v, t, _ := e.lowerNamespaceMemberRead(nsBase, member, n)
 			return v, t
 		}
 	}

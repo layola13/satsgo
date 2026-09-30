@@ -176,7 +176,8 @@ func TestLowerNamespaceRefusals(t *testing.T) {
 		// to module-state slots (see TestModStateNamespaceLet).
 		// "merging" turned positive: reopened bodies merge (see
 		// TestLowerNamespaceReopen).
-		{"import equals", "namespace N {\n export const x = 1;\n}\nimport y = N.x;\nfunction main(): i32 { return 0; }\n"},
+		// "import equals" turned positive: aliases route through
+		// qualify (see TestImportEquals).
 		{"unknown member", "namespace N {\n export const x = 1;\n}\nfunction main(): i32 {\n return N.y;\n}\n"},
 		{"function nested", "function f(): i32 {\n namespace N {\n export const x = 1;\n }\n return 0;\n}\nfunction main(): i32 { return f(); }\n"},
 	}
@@ -269,6 +270,98 @@ function main(): i32 {
 			}
 			if !strings.Contains(diagText(res), "already declared") {
 				t.Errorf("missing duplicate diagnostic:\n%s", diagText(res))
+			}
+		})
+	}
+}
+
+// Import-equals aliases route through qualify (member aliases) and the
+// namespace receiver branches (namespace aliases); exotic and cross-file
+// targets refuse loudly.
+func TestImportEquals(t *testing.T) {
+	src := `namespace N {
+  export const K = 3;
+  export let c = 4;
+  export function add(a: i32, b: i32): i32 {
+    return a + b;
+  }
+  export class C {
+    v: i32 = 0;
+    constructor(n: i32) {
+      this.v = n;
+    }
+  }
+  export enum E {
+    A = 1,
+  }
+}
+import k = N.K;
+import cc = N.c;
+import add = N.add;
+import C = N.C;
+import E = N.E;
+function main(): i32 {
+  cc = cc + 1;
+  const c = new C(10);
+  return k + cc + add(1, 2) + c.v + E.A;
+}
+`
+	res := mustLower(t, "eqalias.ts", src)
+	for _, want := range []string{"call @N_add(1, 2)", "return "} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Namespace alias rewrites receivers for calls and reads.
+	nsal := `namespace N {
+  export const K = 5;
+  export function f(): i32 {
+    return K;
+  }
+}
+import M = N;
+function main(): i32 {
+  return M.f() + M.K;
+}
+`
+	res = mustLower(t, "eqns.ts", nsal)
+	for _, want := range []string{"call @N_f()", ", 5"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Alias-before-namespace order works (file-wide prescan).
+	fwd := `import k = N.K;
+namespace N {
+  export const K = 7;
+}
+function main(): i32 {
+  return k;
+}
+`
+	res = mustLower(t, "eqfwd.ts", fwd)
+	if !strings.Contains(res.SAI, "return 7") {
+		t.Errorf("missing forwarded fold in output:\n%s", res.SAI)
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"unknown member", "namespace N {\n export const x = 1;\n}\nimport y = N.z;\nfunction main(): i32 {\n return 0;\n}\n", "has no member"},
+		{"private member", "namespace P {\n const Hidden = 1;\n}\nimport h = P.Hidden;\nfunction main(): i32 {\n return 0;\n}\n", "is not exported"},
+		{"require form", "import x = require(\"m\");\nfunction main(): i32 {\n return 0;\n}\n", "require(...) is not lowerable"},
+		{"duplicate alias", "namespace N {\n export const x = 1;\n}\nimport y = N.x;\nimport y = N.x;\nfunction main(): i32 {\n return 0;\n}\n", "already declared"},
+		{"colliding alias", "namespace N {\n export const x = 1;\n}\nfunction y(): i32 {\n return 0;\n}\nimport y = N.x;\nfunction main(): i32 {\n return y();\n}\n", "collides with an existing definition"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Lower("refuse.ts", tc.src)
+			if !res.Refused {
+				t.Fatalf("expected refusal, lowered:\n%s", res.SAI)
+			}
+			if !strings.Contains(diagText(res), tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, diagText(res))
 			}
 		})
 	}

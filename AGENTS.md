@@ -512,3 +512,13 @@
   嵌套合并）；全套件绿、286 sweep 零回退 + check 全过；真机 `sa run` 41；
   planck 零移动（零 demo 用命名空间，48 文件、零干净新增）。
   JEV blast-radius safe_to_apply 89%。
+- ✅ import-equals 别名（`lowerImportEquals` + `qualify` 单 choke +
+  调用/读两接收分支）：成员别名经 qualify 全用位路由（调用/读/槽/
+  类/enum/typeof/继承基，15 处调用点全核为用位）；命名空间别名改
+  调用与读的接收分支（遮蔽优先）；全文件 ns prescan 使别名可在 ns
+  之前声明；成员存在性/私有性 import 期校验；跨文件/require/未知/
+  私有/重复/碰撞大声拒。旧 import-equals 拒测转正。
+  单测 1 项（全品类 + 命名空间 + 前向 + 5 拒形）；全套件绿、
+  286 sweep 零回退 + check 全过；真机 `sa check` 过；planck 零移动
+  （无 import-equals 用例）。
+  JEV blast-radius safe_to_apply 93%。
