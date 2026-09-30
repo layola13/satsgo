@@ -418,6 +418,13 @@ type emitter struct {
 	modAssigned map[string]bool
 	modVars     map[string]*modState
 	modStrTmps  map[string]bool
+	// entryStmts collects top-level executable statements for the
+	// synthesized `@main` (see entry_top.go); mainRenamed marks the
+	// user-`main` → `main__user` collision rename; entryBuf holds the
+	// lowered entry spliced ahead of definitions at finish().
+	entryStmts  []*ast.Node
+	mainRenamed bool
+	entryBuf    string
 	// layouts records interface static byte-offset layouts
 	// (LayoutTable: TypeID -> {size, field->offset}).
 	layouts map[string]*layout
@@ -506,7 +513,12 @@ func (e *emitter) finish() string {
 		e.body.WriteString(fn)
 	}
 	e.pendingFuncs = nil
-	return e.header.String() + e.body.String()
+	// The synthesized entry splices ahead of definitions; files without
+	// executables keep exact single-pass order (empty entryBuf).
+	if e.entryBuf == "" {
+		return e.header.String() + e.body.String()
+	}
+	return e.header.String() + e.entryBuf + e.body.String()
 }
 
 // arrowInfo is one out-of-line arrow callee: the generated @name plus the
@@ -542,6 +554,9 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	// Pre-register assigned top-level scalar declarators, so forward
 	// reads from earlier functions resolve to slots.
 	e.preRegisterModStates(stmts)
+	// Plan entry synthesis before signatures: top executables collect,
+	// a colliding user `main` renames (see entry_top.go).
+	e.planEntry(stmts)
 	// Pre-scan: register function signatures (forward calls resolve; void
 	// callees known before first use), interfaces and enums. Program links
 	// pre-seed cross-file signatures, so only create when absent.
@@ -560,18 +575,35 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	for _, st := range stmts {
 		if st.Kind == ast.KindFunctionDeclaration && st.Name() != nil &&
 			st.Name().Kind == ast.KindIdentifier {
+			// Entry synthesis renames a colliding user `main`
+			// (definition, signatures and call sites move together).
+			fname := st.Name().Text()
+			regName := e.entryMainName(fname)
+			if regName != fname {
+				delete(e.funcSigs, fname)
+				delete(e.funcParams, fname)
+				delete(e.funcHasRest, fname)
+				delete(e.funcDefaults, fname)
+				if r, ok := e.dtsRet[fname]; ok {
+					e.dtsRet[regName] = r
+				}
+				if e.localDefs == nil {
+					e.localDefs = map[string]bool{}
+				}
+				e.localDefs[regName] = true
+			}
 			ret := tVoid
 			if fd := st.AsFunctionDeclaration(); fd.Type != nil {
 				ret = annotationType(fd.Type)
 				if ret == tUnknown {
 					ret = tI32
 				}
-			} else if r, ok := e.dtsRet[st.Name().Text()]; ok {
+			} else if r, ok := e.dtsRet[regName]; ok {
 				ret = r
 			}
-			e.funcSigs[st.Name().Text()] = ret
+			e.funcSigs[regName] = ret
 			params := st.Parameters()
-			e.funcParams[st.Name().Text()] = len(params)
+			e.funcParams[regName] = len(params)
 			defs := make([]bool, len(params))
 			for i, p := range params {
 				if pd := p.AsParameterDeclaration(); pd.Initializer != nil {
@@ -581,10 +613,10 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 			if e.funcDefaults == nil {
 				e.funcDefaults = map[string][]bool{}
 			}
-			e.funcDefaults[st.Name().Text()] = defs
+			e.funcDefaults[regName] = defs
 			if len(params) > 0 {
 				if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
-					e.funcHasRest[st.Name().Text()] = true
+					e.funcHasRest[regName] = true
 				}
 			}
 		}
@@ -595,8 +627,17 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 			e.recordEnum(st)
 		}
 	}
+	// Two-pass lowering: definitions first (executables skipped), then
+	// the entry body (see entry_top.go). Files without executables keep
+	// exact single-pass order.
 	for _, st := range stmts {
+		if e.isEntryStmt(st) {
+			continue
+		}
 		e.lowerStatement(st, true)
+	}
+	if len(e.entryStmts) > 0 && !e.refused {
+		e.lowerEntry()
 	}
 }
 
@@ -727,8 +768,10 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 		}
 	}
 	// Namespace members emit under their qualified name (identity at top
-	// level; see namespace_ts.go).
+	// level; see namespace_ts.go). A colliding top-level `main` emits
+	// under the entry rename (see entry_top.go).
 	name = e.nsDefName(name)
+	name = e.entryMainName(name)
 	params := fn.Parameters()
 	sig := []string{}
 	e.pushScope()
@@ -2747,6 +2790,9 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			e.ownTemp(t)
 			return t, ret
 		}
+		// Entry synthesis renamed a colliding user `main` (explicit
+		// arrows and imports win above).
+		fname = e.entryMainName(fname)
 		if ret, ok := e.funcSigs[fname]; ok {
 			// Defined in another linked file but not imported: ES
 			// semantics require an explicit import (loud, not silent).
@@ -2860,6 +2906,9 @@ func (e *emitter) lowerDirectCallee(fname string, args []string, n *ast.Node) st
 		e.ownTemp(t)
 		return t
 	}
+	// Entry synthesis renamed a colliding user `main` (explicit
+	// arrows and imports win above).
+	fname = e.entryMainName(fname)
 	if _, ok := e.funcSigs[fname]; ok {
 		t := e.freshTmp()
 		e.emit("%s = call @%s(%s)", t, e.fnRef(fname), strings.Join(args, ", "))
@@ -7274,6 +7323,8 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 			kind = "object"
 		case e.f64Vars[name]:
 			kind = "number"
+		case e.mainRenamed && dname == "main":
+			kind = "function"
 		case e.modStateOf(name) != nil:
 			if ms := e.modStateOf(name); ms.isBool {
 				kind = "boolean"

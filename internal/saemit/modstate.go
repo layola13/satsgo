@@ -79,19 +79,24 @@ func fnv1a64(s string) uint64 {
 	return h
 }
 
+// modKeyMask keeps slot keys in signed-63-bit range: the interpreter
+// parses call immediates as i64, so full-range u64 keys overflow half the
+// time (error.Overflow at run). 63 bits keep FNV-64 collision resistance
+// for all practical purposes; the Zig registry takes any u64.
+const modKeyMask = uint64(0x7FFFFFFFFFFFFFFF)
+
 // modKeyOf derives the value/flag slot keys for one qualified variable.
 // Distinct domain strings keep value and flag cells apart without XOR hacks.
-// Scalar domains are frozen (emitted keys stay stable across versions).
 func (e *emitter) modKeyOf(qual string) (uint64, uint64) {
 	base := "satsgo modstate v1\x00" + e.prefix + "\x00" + qual
-	return fnv1a64("val\x00" + base), fnv1a64("flag\x00" + base)
+	return fnv1a64("val\x00"+base) & modKeyMask, fnv1a64("flag\x00"+base) & modKeyMask
 }
 
 // modStrKeyOf derives the ptr/len/flag slot keys for one qualified string
 // variable (separate domains; never collide with scalar cells).
 func (e *emitter) modStrKeyOf(qual string) (ptr, ln, flag uint64) {
 	base := "satsgo modstate v1\x00" + e.prefix + "\x00" + qual
-	return fnv1a64("strptr\x00" + base), fnv1a64("strlen\x00" + base), fnv1a64("strflag\x00" + base)
+	return fnv1a64("strptr\x00"+base) & modKeyMask, fnv1a64("strlen\x00"+base) & modKeyMask, fnv1a64("strflag\x00"+base) & modKeyMask
 }
 
 // assignedNames walks whole files collecting bare names on the left of

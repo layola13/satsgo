@@ -400,3 +400,16 @@
   1403 注册表 OOM 沿用）。单测 `TestCodedPanics` 4 子项断码 + 无裸 panic；
   旧 panic 子串断言全过；286 sweep 零回退；throw 与 `Date.parse` 产物现过
   `sa check`（此前必挂）。JEV blast-radius safe_to_apply 77%。
+- ✅ 顶层入口合成 D1（`entry_top.go` 模块 + 薄钩子 8 处）：运行时调首个
+  `@main`，裸顶层语句（`main();`/`console.log`/控制流）此前内联进 body
+  恒 fallthrough。两遍 lowering：定义先行，可执行语句按序进合成
+  `@main() -> i32`（finish 时前插；无执行文件 entryBuf 空，布局不变）；
+  用户 `main` 碰撞改名 `main__user`（预扫签名搬移 + 陈旧键删除 + dtsRet
+  拷贝、定义点、两调用点 importEnv 后映射防误伤导入、typeof）；出口
+  `return 0`（TS 完成值非 exit 码）；`main__user` 字面碰撞大声拒。
+  附带修出键溢出：解释器按 i64 解析立即数，全范围 u64 键半数 Overflow，
+  槽键掩到 63 位（注册表收任意 u64；单测锁定）。
+  单测 6 新 entry 测 + 1 键范围测；286 sweep 逐字节一致 + check 全过；
+  entry 真机 check 过、纯 entry `sa run` exit 0。
+  JEV blast-radius safe_to_apply 69%。后续 D2：program 入口同路 +
+  非入口顶层可执行拒 + `export main` 碰撞处置。

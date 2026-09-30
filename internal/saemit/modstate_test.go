@@ -350,3 +350,56 @@ function main(): i32 {
 		t.Errorf("unassigned string let must keep the const fold:\n%s", res.SAI)
 	}
 }
+
+// Slot keys must fit signed 63 bits: the interpreter parses call
+// immediates as i64, so full-range u64 keys overflow (error.Overflow).
+func TestModStateKeysFitSigned(t *testing.T) {
+	src := `let counter: i32 = 0;
+let step = 5;
+let mode = "auto";
+namespace N {
+  export let x = 1;
+  export let s = "a";
+}
+function main(): i32 {
+  counter = counter + step;
+  mode = "fast";
+  N.x = N.x + 1;
+  N.s = "b";
+  return counter + N.x + mode.length + N.s.length;
+}
+`
+	res := mustLower(t, "keys.ts", src)
+	found := 0
+	for _, line := range strings.Split(res.SAI, "\n") {
+		for _, prefix := range []string{"sa_modstate_get_u64(", "sa_modstate_set_u64("} {
+			rest := line
+			for {
+				j := strings.Index(rest, prefix)
+				if j < 0 {
+					break
+				}
+				num := rest[j+len(prefix):]
+				k := 0
+				for k < len(num) && num[k] >= '0' && num[k] <= '9' {
+					k++
+				}
+				if k == 0 {
+					t.Fatalf("unparseable slot key in line: %s", line)
+				}
+				var v uint64
+				for _, c := range []byte(num[:k]) {
+					v = v*10 + uint64(c-'0')
+				}
+				if v >= 1<<63 {
+					t.Errorf("slot key %d overflows i64 (line: %s)", v, line)
+				}
+				found++
+				rest = rest[j+len(prefix)+k:]
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatalf("no slot keys found in output:\n%s", res.SAI)
+	}
+}
