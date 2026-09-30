@@ -7118,10 +7118,21 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	e.needImport(proj.Module)
 	// Node-plugin u32-status out-param shape: allocate out slots, call,
 	// panic on nonzero status (loud), then wrap outs per NodeOut.
-	if proj.Backend == "node" && proj.NodeOut == "string" {
-		if len(args) != 0 {
-			e.refuse(pos, "%s takes no arguments", proj.TS)
+	// "string" takes no arguments; "string1" takes one string slice
+	// expanded to (&ptr, len) in-params ahead of the out slots.
+	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1") {
+		want := 0
+		if proj.NodeOut == "string1" {
+			want = 1
+		}
+		if len(args) != want {
+			e.refuse(pos, "%s takes %d argument(s)", proj.TS, want)
 			return "0", tUnknown
+		}
+		pre := ""
+		if proj.NodeOut == "string1" {
+			ip, il := e.expandSlice(args[0])
+			pre = "&" + ip + ", " + il + ", "
 		}
 		ps := e.freshTmp()
 		ls := e.freshTmp()
@@ -7130,7 +7141,7 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		e.ownTemp(ps)
 		e.ownTemp(ls)
 		st := e.freshTmp()
-		e.emit("%s = call @%s(&%s, &%s)", st, proj.Symbol, ps, ls)
+		e.emit("%s = call @%s(%s&%s, &%s)", st, proj.Symbol, pre, ps, ls)
 		e.ownTemp(st)
 		badL := e.freshLabel("node_bad")
 		okL := e.freshLabel("node_ok")

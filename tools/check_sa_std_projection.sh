@@ -84,6 +84,9 @@ node_symbols=(
   sa_node_plugin_os_network_interfaces
   sa_node_plugin_process_cwd
   sa_node_plugin_crypto_random_uuid
+  sa_node_plugin_path_normalize
+  sa_node_plugin_path_dirname
+  sa_node_plugin_path_extname
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

@@ -71,6 +71,10 @@
   （11 用例；OOB=-1 哨兵，非法码位=U+FFFD；windows 交叉编译干净）。
   `check_sa_std_projection.sh` 现 **49 sa_std + 15 node 全过**（此前 31 缺失归零）。
   注：286 demos 无一覆盖这些 string 方法（链接前零 e2e），本批是首次可链接。
+- ✅ node `path.*` 单 slice 批（normalize/dirname/extname）：投影表 Backend 维度加
+  `NodeOut "string1"`（一进一出：`&ptr+len` 进参 + u32 状态检查 + slice 包装；
+  `join/resolve` 的 argv 桥另立项）。node 契约 18/18 全过；单测 2 项
+  （成功形状 + 元数拒绝）；`tsgo-sa` 实测发射形与 `node.sai` 逐位对齐。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

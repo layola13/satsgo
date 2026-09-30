@@ -337,6 +337,26 @@ func TestLowerNodeOs(t *testing.T) {
 	}
 }
 
+func TestLowerNodePath(t *testing.T) {
+	src := "import { normalize, dirname, extname } from \"path\";\nfunction main(): i32 {\n  const n: string = normalize(\"/a//b/../c\");\n  const d: string = dirname(\"/a/b/c.txt\");\n  const e: string = extname(\"c.txt\");\n  return n.length + d.length + e.length;\n}\n"
+	res := mustLower(t, "p1.ts", src)
+	for _, want := range []string{
+		"call @sa_node_plugin_path_normalize",
+		"call @sa_node_plugin_path_dirname",
+		"call @sa_node_plugin_path_extname",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	bad := "import { normalize } from \"path\";\nfunction main(): i32 {\n  const n: string = normalize();\n  return n.length;\n}\n"
+	r := Lower("p2.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected arity refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

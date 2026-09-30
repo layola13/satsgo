@@ -52,8 +52,9 @@ type StdProjection struct {
 	// via scratch + field-0 load (mirrors isFallibleHandle).
 	Fallible bool
 	// NodeOut marks node-plugin u32-status out-param calls whose shape is
-	// (status, outs...): "string" wraps (&ptr,&len) outs into a slice.
-	// Nonzero status panics (loud; no silent error zeros).
+	// (status, outs...): "string" wraps (&ptr,&len) outs into a slice;
+	// "string1" additionally expands one leading string-slice argument
+	// to (&ptr, len) in-params. Nonzero status panics (loud).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
@@ -199,6 +200,14 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
 	{TS: "crypto.randomUUID", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_crypto_random_uuid", Ret: tString,
 		NodeOut: "string", Note: "zero-arg string out-param; status-checked"},
+	// path singles: one string slice in, string out (NodeOut "string1").
+	// Same u32-status + slot-alloc/load shape; input expands to &ptr+len.
+	{TS: "path.normalize", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_normalize", Ret: tString,
+		NodeOut: "string1", Note: "one string arg; status-checked"},
+	{TS: "path.dirname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_dirname", Ret: tString,
+		NodeOut: "string1", Note: "one string arg; status-checked"},
+	{TS: "path.extname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_extname", Ret: tString,
+		NodeOut: "string1", Note: "one string arg; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table
