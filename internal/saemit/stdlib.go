@@ -231,6 +231,22 @@ var StdProjectionTable = []StdProjection{
 	// crypto.hmac backs Hmac.digest() the same way (algo+key+data).
 	{TS: "crypto.hmac", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_crypto_hmac", Ret: tString,
 		NodeOut: "string3", Note: "algo+key+data slices; hex out; status-checked"},
+	// querystring/url legacy surfaces (single-slice string1; resolve is
+	// two-slice string2). parse/format cross the JSON boundary as text.
+	{TS: "querystring.escape", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_querystring_escape", Ret: tString,
+		NodeOut: "string1", Note: "one string arg; status-checked"},
+	{TS: "querystring.unescape", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_querystring_unescape", Ret: tString,
+		NodeOut: "string1", Note: "one string arg; status-checked"},
+	{TS: "querystring.parse", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_querystring_parse", Ret: tString,
+		NodeOut: "string1", Note: "query text in; JSON text out; status-checked"},
+	{TS: "querystring.stringify", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_querystring_stringify", Ret: tString,
+		NodeOut: "string1", Note: "JSON text in; query text out; status-checked"},
+	{TS: "url.parse", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_url_parse", Ret: tString,
+		NodeOut: "string1", Note: "URL text in; JSON text out; status-checked"},
+	{TS: "url.format", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_url_format", Ret: tString,
+		NodeOut: "string1", Note: "JSON text in; URL text out; status-checked"},
+	{TS: "url.resolve", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_url_resolve", Ret: tString,
+		NodeOut: "string2", Note: "from+to slices; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

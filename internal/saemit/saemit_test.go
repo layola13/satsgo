@@ -425,6 +425,36 @@ func TestLowerNodeHash(t *testing.T) {
 	if r := Lower("m2.ts", macArity); !r.Refused {
 		t.Fatalf("expected createHmac-arity refusal, got:\n%s", r.SAI)
 	}
+	alias := "import { createHash as ch, createHmac as cm } from \"crypto\";\nimport { join as pjoin } from \"path\";\nfunction main(): i32 {\n  const h = ch(\"sha256\");\n  h.update(\"a\");\n  const d: string = h.digest();\n  const m = cm(\"sha256\", \"k\");\n  m.update(\"b\");\n  const e: string = m.digest();\n  const j: string = pjoin(\"x\", \"y\");\n  return d.length + e.length + j.length;\n}\n"
+	res = mustLower(t, "m3.ts", alias)
+	for _, want := range []string{
+		"call @sa_node_plugin_crypto_hash",
+		"call @sa_node_plugin_crypto_hmac",
+		"call @sa_node_plugin_path_join",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+}
+
+func TestLowerNodeURL(t *testing.T) {
+	src := "import { escape, unescape, parse, stringify } from \"querystring\";\nimport { parse as uparse, format, resolve } from \"url\";\nfunction main(): i32 {\n  const a: string = escape(\"a b\");\n  const b: string = unescape(\"a%20b\");\n  const c: string = parse(\"x=1\");\n  const d: string = stringify(\"{}\");\n  const e: string = uparse(\"http://h/p\");\n  const f: string = format(\"{}\");\n  const g: string = resolve(\"http://h/a\", \"b\");\n  return a.length + b.length + c.length + d.length + e.length + f.length + g.length;\n}\n"
+	res := mustLower(t, "u1.ts", src)
+	for _, want := range []string{
+		"call @sa_node_plugin_querystring_escape",
+		"call @sa_node_plugin_querystring_unescape",
+		"call @sa_node_plugin_querystring_parse",
+		"call @sa_node_plugin_querystring_stringify",
+		"call @sa_node_plugin_url_parse",
+		"call @sa_node_plugin_url_format",
+		"call @sa_node_plugin_url_resolve",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 }
 
 func TestLowerTopLevelConst(t *testing.T) {

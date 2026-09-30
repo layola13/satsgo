@@ -92,6 +92,13 @@ node_symbols=(
   sa_node_plugin_crypto_random_bytes
   sa_node_plugin_crypto_hash
   sa_node_plugin_crypto_hmac
+  sa_node_plugin_querystring_escape
+  sa_node_plugin_querystring_unescape
+  sa_node_plugin_querystring_parse
+  sa_node_plugin_querystring_stringify
+  sa_node_plugin_url_parse
+  sa_node_plugin_url_format
+  sa_node_plugin_url_resolve
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

@@ -378,8 +378,11 @@ type emitter struct {
 	// enums maps EnumName -> member -> ordinal (auto-numbered variants).
 	enums map[string]map[string]int64
 	// importedFrom maps a local value name to its module ("fs"/"net") for
-	// `import { readFile } from "fs"` style calls.
-	importedFrom map[string]string
+	// `import { readFile } from "fs"` style calls. importedRemote maps
+	// the local name to the remote export name (`import { a as b }`
+	// calls b(...) but projects a); absent means local == remote.
+	importedFrom   map[string]string
+	importedRemote map[string]string
 	// strVars tracks string slice bindings; arrVars tracks array slice
 	// bindings; arrElems records array element SA names (method dispatch
 	// resolves the receiver kind like the scope lookup does).
@@ -1065,13 +1068,21 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		e.assign(name, val, operandKind(val, init), vtype, d)
 		e.trackBinding(name, d.AsVariableDeclaration().Type, init, vtype)
 		// Adopt a staged crypto Hash/Hmac accumulator onto the bound name.
+		// The callee may be an import alias (`import { createHash as ch}`),
+		// so resolve through the remote export name like the call site.
 		if e.lastHash != nil {
 			if init.Kind == ast.KindCallExpression {
-				if ce := init.AsCallExpression(); ce.Expression.Kind == ast.KindIdentifier && (ce.Expression.Text() == "createHash" || ce.Expression.Text() == "createHmac") {
-					if e.hashAcc == nil {
-						e.hashAcc = map[string]*hashState{}
+				if ce := init.AsCallExpression(); ce.Expression.Kind == ast.KindIdentifier {
+					callee := ce.Expression.Text()
+					if r, ok := e.importedRemote[callee]; ok {
+						callee = r
 					}
-					e.hashAcc[name] = e.lastHash
+					if callee == "createHash" || callee == "createHmac" {
+						if e.hashAcc == nil {
+							e.hashAcc = map[string]*hashState{}
+						}
+						e.hashAcc[name] = e.lastHash
+					}
 				}
 			}
 			e.lastHash = nil
@@ -2432,14 +2443,20 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			return e.lowerDeepClone(args[0], at, n), at
 		}
 		// Named std imports: readFile(...) with `import { readFile } from "fs"`.
+		// Aliased imports (`import { a as b }`) resolve through the
+		// remote export name while the local name stays the callee.
 		if mod, ok := e.importedFrom[fname]; ok {
+			remote := fname
+			if r, ok := e.importedRemote[fname]; ok {
+				remote = r
+			}
 			// createHash/createHmac stage a Hash/Hmac accumulator
 			// (buffered slices until digest; see hashState). No SA is
 			// emitted for the call itself.
-			if mod == "crypto" && (fname == "createHash" || fname == "createHmac") {
-				return e.lowerCreateHash(fname, args, n)
+			if mod == "crypto" && (remote == "createHash" || remote == "createHmac") {
+				return e.lowerCreateHash(remote, args, n)
 			}
-			if proj, ok := projectionByTS(mod + "." + fname); ok {
+			if proj, ok := projectionByTS(mod + "." + remote); ok {
 				v, t := e.emitProjCall(proj, args, n)
 				// fs.readFile returns a BUFFER handle (u64!): unwrap via
 				// read_buffer_data/len like from_char_code (a direct
@@ -7110,8 +7127,8 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		e.refuse(st, "non-literal module specifiers are not lowerable")
 		return
 	}
-	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" || mod == "crypto" ||
-		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" || mod == "node:crypto" {
+	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" || mod == "crypto" || mod == "querystring" || mod == "url" ||
+		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" || mod == "node:crypto" || mod == "node:querystring" || mod == "node:url" {
 		// Record named imports so bare calls (readFile(...)) resolve via
 		// the projection table at call sites ("node:" maps to the same
 		// backend table; node-plugin symbols carry Backend: "node").
@@ -7252,8 +7269,20 @@ func (e *emitter) recordNamedImports(imp *ast.ImportDeclaration, mod string) {
 	var walk func(n *ast.Node)
 	walk = func(n *ast.Node) {
 		if n.Kind == ast.KindImportSpecifier {
+			sp := n.AsImportSpecifier()
 			if nm := n.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
-				e.importedFrom[nm.Text()] = mod
+				local := nm.Text()
+				e.importedFrom[local] = mod
+				// `import { a }`: remote is a; `import { b as c }`:
+				// PropertyName holds the remote (b), local is c.
+				remote := local
+				if sp.PropertyName != nil {
+					remote = sp.PropertyName.Text()
+				}
+				if e.importedRemote == nil {
+					e.importedRemote = map[string]string{}
+				}
+				e.importedRemote[local] = remote
 			}
 			return
 		}

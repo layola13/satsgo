@@ -91,6 +91,16 @@
 - ✅ node `Hmac` 链（createHmac/update/digest）：`hashState` 加 `kind/key`，
   digest 按 kind 路由 `crypto.hash/hash`（`NodeOut "string3"` 三 slice）。
   诊断按 kind 区分；node 契约 23/23 全过；形状校验通过；单测 2 项。
+- ✅ node `querystring`/`url` 批（escape/unescape/parse/stringify + parse/format/
+  resolve，复用 string1/string2；`querystring`/`url` 进 import 白名单）；
+  JSON 边界以文本形式穿越（parse/format 来回），文档注明。
+- ✅ import 别名直达（`import { parse as uparse }`/`createHash as ch`）：
+  `importedRemote` 记远端导出名，调用点与 `hashAcc` adoption 双侧解析，
+  覆盖 crypto/path/url；此前别名一律误拒。单测 2 项。
+- 说明（回应“node 是否与 sa_plugin_node 重复”）：不重复——`sa_plugin_node`
+  是纯 Zig 原生运行时（无 TS 解析/降级逻辑），satsgo 投影是其 TS 前端桥，
+  零运行时模拟；`sa_plugin_deno` 有 57 externs 但无 exported-symbols 清单、
+  无 bun 插件，Deno/Bun 投影待后端先行（本轮不动）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
