@@ -111,6 +111,8 @@ func (e *emitter) lowerEntry() {
 	savedScopes := e.scopes
 	savedBreaks := e.breaks
 	savedConts := e.conts
+	savedLabels := e.labels
+	savedPending := e.pendingLabels
 	savedRet := e.retType
 	savedInFunc := e.inFunc
 	savedTerm := e.terminated
@@ -119,6 +121,8 @@ func (e *emitter) lowerEntry() {
 	e.scopes = nil
 	e.breaks = nil
 	e.conts = nil
+	e.labels = nil
+	e.pendingLabels = nil
 	e.retType = tI32
 	e.inFunc = true
 	e.emitRaw("@%s() -> i32:", e.fnDef("main"))
@@ -139,6 +143,8 @@ func (e *emitter) lowerEntry() {
 	e.scopes = savedScopes
 	e.breaks = savedBreaks
 	e.conts = savedConts
+	e.labels = savedLabels
+	e.pendingLabels = savedPending
 	e.retType = savedRet
 	e.inFunc = savedInFunc
 	e.terminated = savedTerm

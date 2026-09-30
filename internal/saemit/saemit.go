@@ -317,6 +317,17 @@ type emitter struct {
 	owned   []string              // emission-order names for reverse release
 	breaks  []jumpTarget          // break target stack (label + scope depth)
 	conts   []jumpTarget          // continue target stack (label + scope depth)
+	// labels maps bound loop/block/switch labels to their jump targets
+	// (see labels.go); pendingLabels await the inner push of a labeled
+	// statement. Both die at function boundaries like breaks/conts.
+	labels        map[string]*labelDef
+	pendingLabels []string
+	// contJumps counts emitted continue jumps (labeled or not); for-loops
+	// consult it to decide whether a body-terminated loop still needs its
+	// incrementor lowered (a continue may target it). Over-approximates
+	// across nesting (an inner-loop continue also counts); the only cost
+	// is a possibly-dead incrementor lowering, never a missed one.
+	contJumps int
 	inFunc  bool
 	retType saType
 	// pendingFuncs buffers out-of-line arrow-function bodies (mirrors the
@@ -738,6 +749,10 @@ func (e *emitter) lowerBlockStatement(st *ast.Node) {
 		}
 		e.popScope()
 	case ast.KindBreakStatement:
+		if lbl := st.AsBreakStatement().Label; lbl != nil {
+			e.lowerBreakLabel(lbl.Text(), st)
+			return
+		}
 		if len(e.breaks) == 0 {
 			e.refuse(st, "break outside loop/switch is not lowerable")
 			return
@@ -747,6 +762,10 @@ func (e *emitter) lowerBlockStatement(st *ast.Node) {
 		e.emit("jmp %s", tgt.label)
 		e.terminated = true
 	case ast.KindContinueStatement:
+		if lbl := st.AsContinueStatement().Label; lbl != nil {
+			e.lowerContinueLabel(lbl.Text(), st)
+			return
+		}
 		if len(e.conts) == 0 {
 			e.refuse(st, "continue outside loop is not lowerable")
 			return
@@ -754,7 +773,10 @@ func (e *emitter) lowerBlockStatement(st *ast.Node) {
 		tgt := e.conts[len(e.conts)-1]
 		e.releaseForJump(tgt.depth)
 		e.emit("jmp %s", tgt.label)
+		e.contJumps++
 		e.terminated = true
+	case ast.KindLabeledStatement:
+		e.lowerLabeled(st)
 	case ast.KindThrowStatement:
 		// SA-ASM has no exception edges: throw lowers to panic (abort).
 		e.emit("panic(%d)", panicThrow)
@@ -988,6 +1010,8 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	savedScopes := e.scopes
 	savedBreaks := e.breaks
 	savedConts := e.conts
+	savedLabels := e.labels
+	savedPending := e.pendingLabels
 	savedRet := e.retType
 	savedInFunc := e.inFunc
 	savedTerm := e.terminated
@@ -997,6 +1021,8 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	e.scopes = nil
 	e.breaks = nil
 	e.conts = nil
+	e.labels = nil
+	e.pendingLabels = nil
 	e.retType = ret
 	e.inFunc = true
 	e.terminated = false
@@ -1052,6 +1078,8 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	e.scopes = savedScopes
 	e.breaks = savedBreaks
 	e.conts = savedConts
+	e.labels = savedLabels
+	e.pendingLabels = savedPending
 	e.retType = savedRet
 	e.inFunc = savedInFunc
 	e.terminated = savedTerm
@@ -1403,8 +1431,7 @@ func (e *emitter) lowerWhile(st *ast.Node) {
 	topL := e.freshLabel("while_top")
 	bodyL := e.freshLabel("while_body")
 	endL := e.freshLabel("while_end")
-	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
-	e.conts = append(e.conts, jumpTarget{topL, len(e.scopes)})
+	e.pushLoopTargets(endL, topL)
 	e.emitRaw("%s:", topL)
 	cond, _ := e.lowerExpr(ws.Expression)
 	e.emit("br %s -> %s, %s", cond, bodyL, endL)
@@ -1441,8 +1468,19 @@ func (e *emitter) lowerFor(st *ast.Node) {
 	topL := e.freshLabel("for_top")
 	bodyL := e.freshLabel("for_body")
 	endL := e.freshLabel("for_end")
-	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
-	e.conts = append(e.conts, jumpTarget{topL, len(e.scopes)})
+	// `continue` runs the incrementor (execution order, not parse
+	// order), so the continue target is the incrementor when one
+	// exists — jumping to top would skip it and hang (found live via
+	// labeled-continue verification; unlabeled shared the bug).
+	// Continue-free loops keep the exact legacy shape (no dead label).
+	contL := ""
+	contTgt := topL
+	needCont := fs.Incrementor != nil && bodyHasContinue(fs.Statement)
+	if needCont {
+		contL = e.freshLabel("for_cont")
+		contTgt = contL
+	}
+	e.pushLoopTargets(endL, contTgt)
 	e.emitRaw("%s:", topL)
 	if fs.Condition != nil {
 		cond, _ := e.lowerExpr(fs.Condition)
@@ -1453,10 +1491,19 @@ func (e *emitter) lowerFor(st *ast.Node) {
 	e.emitRaw("%s:", bodyL)
 	e.pushScope()
 	e.terminated = false
+	seenCont := e.contJumps
 	e.lowerBranchBody(fs.Statement)
-	// increment runs past the loop body (execution order, not parse order)
-	if !e.terminated && fs.Incrementor != nil {
-		e.lowerExpr(fs.Incrementor)
+	// increment runs past the loop body (execution order, not parse order).
+	// A body-terminated loop still lowers its incrementor when a continue
+	// targeted it (the cont label below is its landing pad).
+	if needCont {
+		e.emitRaw("%s:", contL)
+	}
+	if !e.terminated || (needCont && e.contJumps > seenCont) {
+		e.terminated = false
+		if fs.Incrementor != nil {
+			e.lowerExpr(fs.Incrementor)
+		}
 	}
 	e.releaseScope()
 	e.popScope()
@@ -1483,8 +1530,7 @@ func (e *emitter) lowerForOf(st *ast.Node) {
 	endL := e.freshLabel("forof_end")
 	lenT := e.freshTmp()
 	e.emit("%s = load %s + 8 as u64", lenT, arrVal)
-	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
-	e.conts = append(e.conts, jumpTarget{topL, len(e.scopes)})
+	e.pushLoopTargets(endL, topL)
 	e.emitRaw("%s:", topL)
 	cT := e.freshTmp()
 	e.emit("%s = slt %s, %s", cT, idx, lenT)
@@ -1552,8 +1598,7 @@ func (e *emitter) lowerForIn(st *ast.Node) {
 	endL := e.freshLabel("forin_end")
 	lenT := e.freshTmp()
 	e.emit("%s = load %s + 8 as u64", lenT, arrVal)
-	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
-	e.conts = append(e.conts, jumpTarget{topL, len(e.scopes)})
+	e.pushLoopTargets(endL, topL)
 	e.emitRaw("%s:", topL)
 	cT := e.freshTmp()
 	e.emit("%s = slt %s, %s", cT, idx, lenT)
@@ -1589,8 +1634,7 @@ func (e *emitter) lowerDoWhile(st *ast.Node) {
 	loopL := e.freshLabel("dowhile")
 	condL := e.freshLabel("dowhile_cond")
 	endL := e.freshLabel("enddowhile")
-	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
-	e.conts = append(e.conts, jumpTarget{condL, len(e.scopes)})
+	e.pushLoopTargets(endL, condL)
 	e.emitRaw("%s:", loopL)
 	e.pushScope()
 	e.terminated = false
@@ -1681,7 +1725,7 @@ func (e *emitter) lowerSwitch(st *ast.Node) {
 	sw := st.AsSwitchStatement()
 	disc, _ := e.lowerExpr(sw.Expression)
 	endL := e.freshLabel("endswitch")
-	e.breaks = append(e.breaks, jumpTarget{endL, len(e.scopes)})
+	e.pushBreakTarget(endL)
 	clauses := sw.CaseBlock.AsCaseBlock().Clauses.Nodes
 	// Split cases from default; default runs at the fallthrough point.
 	type casePart struct {

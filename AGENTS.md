@@ -462,3 +462,13 @@
   单测 1 项（成功 + 字面键 + 简写 + 3 拒形）；全套件绿、286 零回退 +
   check 全过；真机 `sa run` 20/1 双对数（覆盖与被覆盖序）。
   JEV blast-radius local_only 95%。
+- ✅ 标签 break/continue（`labels.go` 模块 + 薄钩子 8 处）：label 表 +
+  pending 栈，循环/switch 经 push helpers 绑定（`a: b: for` 双绑），块标签
+  直绑 break-only；标签随语句死亡（顺序复用合法、嵌套同名拒）；函数边界
+  隔离（arrow/entry 存换）；未定义/块 continue/标错语句皆大声拒。
+  附带修无标签 `continue` 在 C-for 跳过 incrementor 致挂（cont 改指
+  incrementor；body 预扫使无 continue 文件零增量；终止体经 contJumps 保
+  incrementor；此前 286 无 continue 覆盖故一直潜伏）。
+  单测 1 项（3 形状 + 5 拒形 + 顺序复用）；全套件绿、286 sweep 零 diff +
+  check 全过；真机 `sa run` 六对数（3/1/7/10/4/2，含无标签 continue 修后值）。
+  JEV blast-radius local_only 99%。
