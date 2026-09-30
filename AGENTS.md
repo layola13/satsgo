@@ -187,9 +187,12 @@
   单测扩展 2 项（单文件 unknown 锁定 + program 导入可见性翻转）；全量单测过。
 - ✅ checker#3 泛型单态化（`checker_layout.go`：模板记参 + `monoKey` 规范键 +
   `instantiateLayout` 缓存 + `layoutOfAnnotation` 接入注解/联合）：
-  `Box<i32>` 与 `Box<string>` 布局分宽；未知模板/元数错位回退裸布局；
+  `Box<i32>` 与 `Box<string>` 布局分宽；未知模板回退裸布局；
   递归泛型嵌套保持 raw 键（懒实例化另立项）。286 输出逐字节一致
   （纯加法）；单测 1 项（分宽断言）；planck 持平 613。
+- ✅ checker#3 递归懒实例化（shell 预占 + 实参代入递归，互递归经缓存收敛；
+  含参泛型实参/深层嵌套仍 raw）：`List<T>` 自递归一次通过；
+  286 逐字节一致；planck 持平；单测扩展 1 项。
 - ✅ tsx `useState`（路二任务 5，`tsx.go` 内）：前导语句仅限
   `const [x, setX] = useState(数字/布尔)`，state 块发射字面量，
   模板 `{x}` 插值；字符串初值/setter 引用/计算表达式/杂语句大声拒

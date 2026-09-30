@@ -42,4 +42,11 @@ func TestCheckerLayoutInferred(t *testing.T) {
 	if c := strings.Count(res.SAI, "as i32"); c < 2 {
 		t.Errorf("want nested loads, got:\n%s", res.SAI)
 	}
+	// Self-recursive generics terminate via the shell cache and route
+	// through the canonical key (no lazy-instantiation refusal).
+	rec := "interface List<T> { head: T; tail: List<T>; }\nfunction sum(l: List<i32>): i32 { return l.head + l.tail.head; }\nfunction main(): i32 {\n  return 0;\n}\n"
+	res = mustLower(t, "l6.ts", rec)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want recursive loads, got:\n%s", res.SAI)
+	}
 }

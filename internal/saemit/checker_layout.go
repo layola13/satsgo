@@ -241,6 +241,13 @@ func (e *emitter) instantiateLayout(name string, args []*ast.Node) *layout {
 		pmap[p] = args[i]
 	}
 	l := &layout{name: cacheKey, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
+	// Shell-first: recursive instantiations hitting the cache mid-fill
+	// resolve to this shell (fields complete synchronously below, before
+	// any member access can read them).
+	if e.layouts == nil {
+		e.layouts = map[string]*layout{}
+	}
+	e.layouts[cacheKey] = l
 	off := 0
 	for _, fname := range tmpl.fields {
 		saname, fkey := e.substFieldType(tmpl.fdefs[fname], pmap)
@@ -279,23 +286,57 @@ func (e *emitter) substFieldType(ftn *ast.Node, pmap map[string]*ast.Node) (stri
 			return saNameOfType(arg), monoKey(arg)
 		}
 		if fargs := ftn.TypeArguments(); len(fargs) > 0 {
+			// Substitute params, then instantiate (shell-cached recursion
+			// terminates: self/mutual references hit the in-progress shell
+			// and use its key). Param-held generics and deep nesting stay
+			// raw (loud downstream).
+			sub := make([]*ast.Node, 0, len(fargs))
 			closed := true
 			for _, a := range fargs {
 				if a.Kind == ast.KindTypeReference {
-					if _, ok := pmap[a.AsTypeReferenceNode().TypeName.Text()]; ok {
-						closed = false
+					if parg, ok := pmap[a.AsTypeReferenceNode().TypeName.Text()]; ok {
+						if parg == nil || (parg.Kind == ast.KindTypeReference && len(parg.TypeArguments()) > 0) {
+							closed = false
+							break
+						}
+						sub = append(sub, parg)
+						continue
 					}
 				}
+				if typeHasParam(a, pmap) {
+					closed = false
+					break
+				}
+				sub = append(sub, a)
 			}
 			if closed {
-				if sub := e.instantiateLayout(refName, fargs); sub != nil {
-					return "ptr", sub.name
+				if l := e.instantiateLayout(refName, sub); l != nil {
+					return "ptr", l.name
 				}
 			}
 			return "ptr", refName
 		}
 	}
 	return saNameOfType(ftn), rawTypeName(ftn)
+}
+
+// typeHasParam reports whether a type node mentions any mapped parameter.
+func typeHasParam(tn *ast.Node, pmap map[string]*ast.Node) bool {
+	if tn == nil {
+		return false
+	}
+	if tn.Kind == ast.KindTypeReference {
+		if _, ok := pmap[tn.AsTypeReferenceNode().TypeName.Text()]; ok {
+			return true
+		}
+		for _, a := range tn.TypeArguments() {
+			if typeHasParam(a, pmap) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // layoutOfAnnotation resolves a TypeReference annotation to its layout,

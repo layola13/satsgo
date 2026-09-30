@@ -14,8 +14,9 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    匿名形字段集）；注解猜测保留；planck program 口径 diag 686→649。
    v2：`type X={...}` 建布局 + 嵌套 ftypes 下沉；diag 649→617。
 3. [x] 泛型单态化类型驱动：`Box<T>` 不再靠调用点布局继承（`monoKey` +
-   `instantiateLayout` + 注解/联合接入；未知模板回退；递归嵌套懒实例化另立项）。
-   286 逐字节一致；单测 1 项。
+   `instantiateLayout` + 注解/联合接入；未知模板回退；递归经 shell 预占收敛，
+   含参泛事实参/深层嵌套仍 raw）。
+   286 逐字节一致；单测 2 项。
 4. [x] `?.` 真守卫：`strictNullChecks` 可空信息决定是否加 join-slot（非空保持直调）。
 5. [x] 捕获分析换 binder locals（`collectValueIdents` 手写 walk 已删，
    改走共享 `valueUsedNames`；286 输出逐字节一致 + 新单测锁定类型名不进捕获）。
