@@ -411,6 +411,20 @@ func TestLowerNodeHash(t *testing.T) {
 	if r := Lower("h4.ts", updArity); !r.Refused {
 		t.Fatalf("expected update-arity refusal, got:\n%s", r.SAI)
 	}
+	mac := "import { createHmac } from \"crypto\";\nfunction main(): i32 {\n  const m = createHmac(\"sha256\", \"key\");\n  m.update(\"abc\");\n  const d: string = m.digest(\"hex\");\n  return d.length;\n}\n"
+	res = mustLower(t, "m1.ts", mac)
+	for _, want := range []string{
+		"call @sa_string_concat",
+		"call @sa_node_plugin_crypto_hmac",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	macArity := "import { createHmac } from \"crypto\";\nfunction main(): i32 {\n  const m = createHmac(\"sha256\");\n  return 0;\n}\n"
+	if r := Lower("m2.ts", macArity); !r.Refused {
+		t.Fatalf("expected createHmac-arity refusal, got:\n%s", r.SAI)
+	}
 }
 
 func TestLowerTopLevelConst(t *testing.T) {

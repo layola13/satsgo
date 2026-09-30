@@ -57,8 +57,9 @@ type StdProjection struct {
 	// to (&ptr, len) in-params; "argv" packs all string arguments into
 	// a 16-byte {ptr,len} array passed as (argv, argc); "sized" takes
 	// one u64 size and wraps a bare &ptr out whose length is the
-	// requested size (e.g. randomBytes); "string2" expands two leading
-	// string slices ahead of the outs. Nonzero status panics (loud).
+	// requested size (e.g. randomBytes); "string2"/"string3" expand
+	// two/three leading string slices ahead of the outs. Nonzero status
+	// panics (loud).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
 	Note string
@@ -227,6 +228,9 @@ var StdProjectionTable = []StdProjection{
 	// (no direct TS surface; routed only through lowerHashMethod).
 	{TS: "crypto.hash", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_crypto_hash", Ret: tString,
 		NodeOut: "string2", Note: "algo+data slices; hex digest out; status-checked"},
+	// crypto.hmac backs Hmac.digest() the same way (algo+key+data).
+	{TS: "crypto.hmac", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_crypto_hmac", Ret: tString,
+		NodeOut: "string3", Note: "algo+key+data slices; hex out; status-checked"},
 }
 
 // mathMethod resolves Math.<name> property-access callees to the table

@@ -88,6 +88,9 @@
   （algo+data 双 slice，hex 原生）；非 hex 编码、 finalized 后使用、未知方法、
   非字面编码一律大声拒（`ERR_CRYPTO_HASH_FINALIZED` 语义）。
   node 契约 22/22 全过；形状校验通过；单测 4 项；发射形与契约逐位对齐。
+- ✅ node `Hmac` 链（createHmac/update/digest）：`hashState` 加 `kind/key`，
+  digest 按 kind 路由 `crypto.hash/hash`（`NodeOut "string3"` 三 slice）。
+  诊断按 kind 区分；node 契约 23/23 全过；形状校验通过；单测 2 项。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

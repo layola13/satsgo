@@ -393,14 +393,16 @@ type emitter struct {
 	terminated bool
 }
 
-// hashState is one crypto Hash accumulator: acc buffers fed bytes,
-// algo is the lowered algorithm operand, done latches at digest()
-// (update/digest past finalize refuse loudly, mirroring Node's
-// ERR_CRYPTO_HASH_FINALIZED).
+// hashState is one crypto Hash/Hmac accumulator: acc buffers fed bytes,
+// algo/key are the lowered operands (key empty for plain Hash), done
+// latches at digest() (update/digest past finalize refuse loudly,
+// mirroring Node's ERR_CRYPTO_HASH_FINALIZED).
 type hashState struct {
-	acc   string
-	algo  string
-	done  bool
+	kind string // "Hash" or "Hmac", for diagnostics
+	acc  string
+	algo string
+	key  string
+	done bool
 }
 
 func (e *emitter) freshTmp() string {
@@ -1062,10 +1064,10 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		_ = atype
 		e.assign(name, val, operandKind(val, init), vtype, d)
 		e.trackBinding(name, d.AsVariableDeclaration().Type, init, vtype)
-		// Adopt a staged crypto Hash accumulator onto the bound name.
+		// Adopt a staged crypto Hash/Hmac accumulator onto the bound name.
 		if e.lastHash != nil {
 			if init.Kind == ast.KindCallExpression {
-				if ce := init.AsCallExpression(); ce.Expression.Kind == ast.KindIdentifier && ce.Expression.Text() == "createHash" {
+				if ce := init.AsCallExpression(); ce.Expression.Kind == ast.KindIdentifier && (ce.Expression.Text() == "createHash" || ce.Expression.Text() == "createHmac") {
 					if e.hashAcc == nil {
 						e.hashAcc = map[string]*hashState{}
 					}
@@ -2431,10 +2433,11 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		}
 		// Named std imports: readFile(...) with `import { readFile } from "fs"`.
 		if mod, ok := e.importedFrom[fname]; ok {
-			// createHash stages a Hash accumulator (buffered slices until
-			// digest; see hashState). No SA is emitted for the call itself.
-			if mod == "crypto" && fname == "createHash" {
-				return e.lowerCreateHash(args, n)
+			// createHash/createHmac stage a Hash/Hmac accumulator
+			// (buffered slices until digest; see hashState). No SA is
+			// emitted for the call itself.
+			if mod == "crypto" && (fname == "createHash" || fname == "createHmac") {
+				return e.lowerCreateHash(fname, args, n)
 			}
 			if proj, ok := projectionByTS(mod + "." + fname); ok {
 				v, t := e.emitProjCall(proj, args, n)
@@ -2868,18 +2871,29 @@ func (e *emitter) mapKeySlice(key string, kt saType) string {
 	return slice
 }
 
-// lowerCreateHash stages a crypto Hash accumulator: fed bytes buffer as
-// a plain string slice (empty at creation) until digest() routes the
-// algorithm plus buffer through the one-shot node crypto_hash primitive.
-// Only declaration-form adoption tracks the state (see lowerVarDeclList);
-// anything else using the result refuses loudly at the method site.
-func (e *emitter) lowerCreateHash(args []string, pos *ast.Node) (string, saType) {
-	if len(args) != 1 {
-		e.refuse(pos, "createHash takes exactly 1 argument (algorithm)")
+// lowerCreateHash stages a crypto Hash/Hmac accumulator: fed bytes buffer
+// as a plain string slice (empty at creation) until digest() routes the
+// algorithm (plus key) plus buffer through the one-shot node crypto_hash/
+// crypto_hmac primitives. Only declaration-form adoption tracks the state
+// (see lowerVarDeclList); anything else using the result refuses loudly
+// at the method site.
+func (e *emitter) lowerCreateHash(fname string, args []string, pos *ast.Node) (string, saType) {
+	kind := "Hash"
+	want := 1
+	if fname == "createHmac" {
+		kind = "Hmac"
+		want = 2
+	}
+	if len(args) != want {
+		e.refuse(pos, "%s takes exactly %d argument(s)", fname, want)
 		return "0", tUnknown
 	}
 	acc := e.lowerStringLiteral("")
-	e.lastHash = &hashState{acc: acc, algo: args[0]}
+	st := &hashState{kind: kind, acc: acc, algo: args[0]}
+	if fname == "createHmac" {
+		st.key = args[1]
+	}
+	e.lastHash = st
 	return acc, tString
 }
 
@@ -2890,17 +2904,17 @@ func (e *emitter) lowerCreateHash(args []string, pos *ast.Node) (string, saType)
 // non-hex encodings, post-finalize use, and unknown methods all refuse.
 func (e *emitter) lowerHashMethod(recv string, st *hashState, method string, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	if st.done {
-		e.refuse(pos, "Hash is already digested (ERR_CRYPTO_HASH_FINALIZED)")
+		e.refuse(pos, "%s is already digested (ERR_CRYPTO_HASH_FINALIZED)", st.kind)
 		return "0", tUnknown, true
 	}
 	switch method {
 	case "update":
 		if len(args) != 1 {
-			e.refuse(pos, "Hash.update takes exactly 1 argument")
+			e.refuse(pos, "%s.update takes exactly 1 argument", st.kind)
 			return "0", tUnknown, true
 		}
 		if len(types) > 0 && types[0] != tString {
-			e.refuse(pos, "Hash.update takes a string chunk")
+			e.refuse(pos, "%s.update takes a string chunk", st.kind)
 			return "0", tUnknown, true
 		}
 		e.needImport("sa_std/string.sai")
@@ -2915,34 +2929,40 @@ func (e *emitter) lowerHashMethod(recv string, st *hashState, method string, arg
 	case "digest":
 		enc := "hex"
 		if len(args) > 1 {
-			e.refuse(pos, "Hash.digest takes at most 1 argument (encoding)")
+			e.refuse(pos, "%s.digest takes at most 1 argument (encoding)", st.kind)
 			return "0", tUnknown, true
 		}
 		if len(args) == 1 {
 			lit, ok := digestEncoding(argNodes)
 			if !ok {
-				e.refuse(pos, "Hash.digest encoding must be a string literal")
+				e.refuse(pos, "%s.digest encoding must be a string literal", st.kind)
 				return "0", tUnknown, true
 			}
 			enc = lit
 		}
 		if enc != "hex" {
-			e.refuse(pos, "Hash.digest(%q) is not lowerable (only hex digests are projected)", enc)
+			e.refuse(pos, "%s.digest(%q) is not lowerable (only hex digests are projected)", st.kind, enc)
 			return "0", tUnknown, true
 		}
-		proj, ok := projectionByTS("crypto.hash")
+		surface := "crypto.hash"
+		callArgs := []string{st.algo, st.acc}
+		if st.kind == "Hmac" {
+			surface = "crypto.hmac"
+			callArgs = []string{st.algo, st.key, st.acc}
+		}
+		proj, ok := projectionByTS(surface)
 		if !ok {
-			e.refuse(pos, "crypto.hash is not a projected std surface (see StdProjectionTable)")
+			e.refuse(pos, "%s is not a projected std surface (see StdProjectionTable)", surface)
 			return "0", tUnknown, true
 		}
-		v, t := e.emitProjCall(proj, []string{st.algo, st.acc}, pos)
+		v, t := e.emitProjCall(proj, callArgs, pos)
 		if e.refused {
 			return "0", tUnknown, true
 		}
 		st.done = true
 		return v, t, true
 	default:
-		e.refuse(pos, "Hash.%s is not a projected surface", method)
+		e.refuse(pos, "%s.%s is not a projected surface", st.kind, method)
 		return "0", tUnknown, true
 	}
 }
@@ -7252,9 +7272,10 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	e.needImport(proj.Module)
 	// Node-plugin u32-status out-param shape: allocate out slots, call,
 	// panic on nonzero status (loud), then wrap outs per NodeOut.
-	// "string" takes no arguments; "string1"/"string2" take one/two
-	// string slices expanded to (&ptr, len) in-params ahead of the outs.
-	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "argv" || proj.NodeOut == "sized") {
+	// "string" takes no arguments; "string1"/"string2"/"string3" take
+	// one/two/three string slices expanded to (&ptr, len) in-params
+	// ahead of the outs.
+	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized") {
 		if proj.NodeOut == "sized" {
 			// size in, bare &ptr out whose length echoes the request.
 			if len(args) != 1 {
@@ -7294,16 +7315,22 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		if proj.NodeOut == "string2" {
 			want = 2
 		}
+		if proj.NodeOut == "string3" {
+			want = 3
+		}
 		if proj.NodeOut != "argv" && len(args) != want {
 			e.refuse(pos, "%s takes %d argument(s)", proj.TS, want)
 			return "0", tUnknown
 		}
 		pre := ""
 		argvRel := ""
-		if proj.NodeOut == "string1" || proj.NodeOut == "string2" {
+		if proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" {
 			n := 1
 			if proj.NodeOut == "string2" {
 				n = 2
+			}
+			if proj.NodeOut == "string3" {
+				n = 3
 			}
 			for _, a := range args[:n] {
 				ip, il := e.expandSlice(a)
