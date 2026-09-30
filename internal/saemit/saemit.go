@@ -329,6 +329,9 @@ type emitter struct {
 	// their class; instFnFields maps instance -> field -> inline arrow for
 	// function-typed fields; thisSelf is the current method receiver.
 	classDefs    map[string]*classDef
+	// staticDefs holds statics-only shells from heritage-refused classes
+	// (fold reads only; never instantiation; see recordClass).
+	staticDefs   map[string]*classDef
 	varClass     map[string]string
 	instFnFields map[string]map[string]*ast.Node
 	thisSelf     string
@@ -6307,6 +6310,29 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 		if v, ok := mathConstFold(pa.Expression.Text(), pa.Name().Text()); ok {
 			return v, tI32
 		}
+		// Class static literals fold through the class name or an
+		// instance of it (readonly-ness is enforced by refusing static
+		// writes: only reads reach here). Heritage shells live apart.
+		clsName := pa.Expression.Text()
+		if c, ok := e.varClass[clsName]; ok {
+			clsName = c
+		}
+		if cd, ok := e.classDefs[clsName]; ok {
+			if sv, ok := cd.statics[pa.Name().Text()]; ok {
+				if sv.typ == tString {
+					return e.lowerStringLiteral(sv.text), tString
+				}
+				return sv.text, sv.typ
+			}
+		}
+		if cd, ok := e.staticDefs[clsName]; ok {
+			if sv, ok := cd.statics[pa.Name().Text()]; ok {
+				if sv.typ == tString {
+					return e.lowerStringLiteral(sv.text), tString
+				}
+				return sv.text, sv.typ
+			}
+		}
 	}
 	// Accessor reads refuse precisely (inlining with `this` binding and
 	// side-effect ordering is a later slice).
@@ -7047,6 +7073,54 @@ type classDef struct {
 	// precisely until inline support lands; the class itself lowers).
 	getters map[string]*ast.Node
 	setters map[string]*ast.Node
+	// statics folds `static X = <literal>` (methods/getters excluded;
+	// non-literal statics keep the legacy instance-layout path).
+	statics map[string]staticVal
+}
+
+// staticVal is one folded static: SA literal text plus its type.
+type staticVal struct {
+	text string
+	typ  saType
+}
+
+// hasModifier reports a syntactic modifier keyword on a member.
+func hasModifier(m *ast.Node, kind ast.Kind) bool {
+	mods := m.Modifiers()
+	if mods == nil {
+		return false
+	}
+	for _, md := range mods.Nodes {
+		if md.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// staticLiteralText unwraps as/satisfies/non-null chains to a static
+// literal value (text, type, ok). Anything else is not foldable.
+func staticLiteralText(n *ast.Node) (string, saType, bool) {
+	for n != nil {
+		switch n.Kind {
+		case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression:
+			n = n.Expression()
+		case ast.KindNumericLiteral:
+			return n.Text(), tI32, true
+		case ast.KindStringLiteral:
+			if s, ok := stringLiteralText(n); ok {
+				return s, tString, true
+			}
+			return "", tUnknown, false
+		case ast.KindTrueKeyword:
+			return "1", tBool, true
+		case ast.KindFalseKeyword:
+			return "0", tBool, true
+		default:
+			return "", tUnknown, false
+		}
+	}
+	return "", tUnknown, false
 }
 
 // classDefOf resolves a base name to its class definition through
@@ -7079,11 +7153,39 @@ func (e *emitter) recordClass(st *ast.Node) {
 	if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
 		name = st.Name().Text()
 	}
+	def := &classDef{name: name, methods: map[string]*ast.Node{}}
+	// Static literals fold regardless of heritage (no instance needed);
+	// a heritage-refused class still publishes its statics for folding.
+	for _, m := range cd.Members.Nodes {
+		if m.Kind != ast.KindPropertyDeclaration {
+			continue
+		}
+		pd := m.AsPropertyDeclaration()
+		if m.Name() == nil || m.Name().Kind != ast.KindIdentifier {
+			continue
+		}
+		if !hasModifier(m, ast.KindStaticKeyword) {
+			continue
+		}
+		if text, typ, ok := staticLiteralText(pd.Initializer); ok {
+			if def.statics == nil {
+				def.statics = map[string]staticVal{}
+			}
+			def.statics[m.Name().Text()] = staticVal{text: text, typ: typ}
+		}
+	}
 	if cd.HeritageClauses != nil && len(cd.HeritageClauses.Nodes) > 0 {
+		// Statics-only shells live apart from instantiable defs so no
+		// instance path can observe a missing layout (see lowerNewClass).
+		if len(def.statics) > 0 {
+			if e.staticDefs == nil {
+				e.staticDefs = map[string]*classDef{}
+			}
+			e.staticDefs[name] = def
+		}
 		e.refuse(st, "class %s with extends/implements is not lowerable", name)
 		return
 	}
-	def := &classDef{name: name, methods: map[string]*ast.Node{}}
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
 	off := 0
 	for _, m := range cd.Members.Nodes {
@@ -7096,6 +7198,16 @@ func (e *emitter) recordClass(st *ast.Node) {
 			} else {
 				e.refuse(m, "computed field names are not lowerable")
 				continue
+			}
+			// Static literal members fold (never instance slots).
+			if hasModifier(m, ast.KindStaticKeyword) {
+				if text, typ, ok := staticLiteralText(pd.Initializer); ok {
+					if def.statics == nil {
+						def.statics = map[string]staticVal{}
+					}
+					def.statics[fname] = staticVal{text: text, typ: typ}
+					continue
+				}
 			}
 			saname := "ptr"
 			if pd.Type != nil {
@@ -7158,6 +7270,12 @@ func (e *emitter) recordClass(st *ast.Node) {
 // fields capture inline arrows per instance).
 func (e *emitter) lowerNewClass(name string, nw *ast.NewExpression, pos *ast.Node) (string, saType) {
 	def := e.classDefs[name]
+	if def == nil || def.layout == nil {
+		// Heritage/statics-only shells never instantiate (a missing
+		// layout used to panic here; hostile inputs must refuse).
+		e.refuse(pos, "class %s cannot be instantiated in the subset", name)
+		return "0", tUnknown
+	}
 	l := def.layout
 	h := e.freshTmp()
 	if l.size == 0 {

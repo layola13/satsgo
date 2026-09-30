@@ -186,6 +186,13 @@
   未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，
   另立项）。planck diag 613→584（正好是 getter 簇）；单测 1 项
   （放行 + 读写专属诊断）。
+- ✅ 类静态折叠（`static X = 字面量`，`as const` 链解包；实例布局排除静态）：
+  heritage 类早退前先收割静态进隔离 `staticDefs`（实例路径不可见），
+  读经类名/实例双路折叠；写保持原拒。途中抓到 heritage 部分 def 泄漏致
+  `lowerNewClass` 空指针 panic，已隔离 + 加哨兵拒（hostile 输入零 panic 门禁）。
+  planck `.TYPE` 诊断 28→0（extends 文件仍整拒，折叠生效待 extends 支持；
+  跨文件非 heritage 已单测锁定）；diag 584→564；286 逐字节一致；
+  单测 1 项（折叠 + 跨文件 + heritage 拒文）。
 - ✅ checker#7 首刀 binder 可见性（`typeCtx.declaredAt`，GetSymbolAtLocation）：
   typeof 尾部分支改走“scope 无 → binder 不可见才 unknown global”；
   所有权/别名仍归自建 scope（binder 无所有权概念，边界注明）。

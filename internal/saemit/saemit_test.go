@@ -695,6 +695,55 @@ func TestLowerAccessorRefuse(t *testing.T) {
 	}
 }
 
+func TestLowerStaticFold(t *testing.T) {
+	// Static literal members fold at reads (class name and instances).
+	src := "class C {\n  static TYPE = \"circle\" as const;\n  static N = 7;\n  v: i32;\n}\nfunction main(): i32 {\n  const c = new C();\n  const t: string = C.TYPE;\n  const n: i32 = c.N;\n  return t.length + n + c.v;\n}\n"
+	res := mustLower(t, "s1.ts", src)
+	if !strings.Contains(res.SAI, "circle") {
+		t.Errorf("missing folded string:\n%s", res.SAI)
+	}
+	// Instance layout skips folded statics (v stays at offset 0).
+	if !strings.Contains(res.SAI, "+ 0 as i32") {
+		t.Errorf("want instance field at +0:\n%s", res.SAI)
+	}
+	// Non-literal statics keep the legacy path byte-for-byte (wasteful
+	// but sound: all accesses share the same layout).
+	legacy := "class D {\n  static cfg = { a: 1 };\n  v: i32;\n}\nfunction main(): i32 {\n  const d = new D();\n  return d.v;\n}\n"
+	res = mustLower(t, "s2.ts", legacy)
+	if !strings.Contains(res.SAI, "+ 8 as i32") {
+		t.Errorf("want legacy instance load:\n%s", res.SAI)
+	}
+	// Cross-file statics fold without heritage in the way.
+	xf := map[string]string{
+		"main.ts": "import { C } from \"./shapes\";\nfunction main(): string {\n  return C.TYPE;\n}\n",
+		"shapes.ts": "export class C {\n  static TYPE = \"circle\" as const;\n}\n",
+	}
+	res2 := mustLowerProgram(t, "main.ts", xf)
+	if !strings.Contains(res2.SAI, "circle") {
+		t.Errorf("missing cross-file static fold:\n%s", res2.SAI)
+	}
+	// Heritage classes publish statics without panicking; the declaring
+	// file itself still refuses loudly for extends (program stays refused,
+	// but with the extends diagnostic, never a crash).
+	her := map[string]string{
+		"main.ts": "import { CircleShape } from \"./shapes\";\nfunction main(): string {\n  return CircleShape.TYPE;\n}\n",
+		"shapes.ts": "class Shape {\n}\nexport class CircleShape extends Shape {\n  static TYPE = \"circle\" as const;\n}\n",
+	}
+	r := LowerProgram("main.ts", her)
+	if !r.Refused {
+		t.Fatalf("expected extends refusal, got:\n%s", r.SAI)
+	}
+	hit := false
+	for _, d := range r.Diagnostics {
+		if strings.Contains(d, "extends/implements") {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("want extends diagnostic, got %v", r.Diagnostics)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)
