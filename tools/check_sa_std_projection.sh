@@ -90,6 +90,7 @@ node_symbols=(
   sa_node_plugin_path_join
   sa_node_plugin_path_resolve
   sa_node_plugin_crypto_random_bytes
+  sa_node_plugin_crypto_hash
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

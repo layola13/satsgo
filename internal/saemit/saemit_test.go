@@ -387,6 +387,32 @@ func TestLowerNodeCrypto(t *testing.T) {
 	}
 }
 
+func TestLowerNodeHash(t *testing.T) {
+	src := "import { createHash } from \"crypto\";\nfunction main(): i32 {\n  const h = createHash(\"sha256\");\n  h.update(\"abc\");\n  h.update(\"def\");\n  const d: string = h.digest();\n  const g = createHash(\"sha256\");\n  g.update(\"abc\");\n  const x: string = g.digest(\"hex\");\n  return d.length + x.length;\n}\n"
+	res := mustLower(t, "h1.ts", src)
+	for _, want := range []string{
+		"call @sa_string_concat",
+		"call @sa_node_plugin_crypto_hash",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	badEnc := "import { createHash } from \"crypto\";\nfunction main(): i32 {\n  const h = createHash(\"sha256\");\n  const d: string = h.digest(\"base64\");\n  return d.length;\n}\n"
+	if r := Lower("h2.ts", badEnc); !r.Refused {
+		t.Fatalf("expected base64 refusal, got:\n%s", r.SAI)
+	}
+	finalized := "import { createHash } from \"crypto\";\nfunction main(): i32 {\n  const h = createHash(\"sha256\");\n  const a: string = h.digest();\n  const b: string = h.digest();\n  return a.length + b.length;\n}\n"
+	if r := Lower("h3.ts", finalized); !r.Refused {
+		t.Fatalf("expected double-digest refusal, got:\n%s", r.SAI)
+	}
+	updArity := "import { createHash } from \"crypto\";\nfunction main(): i32 {\n  const h = createHash(\"sha256\");\n  h.update();\n  return 0;\n}\n"
+	if r := Lower("h4.ts", updArity); !r.Refused {
+		t.Fatalf("expected update-arity refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerTopLevelConst(t *testing.T) {
 	src := "var K = 42;\nvar S = \"hi\";\nvar nativeMax = Math.max;\nfunction main(): i32 {\n  return K + S.length + nativeMax(3, 8);\n}\n"
 	res := mustLower(t, "tc.ts", src)

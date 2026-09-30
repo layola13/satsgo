@@ -83,6 +83,11 @@
   长回显请求值；`crypto` 进 import 白名单含 `node:crypto` 前缀）。
   createHash/update/digest 链需句柄追踪（Map/Set 先例），保持大声拒，另立项。
   node 契约 21/21 全过；形状校验通过；全量单测过。
+- ✅ node `Hash` 链（createHash/update/digest）：`hashAcc` 按名追踪，update 经
+  `sa_string_concat` 折叠并 `assign` 重绑定，digest 走 `NodeOut "string2"`
+  （algo+data 双 slice，hex 原生）；非 hex 编码、 finalized 后使用、未知方法、
+  非字面编码一律大声拒（`ERR_CRYPTO_HASH_FINALIZED` 语义）。
+  node 契约 22/22 全过；形状校验通过；单测 4 项；发射形与契约逐位对齐。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

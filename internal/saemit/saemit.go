@@ -348,6 +348,13 @@ type emitter struct {
 	// mapVars/setVars mark Map/Set handles for backend dispatch.
 	mapVars map[string]bool
 	setVars map[string]bool
+	// hashAcc tracks crypto Hash accumulators by binding name: each
+	// entry buffers fed bytes as a plain string slice (updates fold via
+	// sa_string_concat) until digest() routes algo+buffer through the
+	// one-shot node crypto_hash primitive. lastHash carries the pending
+	// state from a createHash call to its declaration adoption.
+	hashAcc  map[string]*hashState
+	lastHash *hashState
 	// f64Vars marks float-valued bindings (sqrt and friends refuse them).
 	f64Vars map[string]bool
 	// dtsRet overrides top-level unannotated bodies with co-located .d.ts
@@ -384,6 +391,16 @@ type emitter struct {
 	// instruction would produce unreachable code. Mirrors the
 	// block_terminated rule in sa_plugin_ts/src/lowerer.zig.
 	terminated bool
+}
+
+// hashState is one crypto Hash accumulator: acc buffers fed bytes,
+// algo is the lowered algorithm operand, done latches at digest()
+// (update/digest past finalize refuse loudly, mirroring Node's
+// ERR_CRYPTO_HASH_FINALIZED).
+type hashState struct {
+	acc   string
+	algo  string
+	done  bool
 }
 
 func (e *emitter) freshTmp() string {
@@ -1012,6 +1029,10 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 	dl := list.AsVariableDeclarationList()
 	for _, d := range dl.Declarations.Nodes {
 		init := d.Initializer()
+		// A createHash call stages its accumulator here; only a plain
+		// declaration init adopts it (anything else drops it loudly
+		// below via the missing hashAcc entry).
+		e.lastHash = nil
 		if init == nil {
 			e.refuse(d, "declaration without initializer is not lowerable")
 			continue
@@ -1041,6 +1062,18 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		_ = atype
 		e.assign(name, val, operandKind(val, init), vtype, d)
 		e.trackBinding(name, d.AsVariableDeclaration().Type, init, vtype)
+		// Adopt a staged crypto Hash accumulator onto the bound name.
+		if e.lastHash != nil {
+			if init.Kind == ast.KindCallExpression {
+				if ce := init.AsCallExpression(); ce.Expression.Kind == ast.KindIdentifier && ce.Expression.Text() == "createHash" {
+					if e.hashAcc == nil {
+						e.hashAcc = map[string]*hashState{}
+					}
+					e.hashAcc[name] = e.lastHash
+				}
+			}
+			e.lastHash = nil
+		}
 		// `const b = new Box(...)` records the instance class for method
 		// dispatch and per-instance fn-field devirtualization.
 		if init.Kind == ast.KindNewExpression {
@@ -2398,6 +2431,11 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		}
 		// Named std imports: readFile(...) with `import { readFile } from "fs"`.
 		if mod, ok := e.importedFrom[fname]; ok {
+			// createHash stages a Hash accumulator (buffered slices until
+			// digest; see hashState). No SA is emitted for the call itself.
+			if mod == "crypto" && fname == "createHash" {
+				return e.lowerCreateHash(args, n)
+			}
 			if proj, ok := projectionByTS(mod + "." + fname); ok {
 				v, t := e.emitProjCall(proj, args, n)
 				// fs.readFile returns a BUFFER handle (u64!): unwrap via
@@ -2693,6 +2731,14 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 		return "", tUnknown, false
 	}
+	// Crypto Hash accumulators buffer slices until digest (Map/Set-style
+	// handle dispatch; unknown hash methods refuse loudly).
+	if st, ok := e.hashAcc[recv]; ok {
+		if v, t, ok := e.lowerHashMethod(recv, st, method, args, types, argNodes, pos); ok {
+			return v, t, true
+		}
+		return "", tUnknown, false
+	}
 	// Higher-order array sites inline the callback body (no function
 	// pointers; captures resolve in the caller scope).
 	if isHigherOrderMethod(method) {
@@ -2820,6 +2866,94 @@ func (e *emitter) mapKeySlice(key string, kt saType) string {
 	e.emit("store %s + 8, 4 as u64", slice)
 	e.declareOwned(slice)
 	return slice
+}
+
+// lowerCreateHash stages a crypto Hash accumulator: fed bytes buffer as
+// a plain string slice (empty at creation) until digest() routes the
+// algorithm plus buffer through the one-shot node crypto_hash primitive.
+// Only declaration-form adoption tracks the state (see lowerVarDeclList);
+// anything else using the result refuses loudly at the method site.
+func (e *emitter) lowerCreateHash(args []string, pos *ast.Node) (string, saType) {
+	if len(args) != 1 {
+		e.refuse(pos, "createHash takes exactly 1 argument (algorithm)")
+		return "0", tUnknown
+	}
+	acc := e.lowerStringLiteral("")
+	e.lastHash = &hashState{acc: acc, algo: args[0]}
+	return acc, tString
+}
+
+// lowerHashMethod routes Hash.update/digest over a staged accumulator.
+// update folds one string chunk via sa_string_concat and rebinds the
+// receiver (assign carries release discipline); digest emits the node
+// crypto_hash call (hex natively) and latches finalized. Non-literal or
+// non-hex encodings, post-finalize use, and unknown methods all refuse.
+func (e *emitter) lowerHashMethod(recv string, st *hashState, method string, args []string, types []saType, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	if st.done {
+		e.refuse(pos, "Hash is already digested (ERR_CRYPTO_HASH_FINALIZED)")
+		return "0", tUnknown, true
+	}
+	switch method {
+	case "update":
+		if len(args) != 1 {
+			e.refuse(pos, "Hash.update takes exactly 1 argument")
+			return "0", tUnknown, true
+		}
+		if len(types) > 0 && types[0] != tString {
+			e.refuse(pos, "Hash.update takes a string chunk")
+			return "0", tUnknown, true
+		}
+		e.needImport("sa_std/string.sai")
+		dp, dl := e.expandSlice(args[0])
+		ap, al := e.expandSlice(st.acc)
+		t := e.freshTmp()
+		e.emit("%s = call @sa_string_concat(%s, %s, %s, %s)", t, ap, al, dp, dl)
+		e.declareOwned(t)
+		e.assign(recv, t, "temp", tString, pos)
+		st.acc = t
+		return t, tString, true
+	case "digest":
+		enc := "hex"
+		if len(args) > 1 {
+			e.refuse(pos, "Hash.digest takes at most 1 argument (encoding)")
+			return "0", tUnknown, true
+		}
+		if len(args) == 1 {
+			lit, ok := digestEncoding(argNodes)
+			if !ok {
+				e.refuse(pos, "Hash.digest encoding must be a string literal")
+				return "0", tUnknown, true
+			}
+			enc = lit
+		}
+		if enc != "hex" {
+			e.refuse(pos, "Hash.digest(%q) is not lowerable (only hex digests are projected)", enc)
+			return "0", tUnknown, true
+		}
+		proj, ok := projectionByTS("crypto.hash")
+		if !ok {
+			e.refuse(pos, "crypto.hash is not a projected std surface (see StdProjectionTable)")
+			return "0", tUnknown, true
+		}
+		v, t := e.emitProjCall(proj, []string{st.algo, st.acc}, pos)
+		if e.refused {
+			return "0", tUnknown, true
+		}
+		st.done = true
+		return v, t, true
+	default:
+		e.refuse(pos, "Hash.%s is not a projected surface", method)
+		return "0", tUnknown, true
+	}
+}
+
+// digestEncoding reads a literal digest encoding from the call's argument
+// nodes (lowered operands lose literal text; non-literals refuse).
+func digestEncoding(argNodes *ast.ElementList) (string, bool) {
+	if argNodes == nil || len(argNodes.Nodes) != 1 {
+		return "", false
+	}
+	return stringLiteralText(argNodes.Nodes[0])
 }
 
 // lowerMapMethod projects Map methods onto sa_std/btree_map.sa.
@@ -7118,9 +7252,9 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	e.needImport(proj.Module)
 	// Node-plugin u32-status out-param shape: allocate out slots, call,
 	// panic on nonzero status (loud), then wrap outs per NodeOut.
-	// "string" takes no arguments; "string1" takes one string slice
-	// expanded to (&ptr, len) in-params ahead of the out slots.
-	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "argv" || proj.NodeOut == "sized") {
+	// "string" takes no arguments; "string1"/"string2" take one/two
+	// string slices expanded to (&ptr, len) in-params ahead of the outs.
+	if proj.Backend == "node" && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "argv" || proj.NodeOut == "sized") {
 		if proj.NodeOut == "sized" {
 			// size in, bare &ptr out whose length echoes the request.
 			if len(args) != 1 {
@@ -7157,15 +7291,24 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 		if proj.NodeOut == "string1" {
 			want = 1
 		}
+		if proj.NodeOut == "string2" {
+			want = 2
+		}
 		if proj.NodeOut != "argv" && len(args) != want {
 			e.refuse(pos, "%s takes %d argument(s)", proj.TS, want)
 			return "0", tUnknown
 		}
 		pre := ""
 		argvRel := ""
-		if proj.NodeOut == "string1" {
-			ip, il := e.expandSlice(args[0])
-			pre = "&" + ip + ", " + il + ", "
+		if proj.NodeOut == "string1" || proj.NodeOut == "string2" {
+			n := 1
+			if proj.NodeOut == "string2" {
+				n = 2
+			}
+			for _, a := range args[:n] {
+				ip, il := e.expandSlice(a)
+				pre += "&" + ip + ", " + il + ", "
+			}
 		}
 		if proj.NodeOut == "argv" {
 			// Pack parts as 16-byte {ptr,len} entries (SA slice layout,
