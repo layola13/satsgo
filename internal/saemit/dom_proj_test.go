@@ -67,3 +67,27 @@ func TestLowerDOMText(t *testing.T) {
 		t.Fatalf("expected unknown-prop refusal, got:\n%s", r.SAI)
 	}
 }
+
+func TestLowerDOMRead(t *testing.T) {
+	src := "function main(): string {\n  const el = document.createElement(\"div\");\n  el.textContent = \"hi\";\n  return el.textContent;\n}\n"
+	res := mustLower(t, "r1.ts", src)
+	for _, want := range []string{
+		"call @sax_dom_get_text",
+		"alloc 4096",
+		"panic",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Length reads on handles refuse (would be garbage).
+	ln := "function main(): i64 {\n  const el = document.createElement(\"div\");\n  return el.length;\n}\n"
+	if r := Lower("r2.ts", ln); !r.Refused {
+		t.Fatalf("expected length refusal, got:\n%s", r.SAI)
+	}
+	// innerHTML reads refuse (no get_inner_html contract).
+	ih := "function main(): string {\n  const el = document.createElement(\"div\");\n  return el.innerHTML;\n}\n"
+	if r := Lower("r3.ts", ih); !r.Refused {
+		t.Fatalf("expected innerHTML-read refusal, got:\n%s", r.SAI)
+	}
+}

@@ -94,6 +94,44 @@ func (e *emitter) lowerDomStore(base, field, rhs string, rtype saType, pos *ast.
 	return true
 }
 
+// domReadCap is the scratch size for textContent reads (get_text has no
+// size query; exact-full reads panic rather than silently truncate).
+const domReadCap = 4096
+
+// lowerDomLoad reads el.textContent through a caller scratch buffer (the
+// slice aliases the scratch, so both stay owned to scope exit). A full
+// buffer panics (loud truncation guard). innerHTML reads and every other
+// property refuse loudly (length included: DOM nodes have no slice len,
+// and the old fallthrough would have loaded garbage).
+func (e *emitter) lowerDomLoad(base, field string, pos *ast.Node) (string, saType, bool) {
+	if field != "textContent" {
+		e.refuse(pos, "DOM.%s is not readable yet (textContent only)", field)
+		return "0", tUnknown, true
+	}
+	buf := e.freshTmp()
+	e.emit("%s = alloc %d", buf, domReadCap)
+	e.declareOwned(buf)
+	n := e.freshTmp()
+	e.emit("%s = call @sax_dom_get_text(%s, %s, %d)", n, base, buf, domReadCap)
+	e.ownTemp(n)
+	fullL := e.freshLabel("dom_full")
+	okL := e.freshLabel("dom_ok")
+	full := e.freshTmp()
+	e.emit("%s = eq %s, %d", full, n, domReadCap)
+	e.emit("br %s -> %s, %s", full, fullL, okL)
+	e.emitRaw("%s:", fullL)
+	e.emit("panic")
+	e.terminated = true
+	e.emitRaw("%s:", okL)
+	e.terminated = false
+	out := e.freshTmp()
+	e.emit("%s = alloc 16", out)
+	e.emit("store %s + 0, %s as ptr", out, buf)
+	e.emit("store %s + 8, %s as u64", out, n)
+	e.declareOwned(out)
+	return out, tString, true
+}
+
 // lowerDomMethod routes handle.appendChild / handle.setAttribute. Only
 // tracked handles lower (names or call-result temps); unknown methods
 // (querySelector and friends) refuse loudly for later slices.

@@ -6275,6 +6275,14 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 			return v, tI32
 		}
 	}
+	// DOM handle reads claim their receivers first (a .length load on a
+	// handle would be garbage; see dom_proj.go).
+	if pa.Expression.Kind == ast.KindIdentifier && e.domVars[pa.Expression.Text()] {
+		if v, t, ok := e.lowerDomLoad(pa.Expression.Text(), pa.Name().Text(), n); ok {
+			return v, t
+		}
+		return "0", tUnknown
+	}
 	// s.length aliases the string slice len field — but a struct field
 	// literally named length wins (member chain first when a layout
 	// provides it).
