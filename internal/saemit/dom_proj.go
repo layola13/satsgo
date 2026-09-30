@@ -10,6 +10,8 @@
 package saemit
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 )
 
@@ -98,21 +100,17 @@ func (e *emitter) lowerDomStore(base, field, rhs string, rtype saType, pos *ast.
 // size query; exact-full reads panic rather than silently truncate).
 const domReadCap = 4096
 
-// lowerDomLoad reads el.textContent through a caller scratch buffer (the
-// slice aliases the scratch, so both stay owned to scope exit). A full
-// buffer panics (loud truncation guard). innerHTML reads and every other
-// property refuse loudly (length included: DOM nodes have no slice len,
-// and the old fallthrough would have loaded garbage).
-func (e *emitter) lowerDomLoad(base, field string, pos *ast.Node) (string, saType, bool) {
-	if field != "textContent" {
-		e.refuse(pos, "DOM.%s is not readable yet (textContent only)", field)
-		return "0", tUnknown, true
-	}
+// domRead emits a caller-scratch read: alloc, call sym(base, extra...,
+// buf, cap), full-buffer panics, wrap {buf, n} slice. The slice aliases
+// the scratch, so both stay owned to scope exit.
+func (e *emitter) domRead(sym, base string, extra []string, pos *ast.Node) (string, saType) {
+	_ = pos
 	buf := e.freshTmp()
 	e.emit("%s = alloc %d", buf, domReadCap)
 	e.declareOwned(buf)
+	callArgs := append(append([]string{base}, extra...), buf, "4096")
 	n := e.freshTmp()
-	e.emit("%s = call @sax_dom_get_text(%s, %s, %d)", n, base, buf, domReadCap)
+	e.emit("%s = call @%s(%s)", n, sym, strings.Join(callArgs, ", "))
 	e.ownTemp(n)
 	fullL := e.freshLabel("dom_full")
 	okL := e.freshLabel("dom_ok")
@@ -129,7 +127,31 @@ func (e *emitter) lowerDomLoad(base, field string, pos *ast.Node) (string, saTyp
 	e.emit("store %s + 0, %s as ptr", out, buf)
 	e.emit("store %s + 8, %s as u64", out, n)
 	e.declareOwned(out)
-	return out, tString, true
+	return out, tString
+}
+
+// domAttrKey maps readable attribute sugar to airlock keys.
+var domAttrKey = map[string]string{
+	"className": "class",
+	"id":        "id",
+}
+
+// lowerDomLoad reads el.textContent (native) and className/id sugar
+// (via get_attr). innerHTML reads, length and everything else refuse
+// loudly (a .length load on a handle would be garbage).
+func (e *emitter) lowerDomLoad(base, field string, pos *ast.Node) (string, saType, bool) {
+	if field == "textContent" {
+		v, t := e.domRead("sax_dom_get_text", base, nil, pos)
+		return v, t, true
+	}
+	if key, ok := domAttrKey[field]; ok {
+		ks := e.lowerStringLiteral(key)
+		kp, kl := e.expandSlice(ks)
+		v, t := e.domRead("sax_dom_get_attr", base, []string{kp, kl}, pos)
+		return v, t, true
+	}
+	e.refuse(pos, "DOM.%s is not readable yet (textContent/className/id only)", field)
+	return "0", tUnknown, true
 }
 
 // lowerDomMethod routes handle.appendChild / handle.setAttribute. Only
@@ -164,6 +186,28 @@ func (e *emitter) lowerDomMethod(recv, method string, args []string, types []saT
 		kp, kl := e.expandSlice(args[0])
 		vp, vl := e.expandSlice(args[1])
 		e.emit("call @sax_dom_set_attr(%s, %s, %s, %s, %s)", recv, kp, kl, vp, vl)
+		return "0", tVoid, true
+	case "getAttribute":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		if len(types) > 0 && types[0] != tString {
+			e.refuse(pos, "getAttribute takes a string key")
+			return "0", tUnknown, true
+		}
+		kp, kl := e.expandSlice(args[0])
+		v, t := e.domRead("sax_dom_get_attr", recv, []string{kp, kl}, pos)
+		return v, t, true
+	case "removeAttribute":
+		if len(args) != 1 {
+			return "", tUnknown, false
+		}
+		if len(types) > 0 && types[0] != tString {
+			e.refuse(pos, "removeAttribute takes a string key")
+			return "0", tUnknown, true
+		}
+		kp, kl := e.expandSlice(args[0])
+		e.emit("call @sax_dom_remove_attr(%s, %s, %s)", recv, kp, kl)
 		return "0", tVoid, true
 	default:
 		e.refuse(pos, "DOM.%s is not projected yet (see todo/04_tsx.md road 2)", method)

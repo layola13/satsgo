@@ -91,3 +91,22 @@ func TestLowerDOMRead(t *testing.T) {
 		t.Fatalf("expected innerHTML-read refusal, got:\n%s", r.SAI)
 	}
 }
+
+func TestLowerDOMAttrs(t *testing.T) {
+	src := "function main(): string {\n  const el = document.createElement(\"div\");\n  el.setAttribute(\"class\", \"box\");\n  const c: string = el.getAttribute(\"class\");\n  const id: string = el.id;\n  el.removeAttribute(\"class\");\n  return c + id;\n}\n"
+	res := mustLower(t, "a1.ts", src)
+	for _, want := range []string{
+		"call @sax_dom_set_attr",
+		"call @sax_dom_get_attr",
+		"call @sax_dom_remove_attr",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Non-string keys refuse loudly.
+	k := "function main(): i32 {\n  const el = document.createElement(\"div\");\n  el.getAttribute(7);\n  return 1;\n}\n"
+	if r := Lower("a2.ts", k); !r.Refused {
+		t.Fatalf("expected key-type refusal, got:\n%s", r.SAI)
+	}
+}

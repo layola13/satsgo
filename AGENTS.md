@@ -205,6 +205,8 @@
 - ✅ DOM 读（`el.textContent` 经调用方 4096 scratch + 满缓冲 panic 哨兵；
   slice 别名 scratch，双双持有到出口）：顺手堵了 `.length` 读句柄的
   静默垃圾（改大声拒）；`innerHTML` 读无契约拒。单测 1 项（形状 + 2 拒绝）。
+- ✅ DOM attrs 系（`getAttribute`/`removeAttribute` 方法 + `className`/`id`
+  糖读经共享 `domRead` helper；set 沿用）：单测 1 项（3 形状 + 1 拒绝）。
 - ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
   log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
   缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`
