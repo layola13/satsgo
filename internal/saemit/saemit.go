@@ -1858,6 +1858,11 @@ func (e *emitter) lowerStringLiteral(text string) string {
 func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	bin := n.AsBinaryExpression()
 	op := bin.OperatorToken.Kind
+	// typeof-against-"undefined" guards lower before anything else
+	// (see typeof_guard.go); other shapes fall through.
+	if v, t, ok := e.lowerTypeofGuard(n); ok {
+		return v, t
+	}
 	// assignment folds to register copy (plain `s = "..."` is NOT valid SA).
 	if op == ast.KindEqualsToken {
 		rhs, rtype := e.lowerExpr(bin.Right)

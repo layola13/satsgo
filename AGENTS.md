@@ -167,6 +167,10 @@
 - ✅ checker#5 捕获分析换共享 walk（删 `collectValueIdents` 手写 walk，
   arrow 捕获走 `valueUsedNames`）：286 输出逐字节一致（ Lower 口径 286/0
   前后相同）；单测 1 项（类型名不进捕获）。
+- ✅ checker#6 首刀 typeof 守卫（`typeof_guard.go` 模块）：`typeof v === "undefined"`
+  （双向、否定式）降为 `eq/ne v, 0`（子集 null/undefined→0，故精确）；
+  非标识操作数大声拒；planck `typeof min/max` 4 项消除（diag 617→613）。
+  单测 1 项（肯定/否定/非标识拒）；全量单测过。
 - ✅ tsx `useState`（路二任务 5，`tsx.go` 内）：前导语句仅限
   `const [x, setX] = useState(数字/布尔)`，state 块发射字面量，
   模板 `{x}` 插值；字符串初值/setter 引用/计算表达式/杂语句大声拒
