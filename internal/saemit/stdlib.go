@@ -175,6 +175,11 @@ var StdProjectionTable = []StdProjection{
 	// formatting primitive lands in sci.
 	{TS: "Date.now", Module: "sa_std/time.sai", Symbol: "sa_time_unix_ms", Ret: tI64,
 		Note: "zero-arg direct call; also backs new Date()"},
+	// Date.toISOString routes only through dateVars method dispatch
+	// (no direct TS surface); the i64 millis pass by value, no slice
+	// expansion (StrArgs deliberately absent).
+	{TS: "Date.toISOString", Module: "sa_std/time.sai", Symbol: "sa_time_iso_from_unix_ms", Ret: tString,
+		Note: "i64 millis in; ISO slice out"},
 	// ---- node plugin backend (pilot): native os surfaces ---------------
 	// Convention per node.sai: u32 status + &out slots; nonzero panics.
 	{TS: "os.platform", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_platform", Ret: tString,

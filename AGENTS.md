@@ -110,6 +110,11 @@
   `sa_time_unix_ms`（sci time.sai 早于参考 Date 支持，属补齐非分叉）；
   Date 对象窄化为 i64 millis（文档注明）；`new Date(x)`/parse/toISOString
   大声拒。sa_std 契约 50/50；单测 4 项（1 成功 + 3 拒绝）。
+- ✅ `toISOString`（sci `sa_time_iso_from_unix_ms` + satsgo `dateVars` 路由，
+  i64 值传递、零新发射分支）：UTC millis 精度，Hinnant 负值折叠；
+  途中修了 Zig 0.14 `{d:04}` 必带 `+` 号的 latent bug（deno 同款顺手修，
+  改手工补零）。C 实测 8 用例全过（含闰日，与 node 逐字对）、windows
+  交叉编译干净。sa_std 契约 51/51；单测 2 项（成功 + 元数拒绝）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
