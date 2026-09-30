@@ -28,6 +28,9 @@ type fileExports struct {
 	// defNS maps member -> local for `export default {a, b: c}` object
 	// defaults (namespace-object shape; methods/spreads refuse loudly).
 	defNS map[string]string
+	// defNSFrom holds a file key whose export surface becomes the default
+	// members (`export default nsAlias` passthrough; expanded at links).
+	defNSFrom string
 	// reexp maps a locally-exported name to "fileKey.remote" for
 	// `export {x} from` forms; starFrom lists `export * from` targets.
 	reexp    map[string]string
@@ -103,9 +106,9 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		parsed[path.Clean(p)] = sf
 		_ = parseErrs
 	}
-	// Value-position identifier uses per file (usage-based import
-	// erasure; computed once, shared by the graph filter and the
-	// per-file lowerer through fileLink.valueUsed).
+	// Namespace-import aliases per file (`import * as A`; feeds default
+	// passthrough) and value-position identifier uses per file.
+	nsAliasOf := map[string]map[string]string{}
 	usedOf := map[string]map[string]bool{}
 	for p, sf := range parsed {
 		usedOf[p] = valueUsedNames(sf.AsSourceFile().Statements.Nodes)
@@ -153,6 +156,12 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			tgt := resolveRelative(p, spec, files)
 			if tgt == "" {
 				continue
+			}
+			// Namespace-import aliases feed `export default ns` passthrough
+			// (link_nsobject module); recorded before usage erasure so a
+			// re-exported-only alias still resolves.
+			if st.Kind == ast.KindImportDeclaration {
+				recordNsAlias(st, tgt, nsAliasOf, p)
 			}
 			// Usage-based erasure: a relative import with no value-position
 			// use carries no runtime edge (esbuild importsNotUsedAsValues
@@ -364,7 +373,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					res.Refused = true
 					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: export = is not lowerable (use ES exports)", p))
 				} else if ea.Expression != nil && ea.Expression.Kind == ast.KindIdentifier {
-					expOf[p].defLocal = ea.Expression.Text()
+					// Namespace-alias passthrough (`export default ns`;
+					// link_nsobject module) wins over plain default.
+					if !adoptDefNSAlias(expOf[p], ea.Expression.Text(), nsAliasOf, p) {
+						expOf[p].defLocal = ea.Expression.Text()
+					}
 				} else if ea.Expression != nil && ea.Expression.Kind == ast.KindObjectLiteralExpression {
 					// `export default {a, b: c}`: namespace-object default;
 					// members must be plain local names (methods/spreads
@@ -418,7 +431,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		res.Diagnostics = append(res.Diagnostics, qualDiag...)
 		return res
 	}
-	// Per-file link environments.
+	// Per-file link environments (defNSFrom expands after re-exports
+	// resolved, so passthrough members track renames).
+	for _, p := range reachable {
+		expandDefNSFrom(expOf, prefixOf, p)
+	}
 	links := map[string]*fileLink{}
 	for _, p := range reachable {
 		lk := &fileLink{key: p, prefix: prefixOf[p], resolved: map[string]*modResolution{}, valueUsed: usedOf[p]}
@@ -595,46 +612,6 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 
 // moduleSpecifierOf extracts the literal module string of an import or a
 // re-export declaration ("" when absent/dynamic).
-// collectDefObject records `export default {a, b: c}` member -> local
-// pairs into exp.defNS ("" when clean, else the refusal message).
-// Shorthand and identifier-valued properties lower to direct qualified
-// calls; methods, spreads, accessors and computed/non-identifier values
-// refuse loudly (namespace objects carry no runtime shape).
-func collectDefObject(obj *ast.Node, exp *fileExports) string {
-	for _, prop := range obj.AsObjectLiteralExpression().Properties.Nodes {
-		switch prop.Kind {
-		case ast.KindShorthandPropertyAssignment:
-			if nm := prop.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
-				if exp.defNS == nil {
-					exp.defNS = map[string]string{}
-				}
-				exp.defNS[nm.Text()] = nm.Text()
-				continue
-			}
-			return "default-export object keys must be identifiers"
-		case ast.KindPropertyAssignment:
-			pa := prop.AsPropertyAssignment()
-			if pa.Name() == nil || pa.Name().Kind != ast.KindIdentifier {
-				return "default-export object keys must be identifiers"
-			}
-			if pa.Initializer == nil || pa.Initializer.Kind != ast.KindIdentifier {
-				return "default-export object values must be local names"
-			}
-			if exp.defNS == nil {
-				exp.defNS = map[string]string{}
-			}
-			exp.defNS[pa.Name().Text()] = pa.Initializer.Text()
-			continue
-		default:
-			return "default-export object supports only shorthand and identifier-valued properties"
-		}
-	}
-	if len(exp.defNS) == 0 {
-		return "default-export object is empty"
-	}
-	return ""
-}
-
 func moduleSpecifierOf(st *ast.Node) string {
 	switch st.Kind {
 	case ast.KindImportDeclaration:
@@ -719,8 +696,33 @@ func valueUsedNames(stmts []*ast.Node) map[string]bool {
 		if n == nil {
 			return
 		}
-		if n.Kind == ast.KindImportDeclaration || n.Kind == ast.KindExportDeclaration ||
-			n.Kind == ast.KindMetaProperty {
+		// Import specifiers bind; remote names are never local uses.
+		if n.Kind == ast.KindImportDeclaration || n.Kind == ast.KindMetaProperty {
+			return
+		}
+		// Local export lists reference local values (`export {X}` keeps
+		// X's edge; `export default <expr>` bodies count fully);
+		// re-export specifiers name remote values (the graph loop keeps
+		// that edge separately); type-only forms erase.
+		if n.Kind == ast.KindExportDeclaration {
+			if n.IsTypeOnly() {
+				return
+			}
+			ed := n.AsExportDeclaration()
+			if ed.ModuleSpecifier != nil {
+				return
+			}
+			for ch := range n.IterChildren() {
+				if ch.Kind == ast.KindExportSpecifier {
+					if ch.IsTypeOnly() {
+						continue
+					}
+				}
+				if pureTypeKinds[ch.Kind] {
+					continue
+				}
+				walk(ch)
+			}
 			return
 		}
 		if n.Kind == ast.KindIdentifier {

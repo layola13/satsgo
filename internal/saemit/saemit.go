@@ -2690,24 +2690,9 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 	} else {
 		return "", tUnknown, false
 	}
-	// Object-default import: `import D from` (target is
-	// `export default {..}`) + `D.m(1)` calls the qualified member
-	// (export must exist; checked at link time). Mirrors namespaces.
-	if _, ok := e.defNSImports[recv]; ok {
-		q, ok := e.importEnv[recv+"."+method]
-		if !ok {
-			e.refuse(pos, "%s.%s is not exported by its module", recv, method)
-			return "0", tUnknown, true
-		}
-		ret := e.importRet[recv+"."+method]
-		if ret == tVoid {
-			e.emit("call @%s(%s)", q, strings.Join(args, ", "))
-			return "0", tVoid, true
-		}
-		t := e.freshTmp()
-		e.emit("%s = call @%s(%s)", t, q, strings.Join(args, ", "))
-		e.ownTemp(t)
-		return t, ret, true
+	// Object-default member routing lives in link_nsobject.
+	if v, t, ok := routeDefNSMember(e, recv, method, args, pos); ok {
+		return v, t, true
 	}
 	// Namespace import: `import * as u` + `u.add(1)` calls the qualified
 	// callee (export must exist; checked at link time).
@@ -7313,21 +7298,8 @@ func (e *emitter) lowerImport(st *ast.Node) {
 			// (the object itself is not callable; bare D() stays loud).
 			if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
 				if len(res.defNS) > 0 {
-					local := nm.Text()
-					for member, tgt := range res.defNS {
-						q := res.prefix + tgt
-						if qq, ok := res.qualified[tgt]; ok {
-							q = qq
-						}
-						e.importEnv[local+"."+member] = q
-						if r, ok := res.rets[tgt]; ok {
-							e.importRet[local+"."+member] = r
-						} else {
-							e.importRet[local+"."+member] = tI32
-						}
-						e.importedNames[local+"."+member] = true
-					}
-					e.defNSImports[local] = true
+					// Object-default member binding lives in link_nsobject.
+					bindDefNSMembers(e, nm.Text(), res)
 					if clause.NamedBindings == nil {
 						return
 					}

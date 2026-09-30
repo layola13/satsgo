@@ -201,6 +201,22 @@ func TestLowerProgramDefaultObject(t *testing.T) {
 	}
 }
 
+func TestLowerProgramDefaultPassthrough(t *testing.T) {
+	// `import * as ns` + `export default ns` exposes the target surface
+	// through the default (planck main.ts shape).
+	files := map[string]string{
+		"lib.ts":   "export function add(a: i32, b: i32): i32 { return a + b; }\n",
+		"mid.ts":   "import * as lib from \"./lib\";\nexport default lib;\n",
+		"entry.ts": "import * as lib from \"./lib\";\nimport D from \"./mid\";\nfunction main(): i32 { return lib.add(1, 2) + D.add(3, 4); }\n",
+	}
+	res := mustLowerProgram(t, "entry.ts", files)
+	for _, want := range []string{"call @lib__add(1, 2)", "call @lib__add(3, 4)"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+}
+
 func TestLowerProgramImportFirst(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { sub } from \"./util\";\nfunction main(): i32 { return add(1, 2) + sub(5, 1); }\n",

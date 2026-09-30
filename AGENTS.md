@@ -12,6 +12,8 @@
 - 2026-09-29：单文件 286/286 demo 全过（`56ad4ec8d`）；todo/ 四阶段计划已定。
 - 远端：`layola13/satsgo`，`main` 分支；认证经 `$GIT_TOKEN` + credential helper，禁止落盘。
 - 约束：扫测门禁、拒则大声、复用 `sci/sa_std`；新符号进 `StdProjectionTable` + `check_sa_std_projection.sh`。
+- 分模块开发：新特性独立成文件（如 `link_nsobject.go`、`link_erasure.go`），
+  `saemit.go`/`program.go` 只留 thin hook；单文件超约 500 行或职责超两项即拆分。
 - 复用面已扩展：`sa_plugin_node`（`node.sai`/`node.sal` + `all_exported_symbols.txt` 共 408 符号，
   fs/buffer/crypto/net/dns/http/os/path/process… 原生后端）优先于自造；
   `deno.sai`/`bun.sai` 同理（`Deno.*`/`Bun.*` 命名空间）。投影表需加 Backend 维度
