@@ -229,6 +229,14 @@
   单测 1 项（模块/函数探针 + 声明名不折 + 常量分支 + 防 panic 回归）；
   全套件绿、286 sweep 零 diff；planck 620→567（top-level-variable 240→186，
   零新增-kind）；真机 `sa check` 过 + `sa run` exit 6 与 node 差分一致。
+- ✅ Math 别名值位（`lowerExpr` 标识尾 + 单测 1 项，planck math_ 簇）：
+  `2 * math_PI` 此前直落裸名（`mul 2, math_PI`，未声明寄存器静默陷阱；
+  286/sweep 全无覆盖故潜伏）。现 const 投影（PI/E）经 `mathConstFold`
+  与直用同表折叠（单测锁别名与直用逐字节一致），函数投影值位大声拒
+  （调拨仍走 `lowerMathCall`）。sin/cos/atan2 无后端（sci 政策：禁 tsgo
+  原创运行时），声明与调用双位大声如旧，待 sci `sa_math_*` 另立项。
+  全套件绿、286 sweep 零 diff；真机 `sa check` 过 + `sa run` exit 22
+  （整数子集 PI=3，与 node 22.84… 截断一致）。
 - ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
   整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
   `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。

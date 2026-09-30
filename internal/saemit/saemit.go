@@ -2054,6 +2054,19 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		}
 		// Unbound reads in program mode may name a cross-file member
 		// (emitting the bare name traps at check with no diagnostic).
+		// Top-level `var f = Math.g` aliases in value position resolve
+		// first: const projections (PI/E) fold to their literal through
+		// the same table as direct Math.PI; function projections have no
+		// first-class value, so they refuse loudly (calls route through
+		// lowerMathCall). Without this the bare alias falls through as
+		// an undeclared register (silent trap: `mul 2, math_PI`).
+		if g, ok := e.mathAliases[e.qualify(n.Text())]; ok {
+			if lit, ok := mathConstFold("Math", g); ok {
+				return lit, tI32
+			}
+			e.refuse(n, "Math.%s as a value is not lowerable (call Math.%s(...) directly)", g, g)
+			return "0", tUnknown
+		}
 		if r := e.linkRoute(n.Text()); r != "" {
 			e.refuse(n, "%s", r)
 			return "0", tUnknown

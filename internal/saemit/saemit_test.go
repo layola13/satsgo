@@ -260,6 +260,32 @@ func TestLowerMathExtra(t *testing.T) {
 	}
 }
 
+func TestMathAliasValue(t *testing.T) {
+	// Alias value-uses resolve through the projection table exactly
+	// like direct Math uses: const folds to the literal, inline targets
+	// refuse loudly. Before, `2 * math_PI` emitted `mul 2, math_PI`
+	// (undeclared register, silent check-trap).
+	alias := "const math_PI = Math.PI;\nfunction main(): i32 {\n  return 2 * math_PI;\n}\n"
+	direct := "function main(): i32 {\n  return 2 * Math.PI;\n}\n"
+	ra := mustLower(t, "mav1.ts", alias)
+	rd := mustLower(t, "mav2.ts", direct)
+	if ra.SAI != rd.SAI {
+		t.Errorf("alias and direct must lower identically:\n--- alias:\n%s\n--- direct:\n%s", ra.SAI, rd.SAI)
+	}
+	if !strings.Contains(ra.SAI, "mul 2, 3") {
+		t.Errorf("want folded mul 2, 3, got:\n%s", ra.SAI)
+	}
+	// Function projections have no first-class value (call them).
+	fn := "const math_abs = Math.abs;\nfunction main(): i32 {\n  const f = math_abs;\n  return f(1);\n}\n"
+	r := Lower("mav3.ts", fn)
+	if !r.Refused {
+		t.Fatalf("expected function-value refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(diagText(r), "as a value is not lowerable") {
+		t.Errorf("missing value diagnostic: %v", r.Diagnostics)
+	}
+}
+
 func TestLowerFindLastFrom(t *testing.T) {
 	fl := "function main(): i32 {\n  const a: number[] = [1, 2, 3, 2, 1];\n  return a.findLast((x) => x == 2) * 10 + a.findLastIndex((x) => x == 2);\n}\n"
 	res := mustLower(t, "fl.ts", fl)
