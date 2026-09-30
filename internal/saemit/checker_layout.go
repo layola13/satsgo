@@ -7,6 +7,8 @@
 package saemit
 
 import (
+	"strings"
+
 	"github.com/microsoft/typescript-go/internal/ast"
 	"github.com/microsoft/typescript-go/internal/checker"
 )
@@ -152,7 +154,12 @@ func (e *emitter) recordTypeAlias(st *ast.Node) {
 	if name == "<anon>" {
 		return
 	}
-	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
+	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
+	for _, tp := range st.TypeParameters() {
+		if nm := tp.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+			l.tparams = append(l.tparams, nm.Text())
+		}
+	}
 	off := 0
 	for _, m := range tgt.AsTypeLiteralNode().Members.Nodes {
 		if m.Kind != ast.KindPropertySignature {
@@ -162,12 +169,14 @@ func (e *emitter) recordTypeAlias(st *ast.Node) {
 		if !ok {
 			continue
 		}
-		saname := saNameOfType(m.AsPropertySignatureDeclaration().Type)
+		ftn := m.AsPropertySignatureDeclaration().Type
+		saname := saNameOfType(ftn)
 		size, align := widthOf(saname)
 		off = alignTo(off, align)
 		l.fields = append(l.fields, fname)
 		l.types[fname] = saname
-		l.ftypes[fname] = rawTypeName(m.AsPropertySignatureDeclaration().Type)
+		l.ftypes[fname] = rawTypeName(ftn)
+		l.fdefs[fname] = ftn
 		l.offsets[fname] = off
 		off += size
 	}
@@ -179,6 +188,128 @@ func (e *emitter) recordTypeAlias(st *ast.Node) {
 		e.layouts = map[string]*layout{}
 	}
 	e.layouts[name] = l
+}
+
+// monoKey renders the canonical instantiation key for a type node:
+// `Box<i32,string>` for generic references (args recurse), else the raw
+// type name. Bare names and non-references key by themselves.
+func monoKey(tn *ast.Node) string {
+	if tn == nil {
+		return "i32"
+	}
+	if tn.Kind != ast.KindTypeReference {
+		return rawTypeName(tn)
+	}
+	name := tn.AsTypeReferenceNode().TypeName.Text()
+	args := tn.TypeArguments()
+	if len(args) == 0 {
+		return name
+	}
+	parts := make([]string, 0, len(args))
+	for _, a := range args {
+		parts = append(parts, monoKey(a))
+	}
+	key := name + "<"
+	for i, p := range parts {
+		if i > 0 {
+			key += ","
+		}
+		key += p
+	}
+	return key + ">"
+}
+
+// instantiateLayout monomorphizes a recorded generic interface over its
+// type arguments (field widths recomputed from substituted args; nested
+// generic fields recurse). Results cache under the canonical key; unknown
+// templates and arity mismatches fall back to the bare layout (legacy).
+func (e *emitter) instantiateLayout(name string, args []*ast.Node) *layout {
+	tmpl, ok := e.layouts[name]
+	if !ok || len(tmpl.tparams) == 0 || len(args) != len(tmpl.tparams) {
+		return e.layouts[name]
+	}
+	parts := make([]string, 0, len(args))
+	for _, a := range args {
+		parts = append(parts, monoKey(a))
+	}
+	cacheKey := name + "<" + strings.Join(parts, ",") + ">"
+	if l, ok := e.layouts[cacheKey]; ok {
+		return l
+	}
+	pmap := map[string]*ast.Node{}
+	for i, p := range tmpl.tparams {
+		pmap[p] = args[i]
+	}
+	l := &layout{name: cacheKey, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
+	off := 0
+	for _, fname := range tmpl.fields {
+		saname, fkey := e.substFieldType(tmpl.fdefs[fname], pmap)
+		size, align := widthOf(saname)
+		off = alignTo(off, align)
+		l.fields = append(l.fields, fname)
+		l.types[fname] = saname
+		l.ftypes[fname] = fkey
+		l.fdefs[fname] = tmpl.fdefs[fname]
+		l.offsets[fname] = off
+		off += size
+	}
+	l.size = off
+	if e.layouts == nil {
+		e.layouts = map[string]*layout{}
+	}
+	e.layouts[cacheKey] = l
+	return l
+}
+
+// substFieldType resolves one field type under a param mapping to an SA
+// name plus a nested-layout key. Bare parameters substitute the actual
+// argument (instantiating generic args so the layout exists for descent);
+// closed generic references instantiate under their canonical key;
+// parameterised nesting (List<T> inside Box<T>) keeps the raw name and
+// refuses loudly downstream (recursive generics need lazy instantiation).
+func (e *emitter) substFieldType(ftn *ast.Node, pmap map[string]*ast.Node) (string, string) {
+	if ftn != nil && ftn.Kind == ast.KindTypeReference {
+		refName := ftn.AsTypeReferenceNode().TypeName.Text()
+		if arg, ok := pmap[refName]; ok && arg != nil {
+			if arg.Kind == ast.KindTypeReference {
+				if sub := e.instantiateLayout(arg.AsTypeReferenceNode().TypeName.Text(), arg.TypeArguments()); sub != nil {
+					return saNameOfType(arg), sub.name
+				}
+			}
+			return saNameOfType(arg), monoKey(arg)
+		}
+		if fargs := ftn.TypeArguments(); len(fargs) > 0 {
+			closed := true
+			for _, a := range fargs {
+				if a.Kind == ast.KindTypeReference {
+					if _, ok := pmap[a.AsTypeReferenceNode().TypeName.Text()]; ok {
+						closed = false
+					}
+				}
+			}
+			if closed {
+				if sub := e.instantiateLayout(refName, fargs); sub != nil {
+					return "ptr", sub.name
+				}
+			}
+			return "ptr", refName
+		}
+	}
+	return saNameOfType(ftn), rawTypeName(ftn)
+}
+
+// layoutOfAnnotation resolves a TypeReference annotation to its layout,
+// instantiating generics (Box<i32> vs Box<string> get distinct widths);
+// bare names keep the legacy direct lookup. Never refuses (nil on miss).
+func (e *emitter) layoutOfAnnotation(tn *ast.Node) *layout {
+	if tn == nil || tn.Kind != ast.KindTypeReference {
+		return nil
+	}
+	name := tn.AsTypeReferenceNode().TypeName.Text()
+	if args := tn.TypeArguments(); len(args) > 0 {
+		return e.instantiateLayout(name, args)
+	}
+	return e.layouts[name]
 }
 
 // layoutOfNode resolves a struct layout for a base register, consulting

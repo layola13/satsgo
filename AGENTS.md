@@ -179,6 +179,11 @@
   typeof 尾部分支改走“scope 无 → binder 不可见才 unknown global”；
   所有权/别名仍归自建 scope（binder 无所有权概念，边界注明）。
   单测扩展 2 项（单文件 unknown 锁定 + program 导入可见性翻转）；全量单测过。
+- ✅ checker#3 泛型单态化（`checker_layout.go`：模板记参 + `monoKey` 规范键 +
+  `instantiateLayout` 缓存 + `layoutOfAnnotation` 接入注解/联合）：
+  `Box<i32>` 与 `Box<string>` 布局分宽；未知模板/元数错位回退裸布局；
+  递归泛型嵌套保持 raw 键（懒实例化另立项）。286 输出逐字节一致
+  （纯加法）；单测 1 项（分宽断言）；planck 持平 613。
 - ✅ tsx `useState`（路二任务 5，`tsx.go` 内）：前导语句仅限
   `const [x, setX] = useState(数字/布尔)`，state 块发射字面量，
   模板 `{x}` 插值；字符串初值/setter 引用/计算表达式/杂语句大声拒

@@ -212,6 +212,10 @@ type layout struct {
 	ftypes  map[string]string // field -> raw TS type name (for nested layouts)
 	offsets map[string]int
 	size    int
+	// tparams lists generic parameter names (empty for plain shapes);
+	// fdefs keeps each field's declared type node for instantiation.
+	tparams []string
+	fdefs   map[string]*ast.Node
 }
 
 // saNameOfType mirrors sa_plugin_ts saTypeOf: SA scalars pass through,
@@ -1123,9 +1127,10 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	if e.arrElems == nil {
 		e.arrElems = map[string]string{}
 	}
-	// struct-typed bindings remember their layout for field access.
+	// struct-typed bindings remember their layout for field access
+	// (generic annotations instantiate per type argument).
 	if annot != nil && annot.Kind == ast.KindTypeReference {
-		if l, ok := e.layouts[annot.AsTypeReferenceNode().TypeName.Text()]; ok {
+		if l := e.layoutOfAnnotation(annot); l != nil {
 			e.varLayouts[name] = l
 		}
 	}
@@ -1134,7 +1139,7 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	if annot != nil && (annot.Kind == ast.KindUnionType || annot.Kind == ast.KindIntersectionType) {
 		for _, m := range annot.AsUnionTypeNode().Types.Nodes {
 			if m.Kind == ast.KindTypeReference {
-				if l, ok := e.layouts[m.AsTypeReferenceNode().TypeName.Text()]; ok {
+				if l := e.layoutOfAnnotation(m); l != nil {
 					e.varLayouts[name] = l
 					break
 				}
@@ -6967,7 +6972,12 @@ func (e *emitter) recordLayout(st *ast.Node) {
 		name = st.Name().Text()
 	}
 	_ = decl
-	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
+	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
+	for _, tp := range st.TypeParameters() {
+		if nm := tp.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+			l.tparams = append(l.tparams, nm.Text())
+		}
+	}
 	off := 0
 	for _, m := range st.AsInterfaceDeclaration().Members.Nodes {
 		if m.Kind != ast.KindPropertySignature {
@@ -6978,12 +6988,14 @@ func (e *emitter) recordLayout(st *ast.Node) {
 		if !ok {
 			continue
 		}
-		saname := saNameOfType(m.AsPropertySignatureDeclaration().Type)
+		ftn := m.AsPropertySignatureDeclaration().Type
+		saname := saNameOfType(ftn)
 		size, align := widthOf(saname)
 		off = alignTo(off, align)
 		l.fields = append(l.fields, fname)
 		l.types[fname] = saname
-		l.ftypes[fname] = rawTypeName(m.AsPropertySignatureDeclaration().Type)
+		l.ftypes[fname] = rawTypeName(ftn)
+		l.fdefs[fname] = ftn
 		l.offsets[fname] = off
 		off += size
 	}

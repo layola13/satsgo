@@ -25,6 +25,16 @@ func TestCheckerLayoutInferred(t *testing.T) {
 	if r := Lower("l3.ts", bad); !r.Refused {
 		t.Fatalf("expected unknown-shape refusal, got:\n%s", r.SAI)
 	}
+	// Monomorphization: Box<i32> and Box<string> get distinct field
+	// widths (value at +4 as i32 vs +8 as ptr).
+	mono := "interface Box<T> { tag: i32; value: T; }\nfunction getI(b: Box<i32>): i32 { return b.value; }\nfunction getS(b: Box<string>): string { return b.value; }\nfunction main(): i32 {\n  return 0;\n}\n"
+	res = mustLower(t, "l5.ts", mono)
+	if !strings.Contains(res.SAI, "+ 4 as i32") {
+		t.Errorf("missing i32 field load:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "+ 8 as ptr") {
+		t.Errorf("missing string field load:\n%s", res.SAI)
+	}
 	// Type-alias object shapes record layouts, including nested descent
 	// through alias-typed fields (planck TransformValue/RotValue shape).
 	nested := "export type RotValue = { c: i32; s: i32 };\nexport type TransformValue = { p: P; q: RotValue };\ninterface P { x: i32; y: i32 }\nfunction f(t: TransformValue): i32 {\n  return t.q.c + t.p.x;\n}\nfunction main(): i32 {\n  return 1;\n}\n"
