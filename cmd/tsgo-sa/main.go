@@ -156,6 +156,7 @@ func runBuild(args []string) {
 		Entry:      entryRel,
 		Files:      files,
 		UseCache:   !*noCacheF,
+		NpmDeps:    saemit.ReadNpmDeps(dir),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: scaffold: %v\n", err)

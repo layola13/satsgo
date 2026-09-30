@@ -16,6 +16,9 @@ import (
 type ProgramScaffoldOptions struct {
 	// ModuleName is the sa.mod package name.
 	ModuleName string
+	// NpmDeps surfaces package.json runtime deps as commented require
+	// lines in sa.mod plus a subset-report section (see npm_deps.go).
+	NpmDeps []NpmDep
 	// Entry is the program entry path key (e.g. "main.ts").
 	Entry string
 	// Files maps a slash path to TS source text.
@@ -113,6 +116,13 @@ func programReport(opts ProgramScaffoldOptions, res ProgramResult) string {
 			fmt.Fprintf(&b, "package %s: no SA backend yet (see todo/03_npm.md)\n", u)
 		}
 	}
+	// package.json runtime deps (imported or not; versions verbatim).
+	if len(opts.NpmDeps) > 0 {
+		fmt.Fprintf(&b, "== package.json dependencies (%d) ==\n", len(opts.NpmDeps))
+		for _, d := range opts.NpmDeps {
+			fmt.Fprintf(&b, "npm %s@%s: record in sa.mod require after sa pkg resolution\n", d.Name, d.Version)
+		}
+	}
 	return b.String()
 }
 
@@ -134,7 +144,7 @@ func writeProgramArtifacts(outDir string, opts ProgramScaffoldOptions, res Progr
 	_ = os.WriteFile(filepath.Join(outDir, "src", "main.sai"), []byte(res.SAI), 0o644)
 	_ = os.WriteFile(filepath.Join(outDir, "subset-report.txt"), []byte(report), 0o644)
 	files := map[string]string{
-		"sa.mod":    fmt.Sprintf("package \"%s\"\n", opts.ModuleName),
+		"sa.mod":    fmt.Sprintf("package \"%s\"\n", opts.ModuleName) + npmRequireComments(opts.NpmDeps),
 		"README.md": readmeText(opts.ModuleName, "src/main.sai"),
 		"build.sh":  buildScriptText("src/main.sai"),
 	}

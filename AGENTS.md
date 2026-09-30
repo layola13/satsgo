@@ -150,6 +150,10 @@
   planck `main.ts` 形环/默认告警清零。单测 1 项；全量单测过。
 - ✅ 用法擦除模块化（`link_erasure.go` + `link_erasure_test.go`，实现随测试
   同迁；旧文件历史 gofmt 问题不碰）：零行为变更，全量单测过。
+- ✅ package.json→sa.mod（`npm_deps.go` 模块，JEV 降级方案）：`dependencies`
+  排序读出（dev 排除、版本原文），`sa.mod` 注释 require 行（`#` 为合法注释，
+  hash 缺位故不输出有效行）+ subset-report 独立 section；CLI build 链透传，
+  单文件口径不涉及。单测 2 项；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
