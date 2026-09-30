@@ -138,6 +138,10 @@
   planck program 口径环告警清零，收敛到单点 `export default {...}`
   （命名空间对象，另立项）；真值循环单测同步修正（b 必须真实调用 main）。
   单测 1 项（擦除成功 + 值环仍拒）；全量单测过。
+- ✅ 命名空间对象 p1（`export default {a, b: c}` + `D.m()` 路由）：
+  `fileExports.defNS`/`modResolution.defNS`/`defNSImports` 三件套，
+  复用 nsImports 绑定形状；planck program 口径 **56 文件链接**（此前 0）。
+  单测 1 项；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

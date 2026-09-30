@@ -162,6 +162,45 @@ func TestLowerProgramUsageErasedEdge(t *testing.T) {
 	}
 }
 
+func TestLowerProgramDefaultObject(t *testing.T) {
+	// `export default {a, b: c}` binds per-member; D.m() routes.
+	files := map[string]string{
+		"main.ts":  "import T from \"./timer\";\nfunction main(): i32 { return T.now() + T.diff(3); }\n",
+		"timer.ts": "export function now(): i32 { return 7; }\nexport function diff(t: i32): i32 { return t - 1; }\nexport default { now, diff };\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	for _, want := range []string{"call @timer__now()", "call @timer__diff(3)"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Renamed member routes to the local.
+	ren := map[string]string{
+		"main.ts": "import T from \"./timer\";\nfunction main(): i32 { return T.tick(); }\n",
+		"timer.ts": "export function now(): i32 { return 7; }\nexport default { tick: now };\n",
+	}
+	res = mustLowerProgram(t, "main.ts", ren)
+	if !strings.Contains(res.SAI, "call @timer__now()") {
+		t.Errorf("missing renamed call:\n%s", res.SAI)
+	}
+	// Unknown member refuses loudly.
+	bad := map[string]string{
+		"main.ts": "import T from \"./timer\";\nfunction main(): i32 { return T.bogus(); }\n",
+		"timer.ts": "export function now(): i32 { return 7; }\nexport default { now };\n",
+	}
+	if r := LowerProgram("main.ts", bad); !r.Refused {
+		t.Fatalf("expected unknown-member refusal, got:\n%s", r.SAI)
+	}
+	// Method/spread values refuse at export scan (timer linked via use).
+	meth := map[string]string{
+		"main.ts": "import T from \"./timer\";\nfunction main(): i32 { return T.m(); }\n",
+		"timer.ts": "export default { m() { return 1; } };\n",
+	}
+	if r := LowerProgram("main.ts", meth); !r.Refused {
+		t.Fatalf("expected method-value refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerProgramImportFirst(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { sub } from \"./util\";\nfunction main(): i32 { return add(1, 2) + sub(5, 1); }\n",

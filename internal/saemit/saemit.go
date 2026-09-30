@@ -337,6 +337,10 @@ type emitter struct {
 	importEnv     map[string]string
 	importRet     map[string]saType
 	nsImports     map[string]string
+	// defNSImports marks default imports of object defaults
+	// (`import D from` where the target is `export default {..}`);
+	// D.member routes through importEnv like namespace members.
+	defNSImports map[string]bool
 	localDefs     map[string]bool
 	importedNames map[string]bool
 	// linkExports maps every linked top-level function name to its file
@@ -2685,6 +2689,25 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		recv = pa.Expression.Text()
 	} else {
 		return "", tUnknown, false
+	}
+	// Object-default import: `import D from` (target is
+	// `export default {..}`) + `D.m(1)` calls the qualified member
+	// (export must exist; checked at link time). Mirrors namespaces.
+	if _, ok := e.defNSImports[recv]; ok {
+		q, ok := e.importEnv[recv+"."+method]
+		if !ok {
+			e.refuse(pos, "%s.%s is not exported by its module", recv, method)
+			return "0", tUnknown, true
+		}
+		ret := e.importRet[recv+"."+method]
+		if ret == tVoid {
+			e.emit("call @%s(%s)", q, strings.Join(args, ", "))
+			return "0", tVoid, true
+		}
+		t := e.freshTmp()
+		e.emit("%s = call @%s(%s)", t, q, strings.Join(args, ", "))
+		e.ownTemp(t)
+		return t, ret, true
 	}
 	// Namespace import: `import * as u` + `u.add(1)` calls the qualified
 	// callee (export must exist; checked at link time).
@@ -7259,6 +7282,9 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		if e.nsImports == nil {
 			e.nsImports = map[string]string{}
 		}
+		if e.defNSImports == nil {
+			e.defNSImports = map[string]bool{}
+		}
 		if e.importedNames == nil {
 			e.importedNames = map[string]bool{}
 		}
@@ -7282,13 +7308,35 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		}
 		if imp.ImportClause != nil {
 			clause := imp.ImportClause.AsImportClause()
-			// Default import binds the target's default export.
+			// Default import binds the target's default export. An object
+			// default (`export default {a}`) binds per-member instead
+			// (the object itself is not callable; bare D() stays loud).
 			if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
-				if res.defQualified == "" {
-					e.refuse(st, "%s has no default export", mod)
-					return
-				}
-				callable := false
+				if len(res.defNS) > 0 {
+					local := nm.Text()
+					for member, tgt := range res.defNS {
+						q := res.prefix + tgt
+						if qq, ok := res.qualified[tgt]; ok {
+							q = qq
+						}
+						e.importEnv[local+"."+member] = q
+						if r, ok := res.rets[tgt]; ok {
+							e.importRet[local+"."+member] = r
+						} else {
+							e.importRet[local+"."+member] = tI32
+						}
+						e.importedNames[local+"."+member] = true
+					}
+					e.defNSImports[local] = true
+					if clause.NamedBindings == nil {
+						return
+					}
+				} else {
+					if res.defQualified == "" {
+						e.refuse(st, "%s has no default export", mod)
+						return
+					}
+					callable := false
 				if res.defLocal != "" {
 					_, callable = res.rets[res.defLocal]
 				} else if _, ok := res.rets["default"]; ok {
@@ -7307,6 +7355,7 @@ func (e *emitter) lowerImport(st *ast.Node) {
 					e.importRet[local] = tI32
 				}
 				e.importedNames[local] = true
+				}
 				// `import d, { x } from`: fall through to named bindings.
 				if clause.NamedBindings == nil {
 					return

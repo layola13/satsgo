@@ -115,3 +115,9 @@ backlog：基于用法的擦除（binder 查值位引用，无则消边），独
 - 下一瓶颈（另立项）：模块命名空间对象（`export default {...}` /
   `import * as planck` + `planck.now()` 成员路由；`main.ts` 即此形）。
   planck 单文件 7/53/0 基线不变（program 口径以链接成功文件计，需重测）。
+- ✅ 命名空间对象 p1（2026-09-30）：`export default {a, b: c}` 记录成员→本地
+  （方法/spread/空对象大声拒），`import D from` 按成员绑定 qualified，
+  `D.m()` 经 `defNSImports` 路由（裸 `D()` 保持大声）；planck program 口径
+  从 0 文件推进到 **56 文件链接**，残留顶层变量/typeof 等单文件已知聚类。
+  单测 1 项（成功/改名/未知成员拒/方法值拒）；全量单测过。p2（`export default ns`
+  透传）与 p3（解构/展开/动态键）另立项。

@@ -25,6 +25,9 @@ type fileExports struct {
 	rets    map[string]saType
 	// defLocal is the local name of the default export ("" if none).
 	defLocal string
+	// defNS maps member -> local for `export default {a, b: c}` object
+	// defaults (namespace-object shape; methods/spreads refuse loudly).
+	defNS map[string]string
 	// reexp maps a locally-exported name to "fileKey.remote" for
 	// `export {x} from` forms; starFrom lists `export * from` targets.
 	reexp    map[string]string
@@ -62,6 +65,8 @@ type modResolution struct {
 	qualified    map[string]string
 	defLocal     string
 	defQualified string
+	// defNS maps default-object member -> local (see fileExports.defNS).
+	defNS map[string]string
 }
 
 // ProgramResult is the linked program outcome.
@@ -360,6 +365,14 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: export = is not lowerable (use ES exports)", p))
 				} else if ea.Expression != nil && ea.Expression.Kind == ast.KindIdentifier {
 					expOf[p].defLocal = ea.Expression.Text()
+				} else if ea.Expression != nil && ea.Expression.Kind == ast.KindObjectLiteralExpression {
+					// `export default {a, b: c}`: namespace-object default;
+					// members must be plain local names (methods/spreads
+					// refuse loudly; see collectDefObject).
+					if msg := collectDefObject(ea.Expression, expOf[p]); msg != "" {
+						res.Refused = true
+						res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: %s", p, msg))
+					}
 				} else {
 					res.Refused = true
 					res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: non-identifier default export is not lowerable", p))
@@ -429,6 +442,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				qualified:    expOf[tgt].reexpQualified,
 				defLocal:     expOf[tgt].defLocal,
 				defQualified: defQ,
+				defNS:        expOf[tgt].defNS,
 			}
 		}
 		links[p] = lk
@@ -581,6 +595,46 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 
 // moduleSpecifierOf extracts the literal module string of an import or a
 // re-export declaration ("" when absent/dynamic).
+// collectDefObject records `export default {a, b: c}` member -> local
+// pairs into exp.defNS ("" when clean, else the refusal message).
+// Shorthand and identifier-valued properties lower to direct qualified
+// calls; methods, spreads, accessors and computed/non-identifier values
+// refuse loudly (namespace objects carry no runtime shape).
+func collectDefObject(obj *ast.Node, exp *fileExports) string {
+	for _, prop := range obj.AsObjectLiteralExpression().Properties.Nodes {
+		switch prop.Kind {
+		case ast.KindShorthandPropertyAssignment:
+			if nm := prop.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+				if exp.defNS == nil {
+					exp.defNS = map[string]string{}
+				}
+				exp.defNS[nm.Text()] = nm.Text()
+				continue
+			}
+			return "default-export object keys must be identifiers"
+		case ast.KindPropertyAssignment:
+			pa := prop.AsPropertyAssignment()
+			if pa.Name() == nil || pa.Name().Kind != ast.KindIdentifier {
+				return "default-export object keys must be identifiers"
+			}
+			if pa.Initializer == nil || pa.Initializer.Kind != ast.KindIdentifier {
+				return "default-export object values must be local names"
+			}
+			if exp.defNS == nil {
+				exp.defNS = map[string]string{}
+			}
+			exp.defNS[pa.Name().Text()] = pa.Initializer.Text()
+			continue
+		default:
+			return "default-export object supports only shorthand and identifier-valued properties"
+		}
+	}
+	if len(exp.defNS) == 0 {
+		return "default-export object is empty"
+	}
+	return ""
+}
+
 func moduleSpecifierOf(st *ast.Node) string {
 	switch st.Kind {
 	case ast.KindImportDeclaration:
