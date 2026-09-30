@@ -164,3 +164,59 @@ func TestLowerHeritageRefusals(t *testing.T) {
 		}
 	}
 }
+
+// Method calls on class-annotated params/locals resolve through the
+// checker (no scope maps are written, so cross-function staleness cannot
+// form). Rebound, nullable and static receivers stay loud.
+func TestCheckerClassDispatch(t *testing.T) {
+	cls := `class C {
+  v: i32 = 0;
+  constructor(n: i32) { this.v = n; }
+  set(n: i32): void { this.v = n; }
+  get(): i32 { return this.v + 1; }
+}
+`
+	// Annotated param dispatches (was: first-class refusal).
+	param := cls + "function f(c: C): i32 {\n  return c.get();\n}\nfunction main(): i32 {\n  const c = new C(3);\n  return f(c);\n}\n"
+	res := mustLower(t, "cd1.ts", param)
+	if !strings.Contains(res.SAI, "L_m_end_") {
+		t.Errorf("want inlined method body, got:\n%s", res.SAI)
+	}
+	// Annotated local dispatches.
+	local := cls + "function main(): i32 {\n  const c: C = new C(3);\n  return c.get();\n}\n"
+	res = mustLower(t, "cd2.ts", local)
+	if !strings.Contains(res.SAI, "L_m_end_") {
+		t.Errorf("want inlined method body, got:\n%s", res.SAI)
+	}
+	// Field stores never rebind the root: still dispatch.
+	store := cls + "function f(c: C): i32 {\n  c.set(9);\n  return c.get();\n}\nfunction main(): i32 {\n  const c = new C(0);\n  return f(c);\n}\n"
+	res = mustLower(t, "cd3.ts", store)
+	if !strings.Contains(res.SAI, "L_m_end_") {
+		t.Errorf("want inlined method body after field store, got:\n%s", res.SAI)
+	}
+	// Plain rebinds may no longer hold the class: stay loud.
+	rebind := cls + "function f(c: C): i32 {\n  c = 5;\n  return c.get();\n}\nfunction main(): i32 {\n  const c = new C(3);\n  return f(c);\n}\n"
+	if r := Lower("cd4.ts", rebind); !r.Refused {
+		t.Fatalf("expected rebind refusal, got:\n%s", r.SAI)
+	}
+	// Nullable receivers skip the null guard nowhere: stay loud.
+	nul := cls + "function f(c: C | null): i32 {\n  return c.get();\n}\nfunction main(): i32 {\n  const c = new C(3);\n  return f(c);\n}\n"
+	if r := Lower("cd5.ts", nul); !r.Refused {
+		t.Fatalf("expected nullable refusal, got:\n%s", r.SAI)
+	}
+	// Static call position never dispatches as an instance.
+	staticSrc := "class C {\n  v: i32 = 0;\n  constructor(n: i32) { this.v = n; }\n  static create(n: i32): i32 { return n * 2; }\n  get(): i32 { return this.v + 1; }\n}\nfunction main(): i32 {\n  return C.create(21);\n}\n"
+	if r := Lower("cd6.ts", staticSrc); !r.Refused {
+		t.Fatalf("expected static-call refusal, got:\n%s", r.SAI)
+	}
+	// Cross-function reuse without annotation stays loud (stateless:
+	// nothing leaks from the annotated sibling).
+	sib := cls + "function f(c: C): i32 {\n  return c.get();\n}\nfunction g(c): i32 {\n  return c.get();\n}\nfunction main(): i32 {\n  const c = new C(3);\n  return f(c) + g(c);\n}\n"
+	r := Lower("cd7.ts", sib)
+	if !r.Refused {
+		t.Fatalf("expected unannotated-sibling refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(diagText(r), "first-class") {
+		t.Errorf("want first-class diagnostic, got: %v", r.Diagnostics)
+	}
+}

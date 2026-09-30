@@ -237,6 +237,18 @@
   原创运行时），声明与调用双位大声如旧，待 sci `sa_math_*` 另立项。
   全套件绿、286 sweep 零 diff；真机 `sa check` 过 + `sa run` exit 22
   （整数子集 PI=3，与 node 22.84… 截断一致）。
+- ✅ 方法分派注解接收（`checkerClassOf` + `reboundNames` + 静态隔离，
+  planck 一阶函数值簇破局）：`varClass` 仅 `new` 初始化写入，注解形参
+  （`fA: Fixture`、`input: DistanceInput` 类）调方法恒拒。现 checker
+  声明类型直命名类（跨文件亦可），零映射写入故无跨函数陈旧；
+  回退守卫四重：重绑定（`reboundNames` 预扫，成员存储除外）、可空、
+  静态位（类名本身）、未声明/非类；静态方法不再进实例表
+  （同名静态曾按源序遮蔽实例项，`v.normalize()` 误报 arity）。
+  单测 1 项（形参/局部翻转 + 字段存储不毒化 + 重绑定/可空/静态/
+  未注解兄弟大声）；全套件绿、286 sweep 零 diff；
+  planck 567→538（first-class 135→97；新增皆大声：内联体成员真缺口
+  + 跨文件内联环境提示，失配静态提示为既有文案问题另记）；
+  真机 `sa check` 过 + `sa run` exit 40 与 node 差分一致。
 - ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
   整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
   `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。

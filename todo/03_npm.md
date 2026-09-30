@@ -129,3 +129,9 @@ backlog：基于用法的擦除（binder 查值位引用，无则消边），独
   零新增；残留 25 经核全为真值缺口：跨文件 const/enum 值导入另立项）。
   单测 1 项（擦除 + 显式 type + 值误绑仍大声）；286 零 diff；
   链接产物真机 check + run 差分一致（7==7）。
+- ✅ 方法分派注解接收（2026-09-30，`checkerClassOf` + `reboundNames` +
+  实例表静态隔离）：注解形参方法调用由拒转过（`Fixture`/`DistanceInput`
+  类形参，跨文件亦可；零映射写入 + 四重回退守卫）。
+  planck program 口径 567→538（first-class 135→97；新增皆大声，
+  内联体成员真缺口为主）；单测 1 项（7 子项）；286 零 diff；
+  真机 check + run 差分一致（40==40）。

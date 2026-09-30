@@ -213,6 +213,55 @@ func assignedNames(stmts []*ast.Node) map[string]bool {
 	return out
 }
 
+// reboundNames collects whole-file plain-rebound bare names: `x = ...`,
+// compound and logical assignments, and `++`/`--` whose target is a bare
+// identifier. Member/index stores (`o.x =`, `a[i] =`) never rebind the
+// root and are excluded. Over-approximating across scopes stays sound:
+// it only keeps method dispatch loud. Sibling of assignedNames (which
+// folds member roots and serves slot claiming instead).
+func reboundNames(stmts []*ast.Node) map[string]bool {
+	out := map[string]bool{}
+	var walk func(n *ast.Node)
+	walk = func(n *ast.Node) {
+		if n == nil {
+			return
+		}
+		mark := func(t *ast.Node) {
+			if t != nil && t.Kind == ast.KindIdentifier {
+				out[t.Text()] = true
+			}
+		}
+		switch n.Kind {
+		case ast.KindBinaryExpression:
+			bin := n.AsBinaryExpression()
+			op := bin.OperatorToken.Kind
+			if op == ast.KindEqualsToken || isCompoundAssign(op) || isLogicAssign(op) {
+				mark(bin.Left)
+			}
+		case ast.KindPrefixUnaryExpression:
+			un := n.AsPrefixUnaryExpression()
+			if un.Operator == ast.KindPlusPlusToken || un.Operator == ast.KindMinusMinusToken {
+				mark(un.Operand)
+			}
+		case ast.KindPostfixUnaryExpression:
+			un := n.AsPostfixUnaryExpression()
+			if un.Operator == ast.KindPlusPlusToken || un.Operator == ast.KindMinusMinusToken {
+				mark(un.Operand)
+			}
+		}
+		for ch := range n.IterChildren() {
+			if pureTypeKinds[ch.Kind] {
+				continue
+			}
+			walk(ch)
+		}
+	}
+	for _, st := range stmts {
+		walk(st)
+	}
+	return out
+}
+
 // modStateOf resolves a bare-or-qualified name to its slot (nil when the
 // name is not module state). Namespace bodies qualify first, matching
 // reads; identity everywhere else.

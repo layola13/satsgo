@@ -451,6 +451,12 @@ type emitter struct {
 	// marks string header temps so handle-aware param sites alias instead
 	// of half-copying.
 	modAssigned map[string]bool
+	// reboundNames collects whole-file PLAIN-rebound bare names (`x =`,
+	// compound/logic-assign, `++`/`--` on a bare identifier; member/index
+	// stores excluded since they never rebind the root). The checker
+	// method-dispatch fallback consults it: a rebound class-typed name
+	// may no longer hold its declared class, so it stays loud.
+	reboundNames map[string]bool
 	modVars     map[string]*modState
 	modStrTmps  map[string]bool
 	// entryStmts collects top-level executable statements for the
@@ -590,8 +596,11 @@ type inlineRetState struct {
 func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	stmts := sf.AsSourceFile().Statements.Nodes
 	// Pre-scan: whole-file assigned names, so top-level fold-vs-slot
-	// decisions precede later assignments (see modstate.go).
+	// decisions precede later assignments (see modstate.go). The plain-
+	// rebound set guards checker method dispatch (rebound class-typed
+	// names may no longer hold their declared class).
 	e.modAssigned = assignedNames(stmts)
+	e.reboundNames = reboundNames(stmts)
 	// Plan entry synthesis before signatures: top executables collect,
 	// a colliding user `main` renames (see entry_top.go).
 	e.planEntry(stmts)
@@ -3628,7 +3637,14 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		return "0", tUnknown, true
 	}
 	// Class methods inline at the call site (no vtables in SA-ASM).
-	if className, ok := e.varClass[recv]; ok {
+	// Scope maps win; otherwise the checker names the receiver's class
+	// (annotated params/locals, including cross-file types). Map writes
+	// never happen here, so cross-function staleness cannot form.
+	className, ok := e.varClass[recv]
+	if !ok && pa.Expression.Kind == ast.KindIdentifier {
+		className, ok = e.checkerClassOf(pa.Expression)
+	}
+	if ok {
 		if v, t, ok := e.lowerClassMethodCall(recv, className, method, args, argNodes, pos); ok {
 			return v, t, true
 		}
@@ -8413,6 +8429,50 @@ func (e *emitter) classDefOf(base string) *classDef {
 	return e.classDefs[base]
 }
 
+// checkerClassOf resolves a method receiver's class through the checker
+// when scope maps miss: annotated params/locals (including cross-file
+// class types) carry no varClass entry, but their declared type names
+// the class exactly. No maps are written, so nothing can go stale across
+// functions. Refusals stay loud for: nullable receivers (unwrapping to
+// the class would skip the null guard), names that resolve to the class
+// itself (static call position; statics route elsewhere), unknown and
+// non-class types. Nil-safe; callers keep their diagnostics.
+func (e *emitter) checkerClassOf(base *ast.Node) (string, bool) {
+	if e.tcx == nil || base == nil || base.Kind != ast.KindIdentifier {
+		return "", false
+	}
+	if _, isClass := e.classDefs[base.Text()]; isClass {
+		return "", false
+	}
+	// Only lowered bindings dispatch: module scratch consts and failed
+	// imports carry class types in the checker but own no register, so
+	// inlining under their name would cascade dangling-receiver
+	// diagnostics (or worse). Scope presence is the binding proof.
+	if e.lookupBinding(base.Text()) == nil {
+		return "", false
+	}
+	// Rebound names may no longer hold their declared class (the checker
+	// reports the declared type, not the reassigned value): stay loud.
+	if e.reboundNames[base.Text()] {
+		return "", false
+	}
+	if e.tcx.nullable(base) {
+		return "", false
+	}
+	name, alias := e.tcx.layoutTypeName(base)
+	if name != "" {
+		if _, ok := e.classDefs[name]; ok {
+			return name, true
+		}
+	}
+	if alias != "" {
+		if _, ok := e.classDefs[alias]; ok {
+			return alias, true
+		}
+	}
+	return "", false
+}
+
 // recordClass registers a class shape. Only data fields contribute layout;
 // single extends flattens (see class_heritage.go), implements erases;
 // accessors and static blocks refuse loudly.
@@ -8624,6 +8684,12 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			def.ctor = m
 		case ast.KindMethodDeclaration:
 			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+				// Static methods never dispatch as instance methods
+				// (same-named statics would shadow/arity-clash the
+				// instance entry; static calls stay loud elsewhere).
+				if hasModifier(m, ast.KindStaticKeyword) {
+					continue
+				}
 				if def.methods == nil {
 					def.methods = map[string]*ast.Node{}
 				}
