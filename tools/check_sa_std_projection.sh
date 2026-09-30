@@ -50,6 +50,7 @@ symbols=(
   sa_time_get_full_year sa_time_get_month sa_time_get_date
   sa_time_get_hours sa_time_get_minutes sa_time_get_seconds
   sa_time_get_milliseconds sa_time_get_day
+  sa_time_set_field
 )
 
 fail=0

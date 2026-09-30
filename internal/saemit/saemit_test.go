@@ -539,9 +539,18 @@ func TestLowerDate(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
 	}
-	setters := "function main(): i64 {\n  const d = new Date();\n  d.setFullYear(2025);\n  return d.getTime();\n}\n"
-	if r := Lower("d8.ts", setters); !r.Refused {
-		t.Fatalf("expected setter refusal, got:\n%s", r.SAI)
+	setters := "function main(): i64 {\n  const d = new Date();\n  const t: i64 = d.setFullYear(2025);\n  d.setMonth(0);\n  d.setDate(1);\n  d.setHours(0);\n  d.setMinutes(0);\n  d.setSeconds(0);\n  d.setMilliseconds(0);\n  return t + d.getTime();\n}\n"
+	res = mustLower(t, "d8.ts", setters)
+	for _, want := range []string{
+		"call @sa_time_set_field",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	setArity := "function main(): i64 {\n  const d = new Date();\n  d.setFullYear();\n  return d.getTime();\n}\n"
+	if r := Lower("d9.ts", setArity); !r.Refused {
+		t.Fatalf("expected setter-arity refusal, got:\n%s", r.SAI)
 	}
 }
 

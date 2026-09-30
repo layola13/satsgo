@@ -2787,6 +2787,26 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 				}
 			}
 		}
+		// Setters take one value, mutate (rebind) and return new millis.
+		// Contract order is (ms, field, value); the id splices explicitly
+		// (table Extra appends last, which would misorder).
+		if len(args) == 1 {
+			fields := map[string]string{
+				"setFullYear": "0", "setMonth": "1", "setDate": "2",
+				"setHours": "3", "setMinutes": "4", "setSeconds": "5",
+				"setMilliseconds": "6",
+			}
+			if fid, ok := fields[method]; ok {
+				if proj, ok := projectionByTS("Date." + method); ok {
+					v, t := e.emitProjCall(proj, []string{recv, fid, args[0]}, pos)
+					if e.refused {
+						return "0", tUnknown, true
+					}
+					e.assign(recv, v, "temp", tI64, pos)
+					return v, t, true
+				}
+			}
+		}
 	}
 	// Class methods inline at the call site (no vtables in SA-ASM).
 	if className, ok := e.varClass[recv]; ok {

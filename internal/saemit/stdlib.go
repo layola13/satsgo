@@ -194,6 +194,16 @@ var StdProjectionTable = []StdProjection{
 	{TS: "Date.getSeconds", Module: "sa_std/time.sai", Symbol: "sa_time_get_seconds", Ret: tI64, Note: ""},
 	{TS: "Date.getMilliseconds", Module: "sa_std/time.sai", Symbol: "sa_time_get_milliseconds", Ret: tI64, Note: ""},
 	{TS: "Date.getDay", Module: "sa_std/time.sai", Symbol: "sa_time_get_day", Ret: tI64, Note: ""},
+	// Date setters route only through dateVars method dispatch; the field
+	// id is spliced by the branch (contract order ms, field, value), the
+	// receiver rebinds to the new millis (mutate + return, like Hash.update).
+	{TS: "Date.setFullYear", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 0"},
+	{TS: "Date.setMonth", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 1, 0-based"},
+	{TS: "Date.setDate", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 2"},
+	{TS: "Date.setHours", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 3"},
+	{TS: "Date.setMinutes", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 4"},
+	{TS: "Date.setSeconds", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 5"},
+	{TS: "Date.setMilliseconds", Module: "sa_std/time.sai", Symbol: "sa_time_set_field", Ret: tI64, Note: "field 6"},
 	// ---- node plugin backend (pilot): native os surfaces ---------------
 	// Convention per node.sai: u32 status + &out slots; nonzero panics.
 	{TS: "os.platform", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_platform", Ret: tString,

@@ -124,6 +124,11 @@
   `getTimezoneOffset` 恒 0 UTC，setter 大声拒）：C 实测 24 用例与 node
   逐字对（含 1969 负值；另验证 NY 时区下实现为 UTC 固定）；
   sa_std 契约 60/60；单测 2 项（8 调用形状 + setter 拒绝）。
+- ✅ Date setter 系（sci `sa_time_set_field` 单原语 + satsgo 分支显式组装
+  `(ms,field,value)` 并 `assign` 重绑定）：JS 翻转语义全归一（month 13/
+  date 0/hours 25/负值）；途中抓到 Extra 追加导致的实参错位，改显式 splicing。
+  C 实测 11 用例与 node 逐字对；sa_std 契约 61/61；
+  单测 2 项（7 调用形状 + 元数拒绝）。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
