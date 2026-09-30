@@ -283,3 +283,79 @@ func TestLowerProgramReexpSameFileRefuses(t *testing.T) {
 		t.Errorf("missing import-it-first diagnostic: %v", r.Diagnostics)
 	}
 }
+
+// Cross-file misses route to the defining file (kind-aware): importable
+// kinds point at the import, the rest name their gap honestly.
+func TestLinkRouteMisses(t *testing.T) {
+	lib := "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\nexport const K = 7;\nexport class C {\n  v: i32 = 0;\n  constructor(n: i32) {\n    this.v = n;\n  }\n}\nnamespace N {\n  export function f(): i32 {\n    return 1;\n  }\n}\n"
+	cases := []struct {
+		name string
+		main string
+		want string
+	}{
+		{"call", "function main(): i32 {\n  return add(1, 2);\n}\n", "add is defined in lib.ts; import it first"},
+		{"const read", "function main(): i32 {\n  return K;\n}\n", "K is defined in lib.ts, but cross-file value imports are not lowerable yet"},
+		{"new", "function main(): i32 {\n  const c = new C(3);\n  return c.v;\n}\n", "C is defined in lib.ts; import it first"},
+		{"extends", "class D extends C {\n}\nfunction main(): i32 {\n  return 0;\n}\n", "C is defined in lib.ts; import it first"},
+		{"ns call", "function main(): i32 {\n  return N.f();\n}\n", "N is a namespace defined in lib.ts; cross-file namespace member access is not lowerable yet"},
+		{"private const", "function main(): i32 {\n  return h();\n}\n", "h is defined in lib.ts but not exported"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			files := map[string]string{"main.ts": tc.main, "lib.ts": lib}
+			if tc.name == "private const" {
+				files["lib.ts"] = "function h(): i32 {\n  return 1;\n}\n"
+			}
+			res := LowerProgram("main.ts", files)
+			if !res.Refused {
+				t.Fatalf("expected refusal, got:\n%s", res.SAI)
+			}
+			got := strings.Join(res.Diagnostics, "\n")
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("missing %q in diagnostics:\n%s", tc.want, got)
+			}
+		})
+	}
+	// Importable kinds turn positive end to end (check-clean).
+	okFiles := map[string]string{
+		"main.ts": "import { add } from \"./lib\";\nimport { C } from \"./lib\";\nfunction main(): i32 {\n  const c = new C(3);\n  return add(1, 2) + c.v;\n}\n",
+		"lib.ts":  lib,
+	}
+	res := mustLowerProgram(t, "main.ts", okFiles)
+	// Calls route qualified; `new` inlines the cross-file layout.
+	for _, want := range []string{"call @lib__add(1, 2)", "alloc 4"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in linked output:\n%s", want, res.SAI)
+		}
+	}
+}
+
+// Importing from a file with namespace functions lowers (no
+// self-collision, no duplicated diagnostics).
+func TestLinkNsFileImport(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",
+		"lib.ts":  "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\nnamespace N {\n  export function f(): i32 {\n    return 1;\n  }\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if !strings.Contains(res.SAI, "call @lib__add(1, 2)") {
+		t.Errorf("missing qualified call in linked output:\n%s", res.SAI)
+	}
+	for _, d := range res.Diagnostics {
+		if strings.Contains(d, "collides with an existing definition") {
+			t.Errorf("spurious self-collision diagnostic: %s", d)
+		}
+	}
+	// A genuine same-name definition still refuses (not the seed).
+	bad := map[string]string{
+		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",
+		"lib.ts":  "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\nnamespace N {\n  export function f(): i32 {\n    return 1;\n  }\n}\nfunction N_f(): i32 {\n  return 2;\n}\n",
+	}
+	r := LowerProgram("main.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected genuine-collision refusal, got:\n%s", r.SAI)
+	}
+	if !strings.Contains(strings.Join(r.Diagnostics, "\n"), "collides with an existing definition") {
+		t.Errorf("missing collision diagnostic: %v", r.Diagnostics)
+	}
+}

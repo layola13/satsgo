@@ -87,6 +87,12 @@ func (e *emitter) parseHeritage(cd *ast.ClassDeclaration, st *ast.Node) (heritag
 func (e *emitter) inheritClass(name, base string, def *classDef, l *layout, st *ast.Node) bool {
 	bdef, ok := e.classDefs[base]
 	if !ok || bdef.layout == nil {
+		// Cross-file bases route to the defining file instead of the
+		// generic unknown-base refuse.
+		if r := e.linkRoute(base); r != "" {
+			e.refuse(st, "%s", r)
+			return false
+		}
 		e.refuse(st, "class %s extends unknown base %s (declare the base class first)", name, base)
 		return false
 	}

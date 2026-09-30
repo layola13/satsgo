@@ -76,6 +76,51 @@ type modResolution struct {
 	defNS map[string]string
 }
 
+// unreachableOrder lists files outside the reachable set in sorted order
+// (deterministic diagnostics: map iteration order must not leak).
+func unreachableOrder(parsed map[string]*ast.SourceFile, reachable []string) []string {
+	inReach := map[string]bool{}
+	for _, p := range reachable {
+		inReach[p] = true
+	}
+	var out []string
+	for p := range parsed {
+		if !inReach[p] {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// linkRoute renders the cross-file miss diagnostic for name: importable
+// kinds point at the import, unimportable ones name their gap honestly.
+// Returns "" when the name is unknown or linking is off (callers fall
+// through to their existing diagnostics).
+func (e *emitter) linkRoute(name string) string {
+	if e.link == nil {
+		return ""
+	}
+	file, ok := e.linkExports[name]
+	if !ok {
+		return ""
+	}
+	// Namespaces and values aren't name-importable at all: their message
+	// names the gap regardless of export flags (namespaces are never in
+	// expOf.exports). Functions and classes point at the import when
+	// exported, else at the missing export.
+	switch e.linkExportKind[name] {
+	case "namespace":
+		return fmt.Sprintf("%s is a namespace defined in %s; cross-file namespace member access is not lowerable yet", name, file)
+	case "value":
+		return fmt.Sprintf("%s is defined in %s, but cross-file value imports are not lowerable yet", name, file)
+	}
+	if e.linkExported[name] {
+		return fmt.Sprintf("%s is defined in %s; import it first", name, file)
+	}
+	return fmt.Sprintf("%s is defined in %s but not exported (export it, then import it)", name, file)
+}
+
 // ProgramResult is the linked program outcome.
 type ProgramResult struct {
 	SAI         string
@@ -286,8 +331,12 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	globalRets := map[string]map[string]saType{} // file -> name -> ret
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
+	linkKindTmp := map[string]map[string]string{} // file -> name -> kind
+	linkExpTmp := map[string]map[string]bool{}    // file -> name -> exported
 	for _, p := range reachable {
 		expOf[p] = &fileExports{exports: map[string]bool{}, rets: map[string]saType{}, reexp: map[string]string{}, starProvided: map[string]bool{}}
+		linkKindTmp[p] = map[string]string{}
+		linkExpTmp[p] = map[string]bool{}
 		globalRets[p] = map[string]saType{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
@@ -310,6 +359,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				if hasExportModifier(st) {
 					expOf[p].exports[name] = true
 				}
+				linkKindTmp[p][name] = "function"
 				if hasDefaultModifier(st) {
 					expOf[p].defLocal = name
 				}
@@ -339,6 +389,19 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			case ast.KindVariableStatement:
 				dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
 				for _, d := range dl.Declarations.Nodes {
+					// Literal const/let values record for routed miss
+					// diagnostics (cross-file value imports stay a
+					// listed gap; the message says so honestly).
+					if init := d.Initializer(); init != nil {
+						switch init.Kind {
+						case ast.KindNumericLiteral, ast.KindStringLiteral,
+							ast.KindTrueKeyword, ast.KindFalseKeyword,
+							ast.KindNoSubstitutionTemplateLiteral:
+							if name, ok := bindingNameText(d); ok {
+								linkKindTmp[p][name] = "value"
+							}
+						}
+					}
 					// Arrow and function-expression callees share the
 					// alias path (see lowerArrowBinding); both export.
 					if d.Initializer() == nil || (d.Initializer().Kind != ast.KindArrowFunction &&
@@ -355,13 +418,17 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					expOf[p].rets[name] = tI32
 					globalRets[p][name] = tI32
 					globalArity[p][name] = len(d.Initializer().Parameters())
+					linkKindTmp[p][name] = "function"
 				}
 			case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindEnumDeclaration:
 				scratch.lowerTypeDecl(st)
 			case ast.KindClassDeclaration:
 				scratch.recordClass(st)
-				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier && hasExportModifier(st) {
-					expOf[p].exports[st.Name().Text()] = true
+				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+					linkKindTmp[p][st.Name().Text()] = "class"
+					if hasExportModifier(st) {
+						expOf[p].exports[st.Name().Text()] = true
+					}
 				}
 			case ast.KindModuleDeclaration:
 				// Runtime namespaces contribute qualified signatures for
@@ -370,6 +437,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					continue
 				}
 				if nm, ok := moduleDeclName(st); ok {
+					linkKindTmp[p][nm] = "namespace"
 					collectNsProgramSigs(moduleMemberStmts(st), nm, globalRets[p], globalArity[p], globalRest[p], globalDefaults[p])
 				}
 			case ast.KindExportDeclaration:
@@ -420,6 +488,76 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		}
 		for k, v := range scratch.enums {
 			sharedEnums[k] = v
+		}
+	}
+	// Diagnostic-only name index over UNREACHABLE files: a miss can name
+	// a defining file the user hasn't imported yet (importing it then
+	// works through the normal link). Reachable files win ties below;
+	// nothing here lowers or emits.
+	inReach := map[string]bool{}
+	for _, p := range reachable {
+		inReach[p] = true
+	}
+	for p, sf := range parsed {
+		if inReach[p] {
+			continue
+		}
+		if linkKindTmp[p] == nil {
+			linkKindTmp[p] = map[string]string{}
+		}
+		if linkExpTmp[p] == nil {
+			linkExpTmp[p] = map[string]bool{}
+		}
+		for _, st := range sf.AsSourceFile().Statements.Nodes {
+			switch st.Kind {
+			case ast.KindFunctionDeclaration:
+				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+					linkKindTmp[p][st.Name().Text()] = "function"
+					if hasExportModifier(st) {
+						linkExpTmp[p][st.Name().Text()] = true
+					}
+				}
+			case ast.KindClassDeclaration:
+				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+					linkKindTmp[p][st.Name().Text()] = "class"
+					if hasExportModifier(st) {
+						linkExpTmp[p][st.Name().Text()] = true
+					}
+				}
+			case ast.KindEnumDeclaration:
+				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+					linkKindTmp[p][st.Name().Text()] = "value"
+					if hasExportModifier(st) {
+						linkExpTmp[p][st.Name().Text()] = true
+					}
+				}
+			case ast.KindModuleDeclaration:
+				if isAmbientModule(st) {
+					continue
+				}
+				if nm, ok := moduleDeclName(st); ok {
+					linkKindTmp[p][nm] = "namespace"
+				}
+			case ast.KindVariableStatement:
+				dl := st.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+				for _, d := range dl.Declarations.Nodes {
+					name, ok := bindingNameText(d)
+					if !ok || d.Initializer() == nil {
+						continue
+					}
+					switch d.Initializer().Kind {
+					case ast.KindArrowFunction, ast.KindFunctionExpression:
+						linkKindTmp[p][name] = "function"
+					case ast.KindNumericLiteral, ast.KindStringLiteral,
+						ast.KindTrueKeyword, ast.KindFalseKeyword,
+						ast.KindNoSubstitutionTemplateLiteral:
+						linkKindTmp[p][name] = "value"
+					}
+					if hasExportModifier(st) {
+						linkExpTmp[p][name] = true
+					}
+				}
+			}
 		}
 	}
 	// Pre-pass refusals (export * / default) abort before lowering.
@@ -506,10 +644,37 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	}
 	// Every linked top-level name for the "import it first" diagnostic.
 	linkExports := map[string]string{}
-	for _, p := range reachable {
+	linkExportKind := map[string]string{}
+	linkExported := map[string]bool{}
+	// Reachable files first (tie priority), then the unreachable
+	// diagnostic index (a miss can name a file worth importing).
+	mergeOrder := append(append([]string{}, reachable...), unreachableOrder(parsed, reachable)...)
+	for _, p := range mergeOrder {
 		for name := range globalRets[p] {
 			if _, ok := linkExports[name]; !ok {
 				linkExports[name] = p
+			}
+		}
+		// Kinds route miss diagnostics (first wins, like linkExports);
+		// exported-ness resolves per owner file below.
+		for name, kind := range linkKindTmp[p] {
+			if _, ok := linkExportKind[name]; !ok {
+				linkExportKind[name] = kind
+				linkExports[name] = p
+			}
+		}
+		if ex, ok := expOf[p]; ok {
+			for name := range ex.exports {
+				if linkExports[name] == p {
+					linkExported[name] = true
+				}
+			}
+		}
+		if exp, ok := linkExpTmp[p]; ok {
+			for name, exported := range exp {
+				if linkExports[name] == p && exported {
+					linkExported[name] = true
+				}
 			}
 		}
 	}
@@ -522,6 +687,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		e.prefix = prefixOf[p]
 		e.link = links[p]
 		e.linkExports = linkExports
+		e.linkExportKind = linkExportKind
+		e.linkExported = linkExported
 		e.tcx = tcx
 		// .d.ts return overrides for unannotated bodies in this file.
 		e.dtsRet = map[string]saType{}
@@ -540,9 +707,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		// spread-arity lookups of imported callees. Re-exported names
 		// (named or star) bind no local: they seed signatures for the
 		// "import it first" diagnostic but never localDefs, so same-file
-		// calls refuse instead of emitting the own prefix.
+		// calls refuse instead of emitting the own prefix. Seeded names
+		// are marked: namespace prescan must not mistake them for
+		// colliding definitions (they ARE the member, same entity).
+		if e.linkSeeded == nil {
+			e.linkSeeded = map[string]bool{}
+		}
 		for name, ret := range globalRets[p] {
 			e.funcSigs[name] = ret
+			e.linkSeeded[name] = true
 			if _, isReexp := expOf[p].reexp[name]; !isReexp && !expOf[p].starProvided[name] {
 				e.localDefs[name] = true
 			}

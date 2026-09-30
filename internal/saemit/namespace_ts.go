@@ -168,13 +168,9 @@ func (e *emitter) lowerNamespace(st *ast.Node, topLevel bool) {
 		e.nsExports[full] = map[string]bool{}
 	}
 	e.nsStack = append(e.nsStack, name)
-	// Members prescanned file-wide (see prescanNamespaces); the drain
-	// replays recording idempotently, so rescan here unconditionally.
-	e.nsPreScan(members)
-	if e.refused {
-		e.nsStack = e.nsStack[:len(e.nsStack)-1]
-		return
-	}
+	// Members prescanned file-wide (see prescanNamespaces); only queue
+	// here. If an earlier statement already refused, still queue
+	// (accumulate-style: the drain stops at the first refusal inside).
 	e.pendingNs = append(e.pendingNs, pendingNsBody{
 		path:    append([]string{}, e.nsStack...),
 		members: members,
@@ -208,9 +204,6 @@ func (e *emitter) prescanNamespaces(stmts []*ast.Node) {
 		e.nsStack = append([]string{}, name)
 		e.nsPreScan(moduleMemberStmts(st))
 		e.nsStack = saved
-		if e.refused {
-			return
-		}
 	}
 }
 
@@ -376,7 +369,7 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 			}
 			continue
 		}
-		if e.nsNameTaken(q) {
+		if e.nsNameTaken(q) && !(e.linkSeeded[q] && !e.directTopFuncs[q]) {
 			e.refuse(m, "namespace member %s collides with an existing definition", q)
 			return
 		}

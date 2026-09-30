@@ -402,9 +402,20 @@ type emitter struct {
 	defNSImports map[string]bool
 	localDefs     map[string]bool
 	importedNames map[string]bool
-	// linkExports maps every linked top-level function name to its file
-	// (for the "import it first" diagnostic).
-	linkExports map[string]string
+	// linkExports maps every linked top-level definable name to its file;
+// linkExportKind records its kind (function, class, namespace, value)
+// and linkExported whether any linked file exports it (see linkRoute
+// in program.go for the kind-aware miss diagnostic).
+	linkExports    map[string]string
+	linkExportKind map[string]string
+	linkExported   map[string]bool
+	// linkSeeded marks signatures pre-seeded from the program link
+	// (globalRets); namespace prescan exempts them from collision
+	// refusal (a seeded member signature is the member itself).
+	// directTopFuncs marks real top-level function definitions, so a
+	// genuine same-name definition still refuses despite the seed.
+	linkSeeded     map[string]bool
+	directTopFuncs map[string]bool
 	// tcx is the shared binder/checker context (nil-safe: syntax-only
 	// fallback preserves exact legacy behavior).
 	tcx *typeCtx
@@ -626,6 +637,13 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 				ret = r
 			}
 			e.funcSigs[regName] = ret
+			// Direct top-level definitions (vs link-seeded signatures):
+			// namespace prescan refuses genuine @label collisions but
+			// exempts seeded member signatures (same entity).
+			if e.directTopFuncs == nil {
+				e.directTopFuncs = map[string]bool{}
+			}
+			e.directTopFuncs[regName] = true
 			params := st.Parameters()
 			e.funcParams[regName] = len(params)
 			defs := make([]bool, len(params))
@@ -1986,6 +2004,12 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		if ms := e.modStateOf(n.Text()); ms != nil {
 			return e.emitModLoad(ms, n)
 		}
+		// Unbound reads in program mode may name a cross-file member
+		// (emitting the bare name traps at check with no diagnostic).
+		if r := e.linkRoute(n.Text()); r != "" {
+			e.refuse(n, "%s", r)
+			return "0", tUnknown
+		}
 		return n.Text(), tI32
 	case ast.KindBinaryExpression:
 		return e.lowerBinary(n)
@@ -3139,11 +3163,11 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			e.ownTemp(t)
 			return t, ret
 		}
-		if e.link != nil {
-			if owner, ok := e.linkExports[fname]; ok {
-				e.refuse(n, "%s is defined in %s; import it first", fname, owner)
-				return "0", tUnknown
-			}
+		// Cross-file misses route to the defining file (kind-aware:
+		// importable kinds point at the import, the rest name the gap).
+		if r := e.linkRoute(fname); r != "" {
+			e.refuse(n, "%s", r)
+			return "0", tUnknown
 		}
 		// Async timers refuse with the Phase-2 rationale (user-defined
 		// shadowing still wins via funcSigs above).
@@ -3158,6 +3182,20 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 	if call.Expression.Kind == ast.KindPropertyAccessExpression {
 		if v, t, ok := e.lowerMethodCall(call.Expression, args, argTypes, call.Arguments, n); ok {
 			return v, t
+		}
+		// A dotted call whose root names a cross-file definable routes
+		// to its file instead of the generic first-class refuse (same-
+		// file values shadow: folds, slots and aliases win first).
+		if pa := call.Expression.AsPropertyAccessExpression(); pa.Expression.Kind == ast.KindIdentifier {
+			root := pa.Expression.Text()
+			if _, ok := e.constVals[root]; !ok && e.modStateOf(root) == nil {
+				if _, ok := e.arrowAliases[root]; !ok {
+					if r := e.linkRoute(root); r != "" {
+						e.refuse(n, "%s", r)
+						return "0", tUnknown
+					}
+				}
+			}
 		}
 	}
 	e.refuse(n, "call target is not in the SA-lowerable subset (functions are not first-class values)")
@@ -7061,6 +7099,19 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 	if v, t, ok := e.lowerMemberChain(n); ok {
 		return v, t
 	}
+	// A dotted read whose root names a cross-file namespace routes to
+	// its file (same-file values shadow first, as for calls).
+	if pa.Expression.Kind == ast.KindIdentifier {
+		root := pa.Expression.Text()
+		if _, ok := e.constVals[root]; !ok && e.modStateOf(root) == nil {
+			if _, ok := e.arrowAliases[root]; !ok && !e.isValueReceiver(root) {
+				if r := e.linkRoute(root); r != "" {
+					e.refuse(n, "%s", r)
+					return "0", tUnknown
+				}
+			}
+		}
+	}
 	// String/Array method projections handled at call sites; bare property
 	// reads other than .length are refused.
 	e.refuse(n, "property access .%s is not in the SA-lowerable subset", pa.Name().Text())
@@ -7381,6 +7432,12 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 		name := e.qualify(nw.Expression.Text())
 		if _, ok := e.classDefs[name]; ok {
 			return e.lowerNewClass(name, nw, n)
+		}
+		// Cross-file class misses route to the defining file instead
+		// of the generic builtin refuse below.
+		if r := e.linkRoute(nw.Expression.Text()); r != "" {
+			e.refuse(n, "%s", r)
+			return "0", tUnknown
 		}
 		if name == "Map" {
 			e.needImport("sa_std/btree_map.sa")

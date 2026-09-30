@@ -522,3 +522,17 @@
   286 sweep 零回退 + check 全过；真机 `sa check` 过；planck 零移动
   （无 import-equals 用例）。
   JEV blast-radius safe_to_apply 93%。
+- ✅ 跨文件 miss 路由（`linkRoute` 品类诚实文案 + 全 miss 位接线）：
+  修双 prescan 重复诊断（prescan 收归一处）；`linkSeeded` 豁免自碰撞
+  （`directTopFuncs` 保真碰撞仍拒——从 ns 文件 import 曾整文件误拒）；
+  `linkExports` 扩品类（function/class/namespace/value）+ unreachable
+  文件诊断索引（确定性排序，只记名不 lowering）；miss 位全接线
+  （调用/读/new/extends/点调用/点读，遮蔽优先，单文件零行为变更）。
+  文案按可 import 性分品类（函数/类指 import，不可者明说缺口；未导出
+  指补 export）。转正程序按 feature 级验证（`sa check` + `sa run` +
+  node 对数：call/new/star/类读全对）。
+  单测 2 项（13 子断言：6 miss 品类 + 自碰撞正反）；全套件绿、
+  286 sweep 零回退 + check 全过；planck 拒文件 49→48、零干净新增
+  （新增诊断全在已拒文件，品类全属既有大声家族）。
+  JEV consistency 首审曾 flag 转正风险（66%），按 feature 级验证消化；
+  blast-radius safe_to_apply 84%。
