@@ -160,6 +160,10 @@
   工厂返回等推断布局首次可达；planck program 口径 diag 686→649。
   单测 1 项（具名推断 + 匿名形 + 未知仍拒）；全量单测过。
   已探明 v2：`a.q.c` 嵌套别名（`type TransformValue={...}` 未建布局）另立项。
+- ✅ checker 布局 v2（`recordTypeAlias` 进 `checker_layout.go`，`lowerTypeDecl`
+  挂钩）：`type X={...}` 对象别名建布局，嵌套经既有 ftypes 下沉；
+  planck program 口径 diag 649→617（累计 686→617）。单测扩展 1 项；
+  全量单测过。
 - ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
   log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
   缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`

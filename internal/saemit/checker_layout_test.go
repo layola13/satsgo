@@ -25,4 +25,11 @@ func TestCheckerLayoutInferred(t *testing.T) {
 	if r := Lower("l3.ts", bad); !r.Refused {
 		t.Fatalf("expected unknown-shape refusal, got:\n%s", r.SAI)
 	}
+	// Type-alias object shapes record layouts, including nested descent
+	// through alias-typed fields (planck TransformValue/RotValue shape).
+	nested := "export type RotValue = { c: i32; s: i32 };\nexport type TransformValue = { p: P; q: RotValue };\ninterface P { x: i32; y: i32 }\nfunction f(t: TransformValue): i32 {\n  return t.q.c + t.p.x;\n}\nfunction main(): i32 {\n  return 1;\n}\n"
+	res = mustLower(t, "l4.ts", nested)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want nested loads, got:\n%s", res.SAI)
+	}
 }

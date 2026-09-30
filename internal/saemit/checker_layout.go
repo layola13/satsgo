@@ -136,6 +136,51 @@ func (t *typeCtx) layoutDataFields(n *ast.Node) ([]string, bool) {
 	return fields, true
 }
 
+// recordTypeAlias records `type X = {a: T, ...}` object aliases as layouts,
+// mirroring recordLayout (planck TransformValue/RotValue/Vec2Value shape).
+// Non-literal targets (unions, primitives, references) record nothing;
+// method signatures declare no field, same as interfaces.
+func (e *emitter) recordTypeAlias(st *ast.Node) {
+	name := "<anon>"
+	if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+		name = st.Name().Text()
+	}
+	tgt := st.AsTypeAliasDeclaration().Type
+	if tgt == nil || tgt.Kind != ast.KindTypeLiteral {
+		return
+	}
+	if name == "<anon>" {
+		return
+	}
+	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}}
+	off := 0
+	for _, m := range tgt.AsTypeLiteralNode().Members.Nodes {
+		if m.Kind != ast.KindPropertySignature {
+			continue
+		}
+		fname, ok := bindingNameText(m)
+		if !ok {
+			continue
+		}
+		saname := saNameOfType(m.AsPropertySignatureDeclaration().Type)
+		size, align := widthOf(saname)
+		off = alignTo(off, align)
+		l.fields = append(l.fields, fname)
+		l.types[fname] = saname
+		l.ftypes[fname] = rawTypeName(m.AsPropertySignatureDeclaration().Type)
+		l.offsets[fname] = off
+		off += size
+	}
+	if len(l.fields) == 0 {
+		return
+	}
+	l.size = off
+	if e.layouts == nil {
+		e.layouts = map[string]*layout{}
+	}
+	e.layouts[name] = l
+}
+
 // layoutOfNode resolves a struct layout for a base register, consulting
 // the checker when the syntax-recorded map misses: recorded layouts win,
 // then checker interface/class/alias names, then anonymous field sets via

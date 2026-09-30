@@ -6846,6 +6846,9 @@ func (e *emitter) lowerTypeDecl(st *ast.Node) {
 	if st.Kind == ast.KindInterfaceDeclaration {
 		e.recordLayout(st)
 	}
+	if st.Kind == ast.KindTypeAliasDeclaration {
+		e.recordTypeAlias(st)
+	}
 	if st.Kind == ast.KindEnumDeclaration {
 		e.recordEnum(st)
 	}

@@ -11,8 +11,8 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
 1. [x] 入口换 `LowerProgram`（typeCtx：NoLib 内存 Program，单文件/Program 共享）：Program 建一次，binder/checker 全程在线。
 2. [~] `layoutOfVar`/`matchLayout` 改查 `checker.getTypeAtLocation`，删除注解猜测。
    v1（`checker_layout.go`）：基址经 `layoutOfNode`（记录表 → checker 名 →
-   匿名形字段集）；注解猜测保留；嵌套别名下沉 + `type X={...}` 建布局为 v2；
-   planck program 口径 diag 686→649。
+   匿名形字段集）；注解猜测保留；planck program 口径 diag 686→649。
+   v2：`type X={...}` 建布局 + 嵌套 ftypes 下沉；diag 649→617。
 3. [ ] 泛型单态化类型驱动（deferred：句柄模型下调用点继承已够用）：`Box<T>` 不再靠调用点布局继承。
 4. [x] `?.` 真守卫：`strictNullChecks` 可空信息决定是否加 join-slot（非空保持直调）。
 5. [ ] 捕获分析换 binder locals（deferred：启发式在 286+lodash 实测成立）（删 `collectValueIdents` 手写 walk）。
