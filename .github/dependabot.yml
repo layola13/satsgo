@@ -6,17 +6,6 @@
 
 version: 2
 updates:
-  - package-ecosystem: 'github-actions'
-    directories:
-      - '/'
-      - '/.github/actions/setup-go'
-    schedule:
-      interval: 'weekly'
-    groups:
-      github-actions:
-        patterns:
-          - '*'
-
   - package-ecosystem: 'devcontainers'
     directory: '/'
     schedule:
