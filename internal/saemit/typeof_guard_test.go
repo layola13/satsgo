@@ -74,3 +74,63 @@ func TestLowerTypeofGuard(t *testing.T) {
 		t.Errorf("want not-known diagnostic, got %v", rp.Diagnostics)
 	}
 }
+
+func TestLowerTypeofConstFold(t *testing.T) {
+	// Checker-known kind folds: two string allocs + index_of collapse
+	// to one constant compare materialised into a temp (br takes
+	// registers, never immediates).
+	src := "function f(x: number): i32 {\n  if (typeof x === \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	res := mustLower(t, "k1.ts", src)
+	if !strings.Contains(res.SAI, "= eq 1, 1") {
+		t.Errorf("want folded eq 1, 1, got:\n%s", res.SAI)
+	}
+	if strings.Contains(res.SAI, "index_of") {
+		t.Errorf("fold must drop the string compare:\n%s", res.SAI)
+	}
+	// Mismatch folds to ne; negation flips; either side order works.
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"mismatch", "function f(x: number): i32 {\n  if (typeof x === \"string\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n", "= ne 1, 1"},
+		{"negHit", "function f(x: number): i32 {\n  if (typeof x !== \"string\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n", "= eq 1, 1"},
+		{"negMiss", "function f(x: number): i32 {\n  if (typeof x !== \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n", "= ne 1, 1"},
+		{"swapped", "function f(x: number): i32 {\n  if (\"number\" === typeof x) {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n", "= eq 1, 1"},
+		{"loose", "function f(x: number): i32 {\n  if (typeof x == \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n", "= eq 1, 1"},
+		{"litHit", "function main(): i32 {\n  if (typeof 1 === \"number\") {\n    return 1;\n  }\n  return 0;\n}\n", "= eq 1, 1"},
+		{"litMiss", "function main(): i32 {\n  if (typeof \"a\" === \"number\") {\n    return 1;\n  }\n  return 0;\n}\n", "= ne 1, 1"},
+	}
+	for _, c := range cases {
+		res := mustLower(t, c.name+".ts", c.src)
+		if !strings.Contains(res.SAI, c.want) {
+			t.Errorf("%s: want %s, got:\n%s", c.name, c.want, res.SAI)
+		}
+		if strings.Contains(res.SAI, "index_of") {
+			t.Errorf("%s: fold must drop the string compare:\n%s", c.name, res.SAI)
+		}
+	}
+	// "undefined" + non-identifier stays loud (guard path refuses);
+	// the fold never claims undefined pairs.
+	nlit := "function main(): i32 {\n  if (typeof null === \"undefined\") {\n    return 1;\n  }\n  return 0;\n}\n"
+	if r := Lower("knlit.ts", nlit); !r.Refused {
+		t.Fatalf("expected non-identifier undefined refusal, got:\n%s", r.SAI)
+	}
+	// Value position also folds (no branch involved).
+	val := "function f(x: number): i32 {\n  const b = typeof x === \"number\";\n  if (b) {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	res = mustLower(t, "kval.ts", val)
+	if !strings.Contains(res.SAI, "= eq 1, 1") {
+		t.Errorf("want value fold eq 1, 1, got:\n%s", res.SAI)
+	}
+	// Unknown kinds keep the loud path (any refuses, no silent 0/1).
+	anyv := "function f(x: any): i32 {\n  if (typeof x === \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	if r := Lower("kany.ts", anyv); !r.Refused {
+		t.Fatalf("expected any refusal, got:\n%s", r.SAI)
+	}
+	// "undefined" pairs stay on the null-check path, never the fold.
+	undef := "function f(x?: i32): i32 {\n  if (typeof x === \"undefined\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	res = mustLower(t, "kundef.ts", undef)
+	if !strings.Contains(res.SAI, "eq x, 0") {
+		t.Errorf("undefined must keep the null check, got:\n%s", res.SAI)
+	}
+}

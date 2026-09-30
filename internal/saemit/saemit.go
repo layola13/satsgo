@@ -2176,6 +2176,11 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 	if v, t, ok := e.lowerTypeofGuard(n); ok {
 		return v, t
 	}
+	// Statically-known typeof-kind comparisons fold to a constant
+	// (checker/literal knowledge; unknown kinds keep the loud path).
+	if v, t, ok := e.lowerTypeofConstFold(n); ok {
+		return v, t
+	}
 	// assignment folds to register copy (plain `s = "..."` is NOT valid SA).
 	if op == ast.KindEqualsToken {
 		// Module-string stores materialize literals directly: lowering

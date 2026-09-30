@@ -22,7 +22,10 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    改走共享 `valueUsedNames`；286 输出逐字节一致 + 新单测锁定类型名不进捕获）。
 6. [~] 拒绝条件从“语法 Kind”升级为“checker 类型”（精准杀，提升白名单通过率）。
    首刀：`typeof v === "undefined"` 比较级守卫（`eq/ne v, 0`，planck 617→613）；
-   其余形态（已知 kind 常量折叠等）另立项。元数/类型拒绝已按需加（既有）。
+   第二刀（2026-09-30 落地）：`typeof X === "<kind>"` 比较级常量折叠
+   （`lowerTypeofConstFold`：双向/否定/字面量，静态已知即 `eq/ne 1, 1`，
+   未知回落既有大声；单测 1 项；286 零 diff；真机 check + run 差分一致）。
+   元数/类型拒绝已按需加（既有）。
 7. [~] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
    首刀：`declaredAt` 可见性 helper + typeof 尾部分支；所有权/别名不可删
    （152 处引用，binder 无所有权概念，边界已注明）；单测 2 项。

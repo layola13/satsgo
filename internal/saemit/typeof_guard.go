@@ -2,6 +2,9 @@
 // lowers to a null check on v. The subset maps null/undefined to 0, so
 // this is exact (no checker query needed; other typeof shapes keep their
 // existing fold-or-refuse path). Non-identifier operands refuse loudly.
+//
+// `typeof X === "<kind>"` for other kinds folds to a constant below
+// (lowerTypeofConstFold) when X's kind is statically known.
 package saemit
 
 import (
@@ -132,6 +135,89 @@ func (e *emitter) lowerTypeofGuard(n *ast.Node) (string, saType, bool) {
 		e.emit("%s = ne %s, 0", t, v)
 	} else {
 		e.emit("%s = eq %s, 0", t, v)
+	}
+	return t, tI32, true
+}
+
+// lowerTypeofConstFold folds `typeof X === "<kind>"` (any side order,
+// ==/===/!=/!==) to a constant immediate when X's static kind is known:
+// literals by syntax (mirroring lowerTypeof's literal table exactly,
+// including its null -> "undefined" dialect mapping), identifiers via
+// the checker (typeofKind, the same source lowerTypeof consults, so the
+// verdict can never disagree with the unfolded path). Unknown kinds
+// return false so the normal lowering (and its loud diagnostics) applies.
+// "undefined" pairs stay on the null-check path above and never reach
+// here. The fold replaces two 16-byte string allocs plus an index_of
+// call with one constant compare; the verdict materialises into a temp
+// (`eq/ne 1, 1`, both `sa check`-clean) because br takes registers,
+// never immediates (`br 1 -> ...` traps UnknownRegister).
+func (e *emitter) lowerTypeofConstFold(n *ast.Node) (string, saType, bool) {
+	bin := n.AsBinaryExpression()
+	op := bin.OperatorToken.Kind
+	neg := false
+	switch op {
+	case ast.KindEqualsEqualsToken, ast.KindEqualsEqualsEqualsToken:
+		neg = false
+	case ast.KindExclamationEqualsToken, ast.KindExclamationEqualsEqualsToken:
+		neg = true
+	default:
+		return "", tUnknown, false
+	}
+	var typeOp, litOp *ast.Node
+	for _, side := range []*ast.Node{bin.Left, bin.Right} {
+		other := bin.Right
+		if side == bin.Right {
+			other = bin.Left
+		}
+		if side.Kind != ast.KindTypeOfExpression {
+			continue
+		}
+		if other.Kind != ast.KindStringLiteral {
+			continue
+		}
+		typeOp, litOp = side, other
+		break
+	}
+	if typeOp == nil {
+		return "", tUnknown, false
+	}
+	lit, ok := stringLiteralText(litOp)
+	if !ok || lit == "undefined" {
+		return "", tUnknown, false
+	}
+	inner := typeOp.AsTypeOfExpression().Expression
+	if inner == nil {
+		return "", tUnknown, false
+	}
+	kind, known := "", false
+	switch inner.Kind {
+	case ast.KindNumericLiteral:
+		kind, known = "number", true
+	case ast.KindStringLiteral, ast.KindNoSubstitutionTemplateLiteral:
+		kind, known = "string", true
+	case ast.KindTrueKeyword, ast.KindFalseKeyword:
+		kind, known = "boolean", true
+	case ast.KindNullKeyword, ast.KindUndefinedKeyword:
+		// Dialect mapping mirrors lowerTypeof (subset null/undefined
+		// share 0); NOT JS ("object" for null).
+		kind, known = "undefined", true
+	case ast.KindArrowFunction, ast.KindFunctionExpression:
+		kind, known = "function", true
+	case ast.KindArrayLiteralExpression, ast.KindObjectLiteralExpression:
+		kind, known = "object", true
+	case ast.KindIdentifier:
+		if k, ok := e.tcx.typeofKind(inner); ok {
+			kind, known = k, true
+		}
+	}
+	if !known {
+		return "", tUnknown, false
+	}
+	t := e.freshTmp()
+	if (kind == lit) != neg {
+		e.emit("%s = eq 1, 1", t)
+	} else {
+		e.emit("%s = ne 1, 1", t)
 	}
 	return t, tI32, true
 }

@@ -181,6 +181,18 @@
   boolean/symbol/void/undefined/null→object/function/object 联合一致才折叠，
   any/unknown/exotic 大声拒；方言原语（`i32` 注解 NoLib 下本就是 Any，
   只认真实 TS 类型）。单测扩展 2 项（number 折叠 + any 拒绝）；planck 持平。
+- ✅ checker#6 比较级常量折叠（`lowerTypeofConstFold`，`typeof_guard.go` 内 +
+  `lowerBinary` 薄钩 1 处，todo/02#6 第二刀）：`typeof X === "<kind>"`
+  （双向、==/===/!=/!==）静态 kind 已知即折叠为 `eq/ne 1, 1` 常量比较；
+  标识符走 checker（与 `lowerTypeof` 同源，不可能分歧）、字面量按语法表
+  （含 null→"undefined" 方言映射，与 `lowerTypeof` 逐项对齐）；
+  未知 kind（any/方言原语）回落既有大声路径；"undefined" 对仍走空检查。
+  此前同形需两串 alloc + `index_of` 调用，现 1 条指令。
+  途中抓到 `br` 只吃寄存器（`br 1` 报 UnknownRegister，真机 `sa check`
+  定位；`if (1)` 旧发射同病但 286 无覆盖故潜伏，本批不碰旧形）。
+  单测 1 项（7 形状 + 值位 + any 拒 + 非标识 undefined 拒 + 空检查保持）；
+  全套件绿、286 sweep 零 diff；真机 `sa check` 过 + `sa run` exit 13
+  与 node 差分一致。
 - ✅ 访问器记录 + 精确拒（`classDef.getters/setters`，读经
   `lowerPropertyAccessInner`，写经 `lowerFieldStore`，`classDefOf` 三路解析）：
   未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，
