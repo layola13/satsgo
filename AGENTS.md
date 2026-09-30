@@ -133,6 +133,11 @@
   裸副作用导入保留）：planck `Shape → Body` 边消除，值循环告警收敛到
   `Shape ↔ Distance`（value import 但仅类型位使用，待基于用法的擦除另立项）。
   单测 1 项（import-type/export-type 双形状）；全量单测过。
+- ✅ 基于用法的擦除（`valueUsedNames` + `importDeclValueEdge`，链接图与降级
+  双侧；heritage/装饰器/JSX 保留为值，误伤方向恒为“多留边”）：
+  planck program 口径环告警清零，收敛到单点 `export default {...}`
+  （命名空间对象，另立项）；真值循环单测同步修正（b 必须真实调用 main）。
+  单测 1 项（擦除成功 + 值环仍拒）；全量单测过。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。

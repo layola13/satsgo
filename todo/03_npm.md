@@ -108,3 +108,10 @@ program 口径现状（2026-09-30 更新）：显式 `import type` / `export typ
 （`set(shape: Shape)` / `proxy: DistanceProxy`，esbuild 口径可擦除）。
 backlog：基于用法的擦除（binder 查值位引用，无则消边），独立特性另立项；
 真值循环仍保守拒。
+- ✅ 基于用法的擦除已落地（2026-09-30）：`import type` 显式擦除 + 值位引用
+  分析（纯类型子树不进/绑定名跳过/heritage 保留），链接图与降级双侧；
+  planck program 口径环告警清零，收敛到单点
+  `util/Timer.ts: export default { now, diff }`（对象字面量默认导出）。
+- 下一瓶颈（另立项）：模块命名空间对象（`export default {...}` /
+  `import * as planck` + `planck.now()` 成员路由；`main.ts` 即此形）。
+  planck 单文件 7/53/0 基线不变（program 口径以链接成功文件计，需重测）。

@@ -7244,7 +7244,12 @@ func (e *emitter) lowerImport(st *ast.Node) {
 	}
 	// Linked program: the import graph pre-resolved every local module;
 	// bind imported names to qualified callees (link-time environment).
+	// Usage-erased imports (no value-position use) never reach resolution
+	// (mirrors the link-graph filter; keeps unresolvable-erased decls silent).
 	if e.link != nil {
+		if strings.HasPrefix(mod, ".") && e.link.valueUsed != nil && !importDeclValueEdge(st, e.link.valueUsed) {
+			return
+		}
 		if e.importEnv == nil {
 			e.importEnv = map[string]string{}
 		}

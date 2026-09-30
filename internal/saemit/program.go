@@ -46,6 +46,9 @@ type fileLink struct {
 	key      string
 	prefix   string
 	resolved map[string]*modResolution
+	// valueUsed holds this file's value-position identifier uses; the
+	// per-file lowerer consults it to erase imports with no runtime use.
+	valueUsed map[string]bool
 }
 
 // modResolution binds one module specifier to its target file exports.
@@ -95,6 +98,13 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		parsed[path.Clean(p)] = sf
 		_ = parseErrs
 	}
+	// Value-position identifier uses per file (usage-based import
+	// erasure; computed once, shared by the graph filter and the
+	// per-file lowerer through fileLink.valueUsed).
+	usedOf := map[string]map[string]bool{}
+	for p, sf := range parsed {
+		usedOf[p] = valueUsedNames(sf.AsSourceFile().Statements.Nodes)
+	}
 	// Import graph over relative specifiers.
 	graph := map[string][]string{}
 	specOf := map[string]map[string]string{} // file -> spec -> target
@@ -137,6 +147,13 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			}
 			tgt := resolveRelative(p, spec, files)
 			if tgt == "" {
+				continue
+			}
+			// Usage-based erasure: a relative import with no value-position
+			// use carries no runtime edge (esbuild importsNotUsedAsValues
+			// semantics; planck Shape<->Distance shape). Bare third-party
+			// specifiers keep their unresolved marks above regardless.
+			if st.Kind == ast.KindImportDeclaration && !importDeclValueEdge(st, usedOf[p]) {
 				continue
 			}
 			graph[p] = append(graph[p], tgt)
@@ -391,7 +408,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	// Per-file link environments.
 	links := map[string]*fileLink{}
 	for _, p := range reachable {
-		lk := &fileLink{key: p, prefix: prefixOf[p], resolved: map[string]*modResolution{}}
+		lk := &fileLink{key: p, prefix: prefixOf[p], resolved: map[string]*modResolution{}, valueUsed: usedOf[p]}
 		for spec, tgt := range specOf[p] {
 			defQ := ""
 			if dl := expOf[tgt].defLocal; dl != "" {
@@ -579,6 +596,149 @@ func moduleSpecifierOf(st *ast.Node) string {
 		}
 	}
 	return ""
+}
+
+// pureTypeKinds are AST kinds that can never contain a runtime value use.
+// The usage walk never descends into them, so type names are not mistaken
+// for runtime deps. The set stays conservative: missing a pure-type kind
+// only keeps an edge (status quo), never drops a real one.
+var pureTypeKinds = map[ast.Kind]bool{
+	ast.KindTypeReference:      true,
+	ast.KindTypeQuery:          true,
+	ast.KindTypeLiteral:        true,
+	ast.KindTupleType:          true,
+	ast.KindArrayType:          true,
+	ast.KindUnionType:          true,
+	ast.KindIntersectionType:   true,
+	ast.KindFunctionType:       true,
+	ast.KindConstructorType:    true,
+	ast.KindTypeOperator:       true,
+	ast.KindIndexedAccessType:  true,
+	ast.KindMappedType:         true,
+	ast.KindLiteralType:        true,
+	ast.KindOptionalType:       true,
+	ast.KindRestType:           true,
+	ast.KindTypeParameter:      true,
+	ast.KindTypePredicate:      true,
+	ast.KindThisType:           true,
+	ast.KindTemplateLiteralType: true,
+	ast.KindParenthesizedType:  true,
+	ast.KindMethodSignature:    true,
+	ast.KindPropertySignature:  true,
+	ast.KindCallSignature:      true,
+	ast.KindConstructSignature: true,
+	ast.KindIndexSignature:     true,
+}
+
+// bindingNameKinds are AST kinds whose Name() child binds rather than uses
+// (declarations, parameters, patterns, member names). The usage walk skips
+// exactly that child; every other occurrence still counts as a use.
+// ShorthandPropertyAssignment is deliberately absent: `{Shape}` reads Shape.
+var bindingNameKinds = map[ast.Kind]bool{
+	ast.KindVariableDeclaration: true,
+	ast.KindParameter:           true,
+	ast.KindBindingElement:      true,
+	ast.KindFunctionDeclaration: true,
+	ast.KindFunctionExpression:  true,
+	ast.KindClassDeclaration:    true,
+	ast.KindClassExpression:     true,
+	ast.KindEnumDeclaration:     true,
+	ast.KindEnumMember:          true,
+	ast.KindInterfaceDeclaration: true,
+	ast.KindTypeAliasDeclaration: true,
+	ast.KindMethodDeclaration:   true,
+	ast.KindGetAccessor:         true,
+	ast.KindSetAccessor:         true,
+	ast.KindPropertyAssignment:          true,
+	ast.KindPropertyAccessExpression: true,
+}
+
+// valueUsedNames collects identifier texts referenced in value positions
+// across one file's statements: whole import/export declarations (bindings
+// and remote names) and MetaProperty nodes are skipped, binding names are
+// skipped, and pure-type subtrees are never entered. Heritage clauses
+// (`extends B`) stay visited: they are runtime deps.
+func valueUsedNames(stmts []*ast.Node) map[string]bool {
+	used := map[string]bool{}
+	var walk func(n *ast.Node)
+	walk = func(n *ast.Node) {
+		if n == nil {
+			return
+		}
+		if n.Kind == ast.KindImportDeclaration || n.Kind == ast.KindExportDeclaration ||
+			n.Kind == ast.KindMetaProperty {
+			return
+		}
+		if n.Kind == ast.KindIdentifier {
+			used[n.Text()] = true
+			return
+		}
+		var skip *ast.Node
+		if bindingNameKinds[n.Kind] {
+			if nm := n.Name(); nm != nil {
+				skip = nm
+			}
+		}
+		for ch := range n.IterChildren() {
+			if skip != nil && ch == skip {
+				continue
+			}
+			if pureTypeKinds[ch.Kind] {
+				continue
+			}
+			walk(ch)
+		}
+	}
+	for _, st := range stmts {
+		walk(st)
+	}
+	return used
+}
+
+// importDeclValueEdge reports whether an import declaration carries a
+// runtime edge: side-effect imports always do; otherwise the default name,
+// the namespace name, or at least one non-type-only named specifier must
+// be value-used (esbuild importsNotUsedAsValues semantics, per declaration).
+func importDeclValueEdge(st *ast.Node, used map[string]bool) bool {
+	cl := st.AsImportDeclaration().ImportClause
+	if cl == nil {
+		return true
+	}
+	clause := cl.AsImportClause()
+	if nm := clause.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+		if used[nm.Text()] {
+			return true
+		}
+	}
+	nb := clause.NamedBindings
+	if nb == nil {
+		return false
+	}
+	if nb.Kind == ast.KindNamespaceImport {
+		return used[nb.AsNamespaceImport().Name().Text()]
+	}
+	edge := false
+	var walk func(n *ast.Node)
+	walk = func(n *ast.Node) {
+		if edge || n == nil {
+			return
+		}
+		if n.Kind == ast.KindImportSpecifier {
+			sp := n.AsImportSpecifier()
+			if sp.IsTypeOnly {
+				return
+			}
+			if nm := n.Name(); nm != nil && nm.Kind == ast.KindIdentifier && used[nm.Text()] {
+				edge = true
+			}
+			return
+		}
+		for ch := range n.IterChildren() {
+			walk(ch)
+		}
+	}
+	walk(nb)
+	return edge
 }
 
 // resolveRelative maps "./x" against the importer's dir into the file set
