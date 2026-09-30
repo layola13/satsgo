@@ -461,3 +461,53 @@ func TestLowerProgramConstValueImport(t *testing.T) {
 		t.Fatalf("expected unexported-const refusal, got:\n%s", r.SAI)
 	}
 }
+
+// Exported all-integer enums link member tables: reads, comparisons and
+// switch cases fold ordinals through the single-file enum machinery.
+// String enums, barrels and unexported enums stay loud.
+func TestLowerProgramEnumImport(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { ManifoldType } from \"./m\";\nfunction kind(t: i32): i32 {\n  if (t == ManifoldType.e_circles) {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  let t = ManifoldType.e_faceA;\n  switch (t) {\n    case ManifoldType.e_unset:\n      return 10;\n    default:\n      return kind(t);\n  }\n}\n",
+		"m.ts":    "export enum ManifoldType {\n  e_unset = 0,\n  e_circles,\n  e_faceA = 5,\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	for _, want := range []string{"eq t, 1", "t = 5", "eq t, 0"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in linked output:\n%s", want, res.SAI)
+		}
+	}
+	for _, d := range res.Diagnostics {
+		if strings.Contains(d, "not exported") || strings.Contains(d, "not lowerable") {
+			t.Errorf("enum import must lower cleanly, got: %s", d)
+		}
+	}
+	// String enums never travel (value-used, so erasure cannot hide it).
+	str := map[string]string{
+		"main.ts": "import { S } from \"./m\";\nfunction main(): i32 {\n  return S.A;\n}\n",
+		"m.ts":    "export enum S {\n  A = \"a\",\n  B = \"b\",\n}\n",
+	}
+	if r := LowerProgram("main.ts", str); !r.Refused {
+		t.Fatalf("expected string-enum refusal, got:\n%s", r.SAI)
+	}
+	// Barrels ride the same shared maps (leaves-first ordering lowers
+	// the definition before importers; star claims pass the exports
+	// check, folding resolves through the recorded table).
+	barrel := map[string]string{
+		"main.ts": "import { E } from \"./idx\";\nfunction main(): i32 {\n  return E.B;\n}\n",
+		"idx.ts":  "export * from \"./m\";\n",
+		"m.ts":    "export enum E {\n  A,\n  B,\n}\n",
+	}
+	res = mustLowerProgram(t, "main.ts", barrel)
+	if !strings.Contains(res.SAI, "return 1") {
+		t.Errorf("want folded E.B ordinal, got:\n%s", res.SAI)
+	}
+	// Negative initializers fold exactly (planck's `= -1`).
+	neg := map[string]string{
+		"main.ts": "import { M } from \"./m\";\nfunction main(): i32 {\n  return M.e_unset + M.e_circles;\n}\n",
+		"m.ts":    "export enum M {\n  e_unset = -1,\n  e_circles,\n}\n",
+	}
+	res = mustLowerProgram(t, "main.ts", neg)
+	if !strings.Contains(res.SAI, "add -1, 0") {
+		t.Errorf("want folded -1/+0 ordinals, got:\n%s", res.SAI)
+	}
+}

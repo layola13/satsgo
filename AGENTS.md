@@ -267,6 +267,19 @@
   真条件恒走物化旧路；for 假仅留 init 并平衡 scope；do/switch 不动）。
   全套件绿、286 sweep 零 diff；planck 522→477
   （first-class 97→60，零新增-kind）；真机 check + run 差分一致（11==11）。
+- ✅ 跨文件 enum 值导入（`enumMemberTable` 抽取 + `globalEnums` /
+  `modResolution.enums` / 进口商枚举分支；单测 1 项）。
+  导出扫描对全整数枚举记成员表（`const enum` 同形；串/计算成员恒拒）；
+  进口商直填既有 `e.enums`（比较/switch/赋值零改动；同名单纯值绑定，
+  杜绝函数误绑）。编号核与单文件同源（含 `= -1` 负号支持，
+  顺手修出单文件负枚举静默错号）。
+  桶转口经共享预播种天然可达（单测锁定 `E.B` 折叠）。
+  全套件绿、286 sweep 零 diff；planck 477→465（-12 全为枚举，
+  零新增-kind，残留 not-exported 仅剩 stats 对象×3）；
+  真机 check + run 差分一致（20==20）。
+  附带修出：switch 臂 return-call 结果 `!` 落终结符后
+  （`releaseScope` 终结守卫，一处改全臂；286 零 diff 说明旧语料无覆盖，
+  新形状由 enum e2e 真机锁定）。
 - ✅ 类型-only 具名符擦除（`lowerImport` 逐符擦除 + 单测 1 项）：
   整声明擦除（`importDeclValueEdge`）早已落地，残留的是同声明内混合
   `import { Vec2, Vec2Value }`——值兄弟存活而接口符报 `not exported`。

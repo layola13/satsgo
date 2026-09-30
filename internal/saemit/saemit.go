@@ -8310,6 +8310,59 @@ func (e *emitter) lowerTypeDecl(st *ast.Node) {
 	}
 }
 
+// integerInit folds enum initializers: plain integer literals and unary
+// -/+ applied to them (planck's `= -1`). Anything else (strings, floats,
+// computed expressions) reports false.
+func integerInit(init *ast.Node) (int64, bool) {
+	if init.Kind == ast.KindNumericLiteral && !isFloatLiteral(init.Text()) {
+		var v int64
+		fmt.Sscanf(init.Text(), "%d", &v)
+		return v, true
+	}
+	if init.Kind == ast.KindPrefixUnaryExpression {
+		un := init.AsPrefixUnaryExpression()
+		if (un.Operator == ast.KindMinusToken || un.Operator == ast.KindPlusToken) &&
+			un.Operand.Kind == ast.KindNumericLiteral && !isFloatLiteral(un.Operand.Text()) {
+			var v int64
+			fmt.Sscanf(un.Operand.Text(), "%d", &v)
+			if un.Operator == ast.KindMinusToken {
+				v = -v
+			}
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// enumMemberTable numbers enum members (explicit =N honored, auto takes
+// next++), mirroring sa_plugin_ts EnumDef. Strict mode reports false when
+// any member is not auto-or-integer (string/computed inits have no ordinal
+// form); recordEnum keeps legacy non-strict behavior byte-for-byte, while
+// the linker only ships strict tables cross-file.
+func enumMemberTable(st *ast.Node, strict bool) (map[string]int64, bool) {
+	m := map[string]int64{}
+	var next int64
+	for _, mem := range st.AsEnumDeclaration().Members.Nodes {
+		mname, ok := bindingNameText(mem)
+		if !ok {
+			if strict {
+				return nil, false
+			}
+			continue
+		}
+		if init := mem.AsEnumMember().Initializer; init != nil {
+			if v, ok := integerInit(init); ok {
+				next = v
+			} else if strict {
+				return nil, false
+			}
+		}
+		m[mname] = next
+		next++
+	}
+	return m, true
+}
+
 // recordEnum records auto-numbered variants (explicit =N honored), mirroring
 // sa_plugin_ts EnumDef. Enum.Member folds to its ordinal at use sites.
 func (e *emitter) recordEnum(st *ast.Node) {
@@ -8318,22 +8371,7 @@ func (e *emitter) recordEnum(st *ast.Node) {
 		name = st.Name().Text()
 	}
 	name = e.nsDefName(name)
-	m := map[string]int64{}
-	var next int64
-	for _, mem := range st.AsEnumDeclaration().Members.Nodes {
-		mname, ok := bindingNameText(mem)
-		if !ok {
-			continue
-		}
-		if init := mem.AsEnumMember().Initializer; init != nil &&
-			init.Kind == ast.KindNumericLiteral && !isFloatLiteral(init.Text()) {
-			var v int64
-			fmt.Sscanf(init.Text(), "%d", &v)
-			next = v
-		}
-		m[mname] = next
-		next++
-	}
+	m, _ := enumMemberTable(st, false)
 	if e.enums == nil {
 		e.enums = map[string]map[string]int64{}
 	}
@@ -9282,6 +9320,16 @@ func (e *emitter) lowerImport(st *ast.Node) {
 						}
 						continue
 					}
+					// Exported enums fold ordinals through the
+					// single-file enum tables (member reads, switch
+					// cases, comparisons all reuse them untouched).
+					if members, ok := res.enums[remote]; ok {
+						if e.enums == nil {
+							e.enums = map[string]map[string]int64{}
+						}
+						e.enums[local] = members
+						continue
+					}
 					if _, ok := res.exports[remote]; !ok {
 						e.refuse(el, "%s is not exported by %s", remote, mod)
 						continue
@@ -10000,15 +10048,21 @@ func (e *emitter) releaseScope() {
 	}
 	top := e.scopes[len(e.scopes)-1]
 	done := map[string]bool{}
-	for i := len(e.owned) - 1; i >= 0; i-- {
-		name := e.owned[i]
-		if top[name] == nil || done[name] {
-			continue
-		}
-		done[name] = true
-		if b := top[name]; b.heap && !b.consumed && !b.released {
-			e.emit("!%s", name)
-			b.released = true
+	// Terminated blocks emit no releases: anything here would land after
+	// a terminator (unreachable-code trap). Return already released via
+	// releaseAllOwnedExcept, break/continue via releaseForJump, and panic
+	// aborts; list filtering below still runs for a consistent list.
+	if !e.terminated {
+		for i := len(e.owned) - 1; i >= 0; i-- {
+			name := e.owned[i]
+			if top[name] == nil || done[name] {
+				continue
+			}
+			done[name] = true
+			if b := top[name]; b.heap && !b.consumed && !b.released {
+				e.emit("!%s", name)
+				b.released = true
+			}
 		}
 	}
 	kept := e.owned[:0]

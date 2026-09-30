@@ -145,3 +145,11 @@ backlog：基于用法的擦除（binder 查值位引用，无则消边），独
   常量假条件死臂永不 lowering（断言簇整蒸发）。
   planck program 口径 522→477（first-class 97→60，零新增）；
   单测扩展 1 项；286 零 diff；真机 check + run 差分一致（11==11）。
+- ✅ 跨文件 enum 值导入（2026-09-30，`enumMemberTable`/`globalEnums`/
+  进口商枚举分支）：全整数枚举直填既有表（`const enum` 同形；
+  串/计算成员、桶外链恒拒；桶内经共享预播种可达）。
+  附带修出单文件负枚举静默错号（`= -1` 按自动计，改编号核共享）
+  与 switch 臂释放落终结符后（`releaseScope` 终结守卫）。
+  planck program 口径 477→465（-12 全为枚举，零新增）；
+  单测 1 项（折叠 + 负号 + 串/桶/私有恒拒）；286 零 diff；
+  真机 check + run 差分一致（20==20）。

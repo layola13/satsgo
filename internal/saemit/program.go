@@ -72,6 +72,9 @@ type modResolution struct {
 	// Direct definitions only: re-export propagation stays loud.
 	consts   map[string]string
 	constStr map[string]bool
+	// enums maps an exported all-integer enum name to its member table;
+	// importers fold ordinals through the single-file enum machinery.
+	enums map[string]map[string]int64
 	// qualified maps an export name to its linked @name (direct defs and
 	// resolved re-exports alike; default imports use defQualified).
 	qualified    map[string]string
@@ -336,6 +339,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	globalRets := map[string]map[string]saType{} // file -> name -> ret
 	globalConsts := map[string]map[string]string{} // file -> name -> literal text
 	globalConstStr := map[string]map[string]bool{} // file -> name -> string const
+	globalEnums := map[string]map[string]map[string]int64{} // file -> enum -> member -> ordinal
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
 	linkKindTmp := map[string]map[string]string{} // file -> name -> kind
@@ -347,6 +351,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		globalRets[p] = map[string]saType{}
 		globalConsts[p] = map[string]string{}
 		globalConstStr[p] = map[string]bool{}
+		globalEnums[p] = map[string]map[string]int64{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
 		globalDefaults[p] = map[string][]bool{}
@@ -457,6 +462,17 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				}
 			case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindEnumDeclaration:
 				scratch.lowerTypeDecl(st)
+				// Exported all-integer enums ship member tables for
+				// cross-file ordinal folds (same numbering core as
+				// recordEnum; string/computed members stay loud).
+				if st.Kind == ast.KindEnumDeclaration && hasExportModifier(st) &&
+					st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
+					if members, ok := enumMemberTable(st, true); ok {
+						name := st.Name().Text()
+						expOf[p].exports[name] = true
+						globalEnums[p][name] = members
+					}
+				}
 			case ast.KindClassDeclaration:
 				scratch.recordClass(st)
 				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
@@ -651,6 +667,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				rets:         expOf[tgt].rets,
 				consts:       globalConsts[tgt],
 				constStr:     globalConstStr[tgt],
+				enums:        globalEnums[tgt],
 				qualified:    expOf[tgt].reexpQualified,
 				defLocal:     expOf[tgt].defLocal,
 				defQualified: defQ,
