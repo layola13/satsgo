@@ -359,3 +359,22 @@ func TestLinkNsFileImport(t *testing.T) {
 		t.Errorf("missing collision diagnostic: %v", r.Diagnostics)
 	}
 }
+
+// A local binding shadows an import of the same name: the emitter scope
+// stack (not binder visibility, which sees the import) is authoritative
+// for lowering-time routing, so the param wins loudly-clean. Locks the
+// todo/02#7 boundary: local-shadow checks must not migrate to declaredAt
+// (which answers source-scope, a different question).
+func TestLowerProgramLocalShadowsImport(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { f } from \"./u\";\nfunction g(f: i32): i32 {\n  return f + 1;\n}\nfunction main(): i32 {\n  return g(41);\n}\n",
+		"u.ts":    "export function f(): i32 {\n  return 7;\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if !strings.Contains(res.SAI, "add f, 1") {
+		t.Errorf("local param must win over the import, got:\n%s", res.SAI)
+	}
+	if strings.Contains(res.SAI, "call @u__f") {
+		t.Errorf("shadowed import must not be called, got:\n%s", res.SAI)
+	}
+}

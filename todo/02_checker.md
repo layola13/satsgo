@@ -36,9 +36,18 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    单测 1 项（双翻转 + 速记注解 + any 拒）；286 零 diff；
    真机 check + run 差分一致（120==120）。
    元数/类型拒绝已按需加（既有）。
-7. [~] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
-   首刀：`declaredAt` 可见性 helper + typeof 尾部分支；所有权/别名不可删
-   （152 处引用，binder 无所有权概念，边界已注明）；单测 2 项。
+7. [x] 自建 scope 评估收尾（2026-09-30 全站审计结论：删无可删，永久保留）。
+   首刀：`declaredAt` 可见性 helper + typeof 尾部分支；单测 2 项。
+   全站 26 处 `lookupBinding` + push/pop/ownership 约 150 触点逐项分类：
+   - 所有权/别名（assign/release/alias/heap/consumed/released、箭头捕获、
+     `thisSelf`、temps）：binder 无所有权概念，不可删。
+   - 本地遮蔽路由（模块槽/命名空间/布局/自增与复合赋值的 `lookupBinding == nil`
+     守卫）：emitter 栈答的是 lowering-time 在场（含合成绑定），binder 答
+     的是源码在场，两者是不同问题，迁移即错，不可删。
+   - 全局可见性：早已 binder 化（`declaredAt` + `linkRoute` 識别跨文件成员），
+     无残留。
+   边界锁：`TestLowerProgramLocalShadowsImport`（局部参遮蔽同名导入，
+   binder 见导入而栈见局部，局部必须干净胜出）；286 零 diff。
 
 ## 交付数字
 

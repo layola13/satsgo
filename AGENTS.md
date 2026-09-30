@@ -209,6 +209,13 @@
   现经 checker 命名；`any` 源仍大声；外层目标键集匹配与错配拒文不动）。
   单测 1 项（双翻转 + 速记注解 + any 拒）；全套件绿、286 sweep 零 diff；
   真机 `sa check` 过 + `sa run` exit 120 与 node 差分一致。
+- ✅ checker#7 评估收尾（todo/02#7 关闭为“删无可删”，零产品代码变更）：
+  全站 26 处 `lookupBinding` + push/pop/ownership 约 150 触点逐项分类——
+  所有权/别名（binder 盲）与本地遮蔽路由（emitter 答 lowering-time 在场，
+  binder 答源码在场，迁移即错）永久保留；全局可见性早已 binder 化
+  （`declaredAt` + `linkRoute`），无残留。
+  边界锁 `TestLowerProgramLocalShadowsImport`（局部参遮蔽同名导入，
+  干净胜出零诊断）；全套件绿、286 sweep 零 diff。
 - ✅ 访问器记录 + 精确拒（`classDef.getters/setters`，读经
   `lowerPropertyAccessInner`，写经 `lowerFieldStore`，`classDefOf` 三路解析）：
   未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，
