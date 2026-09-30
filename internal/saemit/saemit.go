@@ -2741,10 +2741,21 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 	}
 	// Date.now() lowers to sa_time_unix_ms (no import; Date is global).
+	// Date.parse(s) lowers to sa_time_parse_iso with a status check
+	// (invalid ISO panics; NaN is unrepresentable in i64).
 	// Anything else on Date falls through to loud refusal below.
 	if recv == "Date" && method == "now" && len(args) == 0 {
 		if proj, ok := projectionByTS("Date.now"); ok {
 			v, t := e.emitProjCall(proj, args, pos)
+			if e.refused {
+				return "0", tUnknown, true
+			}
+			return v, t, true
+		}
+	}
+	if recv == "Date" && method == "parse" && len(args) == 1 {
+		if proj, ok := projectionByTS("Date.parse"); ok {
+			v, t := e.emitStatusCheckedI64(proj, args[0], pos)
 			if e.refused {
 				return "0", tUnknown, true
 			}
@@ -7529,6 +7540,35 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	e.emit("%s = call @%s(%s)", dest, proj.Symbol, strings.Join(out, ", "))
 	e.ownTemp(dest)
 	return dest, proj.Ret
+}
+
+// emitStatusCheckedI64 emits a status-checked sa_std call returning i64:
+// one string-slice operand in, i64 out on status 0, panic otherwise
+// (mirrors the node-backend shape for status-checked calls whose
+// failure has no in-band encoding, e.g. Date.parse vs NaN).
+func (e *emitter) emitStatusCheckedI64(proj StdProjection, arg string, pos *ast.Node) (string, saType) {
+	e.needImport(proj.Module)
+	ip, il := e.expandSlice(arg)
+	ms := e.freshTmp()
+	e.emit("%s = alloc 8", ms)
+	e.ownTemp(ms)
+	st := e.freshTmp()
+	e.emit("%s = call @%s(&%s, %s, &%s)", st, proj.Symbol, ip, il, ms)
+	e.ownTemp(st)
+	badL := e.freshLabel("parse_bad")
+	okL := e.freshLabel("parse_ok")
+	bad := e.freshTmp()
+	e.emit("%s = ne %s, 0", bad, st)
+	e.emit("br %s -> %s, %s", bad, badL, okL)
+	e.emitRaw("%s:", badL)
+	e.emit("panic")
+	e.terminated = true
+	e.emitRaw("%s:", okL)
+	e.terminated = false
+	out := e.freshTmp()
+	e.emit("%s = load %s + 0 as i64", out, ms)
+	e.releaseIfOwnedTemp(ms)
+	return out, tI64
 }
 
 // projectionByTS finds a projection table entry by its TS surface name.

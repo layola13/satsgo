@@ -180,6 +180,10 @@ var StdProjectionTable = []StdProjection{
 	// expansion (StrArgs deliberately absent).
 	{TS: "Date.toISOString", Module: "sa_std/time.sai", Symbol: "sa_time_iso_from_unix_ms", Ret: tString,
 		Note: "i64 millis in; ISO slice out"},
+	// Date.parse routes only through the Date global dispatch below;
+	// invalid ISO panics at runtime (loud; NaN is unrepresentable).
+	{TS: "Date.parse", Module: "sa_std/time.sai", Symbol: "sa_time_parse_iso", Ret: tI64,
+		Note: "status-checked via emitStatusCheckedI64"},
 	// ---- node plugin backend (pilot): native os surfaces ---------------
 	// Convention per node.sai: u32 status + &out slots; nonzero panics.
 	{TS: "os.platform", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_os_platform", Ret: tString,

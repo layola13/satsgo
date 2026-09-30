@@ -494,7 +494,6 @@ func TestLowerDate(t *testing.T) {
 	}
 	for _, src := range []string{
 		"function main(): i64 {\n  const d = new Date(\"2024-01-01\");\n  return d.getTime();\n}\n",
-		"function main(): i64 {\n  return Date.parse(\"2024-01-01\");\n}\n",
 	} {
 		if r := Lower("d2.ts", src); !r.Refused {
 			t.Fatalf("expected refusal, got:\n%s", r.SAI)
@@ -508,6 +507,21 @@ func TestLowerDate(t *testing.T) {
 	isoArg := "function main(): string {\n  const d = new Date();\n  return d.toISOString(\"x\");\n}\n"
 	if r := Lower("d4.ts", isoArg); !r.Refused {
 		t.Fatalf("expected iso-arity refusal, got:\n%s", r.SAI)
+	}
+	prs := "function main(): i64 {\n  return Date.parse(\"2024-01-01\");\n}\n"
+	res = mustLower(t, "d5.ts", prs)
+	for _, want := range []string{
+		"call @sa_time_parse_iso",
+		`@import "sa_std/time.sai"`,
+		"panic",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	prsArity := "function main(): i64 {\n  return Date.parse();\n}\n"
+	if r := Lower("d6.ts", prsArity); !r.Refused {
+		t.Fatalf("expected parse-arity refusal, got:\n%s", r.SAI)
 	}
 }
 
