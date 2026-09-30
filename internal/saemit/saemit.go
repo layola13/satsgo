@@ -2781,6 +2781,24 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 			return v, t, true
 		}
 	}
+	// Buffer.byteLength lowers direct; Buffer.concat needs its array
+	// literal (see node_buffer.go). Anything else on Buffer refuses.
+	if recv == "Buffer" {
+		if method == "byteLength" {
+			v, t := e.lowerBufferByteLength(args, types, pos)
+			if e.refused {
+				return "0", tUnknown, true
+			}
+			return v, t, true
+		}
+		if method == "concat" {
+			v, t := e.lowerBufferConcat(argNodes, pos)
+			if e.refused {
+				return "0", tUnknown, true
+			}
+			return v, t, true
+		}
+	}
 	// Date.now() lowers to sa_time_unix_ms (no import; Date is global).
 	// Date.parse(s) lowers to sa_time_parse_iso with a status check
 	// (invalid ISO panics; NaN is unrepresentable in i64).
@@ -7481,8 +7499,36 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// "string" takes no arguments; "string1"/"string2"/"string3" take
 	// one/two/three string slices expanded to (&ptr, len) in-params
 	// ahead of the outs; "fire" passes slices by value with no outs;
-	// "fireF64" adds one f64 out slot.
-	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64") {
+	// "fireF64" adds one f64 out slot; "u64out" adds one u64 out slot.
+	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64" || proj.NodeOut == "u64out") {
+		if proj.NodeOut == "u64out" {
+			// One slice in, u64 out (Buffer.byteLength shape).
+			if len(args) != 1 {
+				e.refuse(pos, "%s takes exactly 1 argument", proj.TS)
+				return "0", tUnknown
+			}
+			up, ul := e.expandSlice(args[0])
+			uslot := e.freshTmp()
+			e.emit("%s = alloc 8", uslot)
+			e.ownTemp(uslot)
+			ust := e.freshTmp()
+			e.emit("%s = call @%s(&%s, %s, &%s)", ust, proj.Symbol, up, ul, uslot)
+			e.ownTemp(ust)
+			ubadL := e.freshLabel("node_bad")
+			uokL := e.freshLabel("node_ok")
+			ubad := e.freshTmp()
+			e.emit("%s = ne %s, 0", ubad, ust)
+			e.emit("br %s -> %s, %s", ubad, ubadL, uokL)
+			e.emitRaw("%s:", ubadL)
+			e.emit("panic")
+			e.terminated = true
+			e.emitRaw("%s:", uokL)
+			e.terminated = false
+			uout := e.freshTmp()
+			e.emit("%s = load %s + 0 as u64", uout, uslot)
+			e.releaseIfOwnedTemp(uslot)
+			return uout, tU64
+		}
 		if proj.NodeOut == "fire" || proj.NodeOut == "fireF64" {
 			if proj.NodeOut == "fireF64" && len(args) != 1 {
 				e.refuse(pos, "%s takes exactly 1 argument", proj.TS)

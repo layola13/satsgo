@@ -111,6 +111,8 @@ node_symbols=(
   sa_node_plugin_console_time
   sa_node_plugin_console_time_end
   sa_node_plugin_console_clear
+  sa_node_plugin_buffer_byte_length
+  sa_node_plugin_buffer_concat
 )
 
 if [[ ${#node_symbols[@]} -gt 0 ]]; then

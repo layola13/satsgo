@@ -59,7 +59,8 @@ type StdProjection struct {
 	// one u64 size and wraps a bare &ptr out whose length is the
 	// requested size (e.g. randomBytes); "string2"/"string3" expand
 	// two/three leading string slices ahead of the outs; "fire" passes
-	// all string args by value with no outs; "fireF64" adds one f64 out.
+	// all string args by value with no outs; "fireF64" adds one f64 out;
+	// "u64out" expands one slice ahead of one u64 out slot.
 	// Nonzero status panics (loud).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
@@ -301,6 +302,12 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "fireF64", Note: "f64 millis out; missing timer panics"},
 	{TS: "console.clear", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_console_clear", Ret: tVoid,
 		NodeOut: "fire", Note: "zero-arg"},
+	// ---- node Buffer: byteLength is one slice to u64; concat routes
+	// only through lowerBufferConcat (array literals pack as argv).
+	{TS: "Buffer.byteLength", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_buffer_byte_length", Ret: tU64,
+		NodeOut: "u64out", Note: "one string slice; u64 out; status-checked"},
+	{TS: "Buffer.concat", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_buffer_concat", Ret: tString,
+		NodeOut: "argv", Note: "literal parts only; routed via lowerBufferConcat"},
 	// ---- deno plugin backend (pilot): same u32-status shape as node ----
 	// No exported-symbols list exists; deno.sai + Zig source impls are the
 	// contract (both verified for these two). TS keys use Deno.* globals.

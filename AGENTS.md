@@ -192,6 +192,11 @@
   node/deno 同 u32-status 形状；无线束清单，以 `deno.sai` + Zig 实现双验
   为契约，check 脚本加 deno 区）：`Deno.*` 全局直达，形状对齐；
   deno 契约 2/2；单测 1 项（成功 + 未知成员拒）。bun 仍无插件，不动。
+- ✅ node Buffer 批（`node_buffer.go` 模块）：`byteLength` 经新 `NodeOut "u64out"`
+  （1 slice + u64 出槽 + 状态检查）；`concat` 仅接字面量元素（标识符/字符串，
+  绕过存不下 slice 的数组模型，直接打包静态 argv，动态数组/非串元素大声拒）。
+  node 契约 37/37；形状校验通过；单测 1 项（2 形状 + 3 拒绝）。
+  注：本轮 vm 写出现幻写成功与 NUL 注入，已逐项写后核验并修复。
 - ✅ node 全局命名空间（`process.cwd`/`crypto.randomUUID`，免 import，方法路径同形状）；
   node 契约 7/7 全过。注：node 后端输出需插件环境才可 `sa check`/运行，
   门禁为符号契约 + 形状；sa_std 面仍全量真机。
