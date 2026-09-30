@@ -171,8 +171,10 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 // lowerUseEffect lowers mount-only `useEffect(fn, [])`: fn takes no
 // params, declares no cleanup (no return value), and its body holds only
 // setter calls with integer/boolean literal arguments (stored straight
-// into state slots). Non-empty deps, missing deps, cleanup returns and
-// every other hook refuse loudly.
+// into state slots). console.* bodies refuse deliberately: .sax handlers
+// have no print imports (no @const/@import in any demo), so emitting
+// print_bytes would assemble the wrong dialect. Non-empty deps, missing
+// deps, cleanup returns and every other hook refuse loudly.
 func (x *tsxEmitter) lowerUseEffect(st *ast.Node) bool {
 	isHook := false
 	if st.Kind == ast.KindExpressionStatement {

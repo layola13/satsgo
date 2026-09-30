@@ -192,6 +192,8 @@
   setter 常量体直存 state 槽 + 一次 render；非空/缺 deps、cleanup 返回、
   其他 hooks、计算参数大声拒。途中抓到 setterOf 键值反转 bug（调试打印定位）。
   单测 1 项（成功 + 空体 + 4 拒绝）；全量单测过。
+- ✅ useEffect console 体判定（`.sax` 无 print 机制，盲目发射即错方言，
+  故维持大声拒并单测锁定）：单测扩展 1 项。
 - ✅ DOM 投影 p1（路二任务 7，`dom_proj.go` 模块）：`document.createElement`/
   `appendChild`/`setAttribute` 对 airlock `sax_dom_*`（i64 句柄经
   `domVars`/`domTemps` 追踪，非句柄/非 string/未知方法大声拒；

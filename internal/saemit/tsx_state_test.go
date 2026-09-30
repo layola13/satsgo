@@ -96,4 +96,11 @@ func TestLowerTSXMountEffect(t *testing.T) {
 	if r := LowerTSX("a.tsx", ca); !r.Refused {
 		t.Fatalf("expected computed-arg refusal, got:\n%s", r.SAX)
 	}
+	// console.* bodies refuse deliberately: .sax handlers have no print
+	// imports (no @const/@import in any demo), so emitting print_bytes
+	// would assemble the wrong dialect (stdlib.go principle).
+	co := "function C() {\n  const [n, setN] = useState(0);\n  useEffect(() => { console.log(\"hi\"); }, []);\n  return <div>{n}</div>;\n}\n"
+	if r := LowerTSX("o.tsx", co); !r.Refused {
+		t.Fatalf("expected console-body refusal, got:\n%s", r.SAX)
+	}
 }
