@@ -27,6 +27,7 @@
    其他 hooks/计算参数大声拒；单测 1 项；286 零回退。）
 7. [x] DOM 投影表（`createElement/appendChild/setAttribute` → airlock extern），相当于给浏览器环境再做一套投影。
    （p1：三件套 + i64 句柄追踪；query/text/attrs 系与 p3 解构另立项；extern 由构建侧提供；单测 1 项；286 零回退。）
+   （p2：createTextNode + textContent/innerHTML 写；读另立项；单测 1 项。）
 8. [ ] JSX → 直接 SA 调用（`createElement` 内联），绕过 `.sax` 中间态（可选优化，不阻塞）。
 
 ## 交付数字

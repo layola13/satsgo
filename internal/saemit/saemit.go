@@ -1883,6 +1883,13 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 			return rhs, tI32
 		}
 		if bin.Left.Kind == ast.KindPropertyAccessExpression {
+			// DOM text writes claim their receivers first (see dom_proj.go).
+			if pa := bin.Left.AsPropertyAccessExpression(); pa.Expression.Kind == ast.KindIdentifier && e.domVars[pa.Expression.Text()] {
+				if e.lowerDomStore(pa.Expression.Text(), pa.Name().Text(), rhs, rtype, n) {
+					return rhs, tI32
+				}
+				return "0", tUnknown
+			}
 			if e.lowerFieldStore(bin.Left, rhs) {
 				return rhs, tI32
 			}
@@ -2839,10 +2846,10 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 		// Unknown method: fall through to array/string surfaces, then refuse.
 	}
-	// document.createElement lowers to the airlock DOM backend; DOM
-	// handles dispatch to sax_dom_* (see dom_proj.go).
-	if recv == "document" && method == "createElement" {
-		v, t := e.lowerDocumentCreate(args, types, pos)
+	// document.createElement/createTextNode lower to the airlock DOM
+	// backend; DOM handles dispatch to sax_dom_* (see dom_proj.go).
+	if recv == "document" && (method == "createElement" || method == "createTextNode") {
+		v, t := e.lowerDocumentCreate(method, args, types, pos)
 		if e.refused {
 			return "0", tUnknown, true
 		}

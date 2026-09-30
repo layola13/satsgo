@@ -178,6 +178,10 @@
   extern 由 `sa react build` 侧提供如 `sax_get_time`）。
   形状与 airlock 契约逐位对齐；单测 1 项（3 形状 + 嵌套 + 3 拒绝）。
   注：vm edit 在个别大文件出现幻写成功，已改“写后必验”（单测即验）。
+- ✅ DOM 投影 p2 文本系（`createTextNode` + `textContent`/`innerHTML` 写）：
+  工厂经 `domCreateSym` 表（含 `trackDomBinding` 同步），写经赋值路径前置钩
+  （仅单段 + string RHS，读与未知属性大声拒）；读（get_text 需调用方 buf）
+  另立项。形状对齐；单测 1 项（3 形状 + 2 拒绝）。
 - ✅ node console 批（`node_console.go` 模块，log 不动 sa_std）：error 多参同
   log 折叠后单 slice 穿越，time/timeEnd 原生配对（缺省 label `default`，
   缺失 timer 经状态 panic），clear 零参；新增 `NodeOut "fire"/"fireF64"`

@@ -43,3 +43,27 @@ func TestLowerDOM(t *testing.T) {
 		t.Fatalf("expected unknown-method refusal, got:\n%s", r.SAI)
 	}
 }
+
+func TestLowerDOMText(t *testing.T) {
+	src := "function main(): i32 {\n  const el = document.createElement(\"div\");\n  el.textContent = \"hi\";\n  const t = document.createTextNode(\"yo\");\n  el.appendChild(t);\n  el.innerHTML = \"<b>x</b>\";\n  return 1;\n}\n"
+	res := mustLower(t, "t1.ts", src)
+	for _, want := range []string{
+		"call @sax_dom_create_text",
+		"call @sax_dom_set_text",
+		"call @sax_dom_set_inner_html",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Non-string text writes refuse loudly.
+	num := "function main(): i32 {\n  const el = document.createElement(\"div\");\n  el.textContent = 7;\n  return 1;\n}\n"
+	if r := Lower("t2.ts", num); !r.Refused {
+		t.Fatalf("expected non-string refusal, got:\n%s", r.SAI)
+	}
+	// Unknown writable shapes refuse loudly.
+	cls := "function main(): i32 {\n  const el = document.createElement(\"div\");\n  el.className = \"x\";\n  return 1;\n}\n"
+	if r := Lower("t3.ts", cls); !r.Refused {
+		t.Fatalf("expected unknown-prop refusal, got:\n%s", r.SAI)
+	}
+}

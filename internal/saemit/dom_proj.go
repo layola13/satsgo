@@ -27,7 +27,7 @@ func trackDomBinding(e *emitter, name string, init *ast.Node) {
 	if pa.Expression.Kind != ast.KindIdentifier || pa.Expression.Text() != "document" {
 		return
 	}
-	if pa.Name().Text() != "createElement" {
+	if _, ok := domCreateSym[pa.Name().Text()]; !ok {
 		return
 	}
 	if e.domVars == nil {
@@ -36,26 +36,62 @@ func trackDomBinding(e *emitter, name string, init *ast.Node) {
 	e.domVars[name] = true
 }
 
-// lowerDocumentCreate lowers document.createElement(tag) to a sax_dom_create
-// call (tag must be a string). The result temp is handle-tracked.
-func (e *emitter) lowerDocumentCreate(args []string, types []saType, pos *ast.Node) (string, saType) {
+// domCreateSym maps document factory methods to airlock externs.
+var domCreateSym = map[string]string{
+	"createElement":  "sax_dom_create",
+	"createTextNode": "sax_dom_create_text",
+}
+
+// lowerDocumentCreate lowers document.createElement(tag) and
+// document.createTextNode(text) to sax_dom_* calls (string args only).
+// The result temp is handle-tracked.
+func (e *emitter) lowerDocumentCreate(method string, args []string, types []saType, pos *ast.Node) (string, saType) {
+	sym, ok := domCreateSym[method]
+	if !ok {
+		e.refuse(pos, "document.%s is not projected yet", method)
+		return "0", tUnknown
+	}
 	if len(args) != 1 {
-		e.refuse(pos, "document.createElement takes exactly 1 argument")
+		e.refuse(pos, "document.%s takes exactly 1 argument", method)
 		return "0", tUnknown
 	}
 	if len(types) > 0 && types[0] != tString {
-		e.refuse(pos, "document.createElement takes a string tag")
+		e.refuse(pos, "document.%s takes a string", method)
 		return "0", tUnknown
 	}
 	tp, tl := e.expandSlice(args[0])
 	t := e.freshTmp()
-	e.emit("%s = call @sax_dom_create(%s, %s)", t, tp, tl)
+	e.emit("%s = call @%s(%s, %s)", t, sym, tp, tl)
 	e.ownTemp(t)
 	if e.domTemps == nil {
 		e.domTemps = map[string]bool{}
 	}
 	e.domTemps[t] = true
 	return t, tI64
+}
+
+// domTextField maps writable text properties to airlock externs.
+var domTextField = map[string]string{
+	"textContent": "sax_dom_set_text",
+	"innerHTML":   "sax_dom_set_inner_html",
+}
+
+// lowerDomStore lowers el.textContent = s / el.innerHTML = s (string RHS
+// only) to the airlock setters. Reports claimed: a dom base never falls
+// through (unknown shapes refuse loudly here, not generically).
+func (e *emitter) lowerDomStore(base, field, rhs string, rtype saType, pos *ast.Node) bool {
+	sym, ok := domTextField[field]
+	if !ok {
+		e.refuse(pos, "DOM.%s is not writable yet (textContent/innerHTML only)", field)
+		return true
+	}
+	if rtype != tString {
+		e.refuse(pos, "DOM.%s takes a string", field)
+		return true
+	}
+	rp, rl := e.expandSlice(rhs)
+	e.emit("call @%s(%s, %s, %s)", sym, base, rp, rl)
+	return true
 }
 
 // lowerDomMethod routes handle.appendChild / handle.setAttribute. Only
