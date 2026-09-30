@@ -83,6 +83,36 @@ func typeofKindSingle(t *typeCtx, ty *checker.Type) (string, bool) {
 	return "", false
 }
 
+// scalarTypeofKind maps scalar annotations to their JS typeof string:
+// real TS keywords and dialect scalar names alike. It answers from
+// syntax alone, covering exactly the shapes the checker goes blind on
+// under NoLib (dialect names resolve to error/any, so typeofKind yields
+// false). Strings are excluded (strVars owns them), as are user type
+// names, unions and void (checker/linker paths stay authoritative).
+func scalarTypeofKind(tn *ast.Node) (string, bool) {
+	if tn == nil {
+		return "", false
+	}
+	switch tn.Kind {
+	case ast.KindNumberKeyword:
+		return "number", true
+	case ast.KindBooleanKeyword:
+		return "boolean", true
+	case ast.KindBigIntKeyword:
+		return "bigint", true
+	case ast.KindTypeReference:
+		switch tn.AsTypeReferenceNode().TypeName.Text() {
+		case "number", "i32", "i64", "u64", "f32", "f64":
+			return "number", true
+		case "boolean":
+			return "boolean", true
+		case "bigint":
+			return "bigint", true
+		}
+	}
+	return "", false
+}
+
 // lowerTypeofGuard handles typeof-against-"undefined" comparisons.
 // Reports (value, type, handled); unhandled shapes return false so normal
 // lowering (and its diagnostics) apply.
@@ -206,7 +236,12 @@ func (e *emitter) lowerTypeofConstFold(n *ast.Node) (string, saType, bool) {
 	case ast.KindArrayLiteralExpression, ast.KindObjectLiteralExpression:
 		kind, known = "object", true
 	case ast.KindIdentifier:
-		if k, ok := e.tcx.typeofKind(inner); ok {
+		// Annotation-derived kinds first (panic-free, declaration
+		// truth); checker second. Both agree by construction on real
+		// TS types; dialect names only resolve via the former.
+		if k, ok := e.kindVars[inner.Text()]; ok {
+			kind, known = k, true
+		} else if k, ok := e.tcx.typeofKind(inner); ok {
 			kind, known = k, true
 		}
 	}

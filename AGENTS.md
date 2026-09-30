@@ -193,6 +193,14 @@
   单测 1 项（7 形状 + 值位 + any 拒 + 非标识 undefined 拒 + 空检查保持）；
   全套件绿、286 sweep 零 diff；真机 `sa check` 过 + `sa run` exit 13
   与 node 差分一致。
+- ✅ checker#6 注解兜底（`scalarTypeofKind` + `kindVars`，`typeof_guard.go` 内 +
+  `trackBinding` 末位记录 + `lowerTypeof`/`lowerTypeofConstFold` 双侧 thin hook，
+  todo/02#6 第三刀）：方言标量注解（`i32/i64/u64/f64/boolean/bigint`，
+  checker NoLib 下盲为 Any）按声明真相折叠，`typeof y === "number"`（y: i32）
+  由拒转过；checker/字面量优先，串/数组/布局/float 既有认领恒胜出，
+  用户类型名永不标记，无注解/any 仍大声。
+  单测 1 项（翻转 + 5 注解形状 + 裸 typeof + 无注解拒）；全套件绿、
+  286 sweep 零 diff；真机 `sa check` 过 + `sa run` exit 10 与 node 差分一致。
 - ✅ 访问器记录 + 精确拒（`classDef.getters/setters`，读经
   `lowerPropertyAccessInner`，写经 `lowerFieldStore`，`classDefOf` 三路解析）：
   未读 getter 的类不再整文件拒；读写报专属诊断（内联含 `this`/副作用，

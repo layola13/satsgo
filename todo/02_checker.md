@@ -25,6 +25,10 @@ demo 阶段为速度手写了 scope/类型猜测（`scopes` map、`annotationTyp
    第二刀（2026-09-30 落地）：`typeof X === "<kind>"` 比较级常量折叠
    （`lowerTypeofConstFold`：双向/否定/字面量，静态已知即 `eq/ne 1, 1`，
    未知回落既有大声；单测 1 项；286 零 diff；真机 check + run 差分一致）。
+   第三刀（2026-09-30 落地）：注解兜底 `scalarTypeofKind` + `kindVars`
+   （`trackBinding` 末位记录，`lowerTypeof`/`lowerTypeofConstFold` 双侧；
+   方言标量 `i32/i64/u64/f64/boolean/bigint` 即使 checker 盲也折叠，
+   无注解/any 仍大声；单测 1 项；286 零 diff；真机 check + run 差分一致）。
    元数/类型拒绝已按需加（既有）。
 7. [~] 自建 scope 逐步删除（deferred），作用域以 binder 为准。
    首刀：`declaredAt` 可见性 helper + typeof 尾部分支；所有权/别名不可删

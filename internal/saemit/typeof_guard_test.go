@@ -134,3 +134,50 @@ func TestLowerTypeofConstFold(t *testing.T) {
 		t.Errorf("undefined must keep the null check, got:\n%s", res.SAI)
 	}
 }
+
+func TestTypeofScalarAnnotation(t *testing.T) {
+	// Dialect-annotated bindings (checker-blind under NoLib) fold from
+	// their declared annotation. Previously `typeof y === "number"`
+	// with y: i32 refused "not statically known"; now it folds.
+	src := "function f(y: i32): i32 {\n  if (typeof y === \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	res := mustLower(t, "s1.ts", src)
+	if !strings.Contains(res.SAI, "= eq 1, 1") {
+		t.Errorf("want annotation fold eq 1, 1, got:\n%s", res.SAI)
+	}
+	if strings.Contains(res.SAI, "index_of") {
+		t.Errorf("fold must drop the string compare:\n%s", res.SAI)
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"i32miss", "function f(y: i32): i32 {\n  if (typeof y === \"string\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n", "= ne 1, 1"},
+		{"boolHit", "function f(b: boolean): i32 {\n  if (typeof b === \"boolean\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(true);\n}\n", "= eq 1, 1"},
+		{"u64Hit", "function f(n: u64): i32 {\n  if (typeof n === \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(2);\n}\n", "= eq 1, 1"},
+		{"bigintHit", "function f(v: bigint): i32 {\n  if (typeof v === \"bigint\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(3);\n}\n", "= eq 1, 1"},
+		{"ifaceObj", "interface P { x: i32 }\nfunction f(p: P): i32 {\n  if (typeof p === \"object\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return 0;\n}\n", "= eq 1, 1"},
+		{"localConst", "function main(): i32 {\n  const n: i64 = 5;\n  if (typeof n === \"number\") {\n    return 1;\n  }\n  return 0;\n}\n", "= eq 1, 1"},
+	}
+	for _, c := range cases {
+		res := mustLower(t, c.name+".ts", c.src)
+		if !strings.Contains(res.SAI, c.want) {
+			t.Errorf("%s: want %s, got:\n%s", c.name, c.want, res.SAI)
+		}
+		if strings.Contains(res.SAI, "index_of") {
+			t.Errorf("%s: fold must drop the string compare:\n%s", c.name, res.SAI)
+		}
+	}
+	// Bare typeof also resolves from the annotation (same source).
+	bare := "function f(y: i32): string {\n  return typeof y;\n}\nfunction main(): i32 {\n  const s: string = f(1);\n  return s.length;\n}\n"
+	res = mustLower(t, "sbare.ts", bare)
+	if !strings.Contains(res.SAI, "number") {
+		t.Errorf("want annotated kind slice, got:\n%s", res.SAI)
+	}
+	// Unannotated bindings stay loud (no annotation to consult,
+	// checker blind without a declaration type).
+	unann := "function f(y): i32 {\n  if (typeof y === \"number\") {\n    return 1;\n  }\n  return 0;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	if r := Lower("sunann.ts", unann); !r.Refused {
+		t.Fatalf("expected unannotated refusal, got:\n%s", r.SAI)
+	}
+}

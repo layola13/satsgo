@@ -483,6 +483,12 @@ type emitter struct {
 	strVars  map[string]bool
 	arrVars  map[string]bool
 	arrElems map[string]string
+	// kindVars records annotation-derived typeof kinds ("number" /
+	// "boolean" / "bigint") for scalar-annotated bindings the checker
+	// goes blind on under NoLib (dialect names resolve to error/any).
+	// Consulted only by the typeof paths; never by dispatch or
+	// arithmetic (f64Vars stays authoritative for float lowering).
+	kindVars map[string]string
 	// terminated tracks SA-ASM well-formedness: the current block already
 	// ends in a terminator (jmp/br/ret/panic), so emitting another
 	// instruction would produce unreachable code. Mirrors the
@@ -1457,6 +1463,18 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	}
 	// DOM handles from document.createElement (see dom_proj.go).
 	trackDomBinding(e, name, init)
+	// Scalar annotations pin the typeof kind for bindings the checker
+	// cannot see (dialect names under NoLib). Recorded last so stronger
+	// claims (string/array/layout/float handles above, all early-return
+	// or map-checked) always win; user type names never mark.
+	if k, ok := scalarTypeofKind(annot); ok {
+		if !e.strVars[name] && !e.arrVars[name] && !e.mapVars[name] && !e.setVars[name] && !e.f64Vars[name] {
+			if e.kindVars == nil {
+				e.kindVars = map[string]string{}
+			}
+			e.kindVars[name] = k
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -8088,6 +8106,8 @@ func (e *emitter) lowerTypeof(n *ast.Node) (string, saType) {
 			kind = "object"
 		case e.f64Vars[name]:
 			kind = "number"
+		case e.kindVars[name] != "":
+			kind = e.kindVars[name]
 		case e.mainRenamed && dname == "main":
 			kind = "function"
 		case e.modStateOf(name) != nil:
