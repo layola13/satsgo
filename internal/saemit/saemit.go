@@ -3519,11 +3519,14 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		recv = pa.Expression.Text()
 	} else {
 		// Two-level namespaces (Deno.env.get) route in their module;
+		// imported namespace paths (N.M.g) route in link_namespace;
 		// anything else stays loudly unroutable.
 		if v, t, ok := routeDenoEnvChain(e, pa.Expression, method, args, types, pos); ok {
 			return v, t, true
 		}
-		return "", tUnknown, false
+		if v, t, ok := routeNestedNSCall(e, pa.Expression, method, args, pos); ok {
+			return v, t, true
+		}
 	}
 	// Object-default member routing lives in link_nsobject.
 	if v, t, ok := routeDefNSMember(e, recv, method, args, pos); ok {

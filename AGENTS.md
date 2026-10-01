@@ -606,6 +606,10 @@
   读者，零新路由代码）；命名空间本身非值，未知成员与非 callable 成员大声拒。
   探针 `N.f(41)` 真机 check 过 + `sa run` 42 与 node 差分一致；单测 3 形；
   286 sweep 零回退 + check 286 全过；全套件绿。
+- ✅ 嵌套命名空间跨文件调用（`link_namespace.go` 嵌套键绑定 + `routeNestedNSCall` 两级接收路由）：
+  `import { N }` 后 `N.M.g()` 经虚线键（`N.M.g→N_M_g`）与 Deno 链后的并联分支
+  路由；根非导入命名空间原样穿透，深路径未知大声拒。探针真机 42 与 node 一致；
+  单测贯通 + 未知深成员拒 2 形；286 sweep 零回退 + check 286 全过；全套件绿。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

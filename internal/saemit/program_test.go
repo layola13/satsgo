@@ -384,6 +384,29 @@ func TestLowerProgramNamespaceMemberImport(t *testing.T) {
 	}
 }
 
+// Nested cross-file namespace calls (`import { N }` then N.M.g()).
+func TestLowerProgramNestedNamespaceImport(t *testing.T) {
+	lib := "namespace N {\n  export namespace M {\n    export function g(a: i32): i32 {\n      return a * 2;\n    }\n  }\n}\n"
+	ok := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  return N.M.g(21);\n}\n",
+		"lib.ts":  lib,
+	}
+	if res := LowerProgram("main.ts", ok); res.Refused {
+		t.Fatalf("expected link, got diagnostics:\n%s", strings.Join(res.Diagnostics, "\n"))
+	}
+	bad := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  return N.M.bogus(1);\n}\n",
+		"lib.ts":  lib,
+	}
+	r := LowerProgram("main.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected unknown-member refusal, got:\n%s", r.SAI)
+	}
+	if got := strings.Join(r.Diagnostics, "\n"); !strings.Contains(got, "N.M.bogus is not exported by its module") {
+		t.Errorf("missing unknown-member diagnostic:\n%s", got)
+	}
+}
+
 func TestLinkNsFileImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",
