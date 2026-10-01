@@ -86,6 +86,10 @@ type modResolution struct {
 	// enums maps an exported all-integer enum name to its member table;
 	// importers fold ordinals through the single-file enum machinery.
 	enums map[string]map[string]int64
+	// nonIntEnums marks exported enums with string/computed members:
+	// no ordinal table exists (and single-file string reads refuse),
+	// so importers name this gap instead of reporting "not exported".
+	nonIntEnums map[string]bool
 	// qualified maps an export name to its linked @name (direct defs and
 	// resolved re-exports alike; default imports use defQualified).
 	qualified    map[string]string
@@ -423,6 +427,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	globalConsts := map[string]map[string]string{} // file -> name -> literal text
 	globalConstStr := map[string]map[string]bool{} // file -> name -> string const
 	globalEnums := map[string]map[string]map[string]int64{} // file -> enum -> member -> ordinal
+	globalNonIntEnums := map[string]map[string]bool{} // file -> enum with string/computed members
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
 	linkKindTmp := map[string]map[string]string{} // file -> name -> kind
@@ -435,6 +440,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		globalConsts[p] = map[string]string{}
 		globalConstStr[p] = map[string]bool{}
 		globalEnums[p] = map[string]map[string]int64{}
+		globalNonIntEnums[p] = map[string]bool{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
 		globalDefaults[p] = map[string][]bool{}
@@ -570,6 +576,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 						name := st.Name().Text()
 						expOf[p].exports[name] = true
 						globalEnums[p][name] = members
+					} else {
+						// String/computed members have no ordinal table
+						// (single-file reads refuse too); record the name so
+						// importers name the gap instead of "not exported".
+						globalNonIntEnums[p][st.Name().Text()] = true
 					}
 				}
 			case ast.KindClassDeclaration:
@@ -819,6 +830,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				consts:       globalConsts[tgt],
 				constStr:     globalConstStr[tgt],
 				enums:        globalEnums[tgt],
+				nonIntEnums:  globalNonIntEnums[tgt],
 				qualified:    expOf[tgt].reexpQualified,
 				defLocal:     expOf[tgt].defLocal,
 				defQualified: defQ,

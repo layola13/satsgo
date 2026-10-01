@@ -672,12 +672,22 @@ func TestLowerProgramEnumImport(t *testing.T) {
 		}
 	}
 	// String enums never travel (value-used, so erasure cannot hide it).
+	// The import names the real gap: S IS exported, so "not exported"
+	// would be a lie (single-file string reads refuse too).
 	str := map[string]string{
 		"main.ts": "import { S } from \"./m\";\nfunction main(): i32 {\n  return S.A;\n}\n",
 		"m.ts":    "export enum S {\n  A = \"a\",\n  B = \"b\",\n}\n",
 	}
-	if r := LowerProgram("main.ts", str); !r.Refused {
+	r := LowerProgram("main.ts", str)
+	if !r.Refused {
 		t.Fatalf("expected string-enum refusal, got:\n%s", r.SAI)
+	}
+	got := strings.Join(r.Diagnostics, "\n")
+	if !strings.Contains(got, "enum S has string/computed members") {
+		t.Errorf("missing honest string-enum diagnostic:\n%s", got)
+	}
+	if strings.Contains(got, "not exported") {
+		t.Errorf("false not-exported diagnostic leaked:\n%s", got)
 	}
 	// Barrels ride the same shared maps (leaves-first ordering lowers
 	// the definition before importers; star claims pass the exports

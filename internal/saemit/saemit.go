@@ -9478,6 +9478,13 @@ func (e *emitter) lowerImport(st *ast.Node) {
 						bindNSMembers(e, local, remote, res, members)
 						continue
 					}
+					// String/computed enums are exported in TS but have no
+					// ordinal table (single-file reads refuse too); name
+					// the gap instead of the false "not exported".
+					if res.nonIntEnums[remote] {
+						e.refuse(el, "enum %s has string/computed members (only all-integer enums link; single-file string reads are not lowerable either)", remote)
+						continue
+					}
 					if _, ok := res.exports[remote]; !ok {
 						e.refuse(el, "%s is not exported by %s", remote, mod)
 						continue

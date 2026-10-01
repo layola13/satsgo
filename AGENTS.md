@@ -813,3 +813,9 @@
   JEV blast-radius 首审 needs_regression_tests 96% →加固(契约自锁+wide正形)
   复审仍 needs_regression_tests 65%；全套件 + sweep 双绿后合入（独立入口，
   零 sweep 触达）。
+- ✅ 串枚举 import 期诚实诊断（`globalNonIntEnums` + modResolution + 进口商
+  先查 + 旧串段转诚实断言）：`export enum S{串}` 永不记 exports 致 import
+  期谎报 not exported（明明导出了）。现记非整数枚举集，import 期点名真因
+  （仅整数枚举可链 + 单文件串读亦拒）；use 位/桶行为不动。
+  全套件绿、286 sweep 零 diff。
+  JEV blast-radius local_only/safe_to_apply 91%。
