@@ -819,3 +819,9 @@
   （仅整数枚举可链 + 单文件串读亦拒）；use 位/桶行为不动。
   全套件绿、286 sweep 零 diff。
   JEV blast-radius local_only/safe_to_apply 91%。
+- ✅ tsx 裸组合引用（两遍组件名 + 已知直通 + props/children 拒 + 契约定义集）：
+  同文件 `<Badge />` 按名直通（消费者 user-component 节点链兄弟 Component，
+  发射纯文本故顺序无关）；未知大写、props、children 大声拒（后续切片；
+  props 需 slot 上下文投影，深水，另立项）。
+  单测成功 + 前向 + props/children 拒（含契约）；全套件绿、286 sweep 零 diff；
+  红绿验证通过。JEV blast-radius local_only/safe_to_apply 83%。

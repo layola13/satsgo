@@ -58,6 +58,55 @@ func TestLowerTSXDynamicRefuses(t *testing.T) {
 	}
 }
 
+// Bare same-file composition: <Badge /> references link by name to the
+// sibling <Component> (consumer user-component nodes); props, children
+// and unknown names refuse loudly (later slices).
+func TestLowerTSXComposition(t *testing.T) {
+	src := "function Badge() {\n  return <span>hi</span>;\n}\nfunction App() {\n  return <div>\n    <Badge />\n  </div>;\n}\n"
+	res := LowerTSX("app.tsx", src)
+	if res.Refused {
+		msgs := []string{}
+		for _, d := range res.Diagnostics {
+			msgs = append(msgs, d.Error())
+		}
+		t.Fatalf("unexpected refusal:\n%s", strings.Join(msgs, "\n"))
+	}
+	for _, want := range []string{
+		"<Component name=\"Badge\">",
+		"<Component name=\"App\">",
+		"<Badge />",
+	} {
+		if !strings.Contains(res.SAX, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAX)
+		}
+	}
+	if bad := checkSAXContract(res.SAX); len(bad) > 0 {
+		t.Errorf("contract violations: %v\n%s", bad, res.SAX)
+	}
+	// Use-before-def resolves the same way (emission is textual).
+	fwd := "function App() {\n  return <div>\n    <Badge />\n  </div>;\n}\nfunction Badge() {\n  return <span>hi</span>;\n}\n"
+	if r := LowerTSX("fwd.tsx", fwd); r.Refused {
+		msgs := []string{}
+		for _, d := range r.Diagnostics {
+			msgs = append(msgs, d.Error())
+		}
+		t.Fatalf("forward reference must lower:\n%s", strings.Join(msgs, "\n"))
+	}
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"props", "function Badge() {\n  return <span>hi</span>;\n}\nfunction App() {\n  return <div>\n    <Badge text=\"x\" />\n  </div>;\n}\n"},
+		{"children", "function Badge() {\n  return <span>hi</span>;\n}\nfunction App() {\n  return <div>\n    <Badge>x</Badge>\n  </div>;\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if r := LowerTSX(tc.name+".tsx", tc.src); !r.Refused {
+				t.Fatalf("expected refusal, got:\n%s", r.SAX)
+			}
+		})
+	}
+}
 // Click handlers lower setX(literal) arrows to @onClick_n SA blocks
 // (consumer: onClick={^name}, normalized to onclick). Everything else
 // (named refs, params, non-setter calls, computed args, other events)

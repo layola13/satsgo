@@ -63,6 +63,11 @@ type tsxEmitter struct {
 	// ^-prefixed or bare handler references).
 	handlers   []string
 	handlerSeq int
+	// comps holds every same-file component name (two-pass collection):
+	// bare references <Name /> to a known component pass through and link
+	// by name downstream (react parser user-component nodes); unknown
+	// uppercase tags, props and children refuse (later slices).
+	comps map[string]bool
 }
 
 func (x *tsxEmitter) refuse(n *ast.Node, format string, args ...any) {
@@ -85,6 +90,18 @@ func (x *tsxEmitter) refuse(n *ast.Node, format string, args ...any) {
 }
 
 func (x *tsxEmitter) lowerSourceFile(sf *ast.SourceFile) {
+	// Pass 1: collect same-file component names so references resolve
+	// regardless of definition order (emission is purely textual).
+	x.comps = map[string]bool{}
+	for _, st := range sf.AsSourceFile().Statements.Nodes {
+		if st.Kind != ast.KindFunctionDeclaration {
+			continue
+		}
+		if st.Name() == nil || st.Name().Kind != ast.KindIdentifier {
+			continue
+		}
+		x.comps[st.Name().Text()] = true
+	}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
 			continue
@@ -462,6 +479,35 @@ func bindingIdentText(el *ast.Node) (string, bool) {
 	return nm.Text(), true
 }
 
+// hasJSXAttrs reports whether an opening/self-closing element carries
+// any attributes (props ride a later slice; bare references carry none).
+func hasJSXAttrs(open *ast.Node) bool {
+	var attrs *ast.Node
+	switch open.Kind {
+	case ast.KindJsxOpeningElement:
+		attrs = open.AsJsxOpeningElement().Attributes
+	case ast.KindJsxSelfClosingElement:
+		attrs = open.AsJsxSelfClosingElement().Attributes
+	default:
+		return false
+	}
+	if attrs == nil {
+		return false
+	}
+	found := false
+	attrs.ForEachChild(func(a *ast.Node) bool {
+		found = true
+		return true
+	})
+	return found
+}
+
+// isCustomRef reports a same-file component reference (bare composition;
+// props and children need later slices and are gated at the call sites).
+func (x *tsxEmitter) isCustomRef(tag string) bool {
+	return tag != "" && 'A' <= tag[0] && tag[0] <= 'Z' && x.comps[tag]
+}
+
 // lowerJSXNode renders static JSX into the template builder.
 func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string) bool {
 	switch n.Kind {
@@ -470,6 +516,20 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 		tag, ok := x.jsxTagName(el.OpeningElement)
 		if !ok {
 			return false
+		}
+		if x.isCustomRef(tag) {
+			// Bare composition only: props ride allow_component_attrs
+			// and children ride <Slot />, both later slices.
+			if len(el.Children.Nodes) != 0 {
+				x.refuse(n, "component children need the composition slice (only bare <Badge /> references)")
+				return false
+			}
+			if hasJSXAttrs(el.OpeningElement) {
+				x.refuse(n, "component props need the composition slice (only bare <Badge /> references)")
+				return false
+			}
+			b.WriteString(indent + "<" + tag + " />\n")
+			return true
 		}
 		b.WriteString(indent + "<" + tag)
 		if !x.lowerJSXAttrs(el.OpeningElement, b) {
@@ -489,6 +549,15 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 			return false
 		}
 		b.WriteString(indent + "<" + tag)
+		if x.isCustomRef(tag) {
+			// Props on self-closing references need the props slice.
+			if hasJSXAttrs(n) {
+				x.refuse(n, "component props need the composition slice (only bare <Badge /> references)")
+				return false
+			}
+			b.WriteString(" />\n")
+			return true
+		}
 		if !x.lowerJSXAttrs(n, b) {
 			return false
 		}
@@ -660,6 +729,12 @@ func (x *tsxEmitter) jsxTagName(open *ast.Node) (string, bool) {
 		return "", false
 	}
 	if 'A' <= name[0] && name[0] <= 'Z' {
+		// Same-file components pass through by name (consumer links
+		// user-component nodes to sibling <Component> blocks); unknown
+		// names, props and children need later slices.
+		if x.comps[name] {
+			return name, true
+		}
 		x.refuse(tag, "custom component <%s> needs the composition slice", name)
 		return "", false
 	}

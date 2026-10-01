@@ -31,6 +31,7 @@ var contractStateLine = regexp.MustCompile(`(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=
 var contractInterp = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 var contractTag = regexp.MustCompile(`</?([A-Za-z][A-Za-z0-9._-]*)`)
 var contractAttr = regexp.MustCompile(`\s([A-Za-z_:][A-Za-z0-9_.:-]*)=`)
+var contractCompDef = regexp.MustCompile(`<Component name="([A-Za-z_][A-Za-z0-9_]*)">`)
 
 // contractDangerous mirrors react parser.zig dangerous_tags /
 // dangerous_attrs (the only hard refusals on the tag/attribute axes).
@@ -92,6 +93,12 @@ func checkSAXContract(sax string) []string {
 	// Tag/attribute gates mirror the consumer: only dangerous tags
 	// and dangerous attributes are hard refusals (lowercase tags and
 	// aria-/data- attributes pass; events arrive as onClick={^name}).
+	// Uppercase tags must resolve to a sibling <Component> (bare
+	// composition links by name downstream).
+	defs := map[string]bool{}
+	for _, m := range contractCompDef.FindAllStringSubmatch(sax, -1) {
+		defs[m[1]] = true
+	}
 	for _, m := range contractTag.FindAllStringSubmatch(sax, -1) {
 		tag := m[1]
 		if tag == "Component" || tag == "state" {
@@ -100,8 +107,8 @@ func checkSAXContract(sax string) []string {
 		if contractDangerousTags[tag] {
 			bad = append(bad, "dangerous tag <"+tag+">")
 		}
-		if tag[0] >= 'A' && tag[0] <= 'Z' {
-			bad = append(bad, "custom component <"+tag+"> needs composition")
+		if tag[0] >= 'A' && tag[0] <= 'Z' && !defs[tag] {
+			bad = append(bad, "unresolved component <"+tag+">")
 		}
 	}
 	for _, m := range contractAttr.FindAllStringSubmatch(sax, -1) {
