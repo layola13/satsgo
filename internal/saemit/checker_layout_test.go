@@ -78,3 +78,26 @@ func TestCheckerLayoutSpread(t *testing.T) {
 		t.Fatalf("expected spread-unknown refusal, got:\n%s", r.SAI)
 	}
 }
+
+func TestTrackBindingCheckerPriority(t *testing.T) {
+	// todo/02#2 v4: declaration-site checker layouts beat annotation
+	// guesses. Unannotated factory results lower (checker supplies P);
+	// annotated literals lower identically (checker-first, annotation
+	// fallback); generic instantiations keep width precision.
+	factory := "interface P { x: i32; y: i32 }\nfunction mk(): P { return { x: 1, y: 2 }; }\nfunction main(): i32 {\n  const v = mk();\n  return v.x + v.y;\n}\n"
+	res := mustLower(t, "cb1.ts", factory)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want checker-supplied field loads, got:\n%s", res.SAI)
+	}
+	annotated := "interface P { x: i32; y: i32 }\nfunction main(): i32 {\n  const p: P = { x: 1, y: 2 };\n  return p.x + p.y;\n}\n"
+	res = mustLower(t, "cb2.ts", annotated)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want annotated field loads, got:\n%s", res.SAI)
+	}
+	// Struct params resolve through the declaration checker path.
+	param := "interface P { x: i32; y: i32 }\nfunction f(p: P): i32 { return p.x + p.y; }\nfunction main(): i32 {\n  return 0;\n}\n"
+	res = mustLower(t, "cb3.ts", param)
+	if c := strings.Count(res.SAI, "as i32"); c < 2 {
+		t.Errorf("want param field loads, got:\n%s", res.SAI)
+	}
+}

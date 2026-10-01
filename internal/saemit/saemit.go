@@ -918,7 +918,7 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 		ptype := tI32
 		if pd := p.AsParameterDeclaration(); pd.Type != nil {
 			ptype = annotationType(pd.Type)
-			e.trackBinding(pname, pd.Type, nil, tUnknown)
+			e.trackBindingAt(pname, pd.Type, nil, p.AsNode(), tUnknown)
 		}
 		// ...rest collects the packed variadic slice (callers pack).
 		if pd := p.AsParameterDeclaration(); pd.DotDotDotToken != nil {
@@ -1153,7 +1153,7 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 		if pd := params[i].AsParameterDeclaration(); pd.Type != nil {
 			annot = pd.Type
 		}
-		e.trackBinding(p, annot, nil, ptypes[i])
+		e.trackBindingAt(p, annot, nil, params[i].AsNode(), ptypes[i])
 		e.declareOwned(p)
 	}
 	// Captures arrive as same-named trailing params: re-declare them so
@@ -1341,7 +1341,7 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		// same-named module slot exists (shadowing; assignLocal never
 		// routes to slots).
 		e.assignLocal(name, val, operandKind(val, init), vtype, d)
-		e.trackBinding(name, d.AsVariableDeclaration().Type, init, vtype)
+		e.trackBindingAt(name, d.AsVariableDeclaration().Type, init, d, vtype)
 		// Adopt a staged crypto Hash/Hmac accumulator onto the bound name.
 		// The callee may be an import alias (`import { createHash as ch}`),
 		// so resolve through the remote export name like the call site.
@@ -1418,6 +1418,15 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 // trackBinding records receiver-kind information for method dispatch:
 // struct layouts, string/array bindings and array element SA names.
 func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType) {
+	e.trackBindingAt(name, annot, init, nil, vtype)
+}
+
+// trackBindingAt is trackBinding with the declaration name node attached
+// so the checker resolves first (todo/02#2 v4): exact checker layouts beat
+// annotation guesses; generic instantiations (Box<i32> vs Box<string>)
+// stay annotation-driven for width precision, and dialect scalars stay on
+// scalarTypeofKind where the checker is blind under NoLib.
+func (e *emitter) trackBindingAt(name string, annot, init, nameNode *ast.Node, vtype saType) {
 	if e.varLayouts == nil {
 		e.varLayouts = map[string]*layout{}
 	}
@@ -1430,16 +1439,36 @@ func (e *emitter) trackBinding(name string, annot, init *ast.Node, vtype saType)
 	if e.arrElems == nil {
 		e.arrElems = map[string]string{}
 	}
+	// Checker first (todo/02#2 v4): the declaration name's checker type
+	// beats syntax annotation guesses. Generic annotations keep priority
+	// for width precision (Box<i32> vs Box<string> instantiate distinct
+	// layouts the bare checker name cannot distinguish).
+	genericHit := false
+	if annot != nil && annot.Kind == ast.KindTypeReference && len(annot.TypeArguments()) > 0 {
+		if l := e.layoutOfAnnotation(annot); l != nil {
+			e.varLayouts[name] = l
+			genericHit = true
+		}
+	}
+	checkerHit := false
+	if !genericHit && nameNode != nil {
+		if l := e.checkerLayoutForDecl(nameNode); l != nil {
+			e.varLayouts[name] = l
+			checkerHit = true
+		}
+	}
 	// struct-typed bindings remember their layout for field access
 	// (generic annotations instantiate per type argument).
-	if annot != nil && annot.Kind == ast.KindTypeReference {
+	// Annotation fallback: only when the checker saw nothing (checker-blind
+	// dialect shapes, NoLib gaps); checker hits already recorded above.
+	if !genericHit && !checkerHit && annot != nil && annot.Kind == ast.KindTypeReference {
 		if l := e.layoutOfAnnotation(annot); l != nil {
 			e.varLayouts[name] = l
 		}
 	}
 	// Union constituents contribute the first known struct layout
 	// (`Box | null` still reads .v through the Box layout under a guard).
-	if annot != nil && (annot.Kind == ast.KindUnionType || annot.Kind == ast.KindIntersectionType) {
+	if !checkerHit && annot != nil && (annot.Kind == ast.KindUnionType || annot.Kind == ast.KindIntersectionType) {
 		for _, m := range annot.AsUnionTypeNode().Types.Nodes {
 			if m.Kind == ast.KindTypeReference {
 				if l := e.layoutOfAnnotation(m); l != nil {

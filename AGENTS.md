@@ -874,3 +874,12 @@
   multi-arrow-const 仍在 drain 拒（tryTopLevelArrow 单形）。
   全套件绿、286 sweep 零 diff；红绿验证通过；真机 exit 3/7 对数。
   JEV blast-radius local_only/safe_to_apply 80%。
+- ✅ trackBinding checker 优先 v4（`checkerLayoutForDecl` + 三声明点透传 decl 节点 + 注解仅回退）：
+  声明名经 checker 精确名/字段集先行（`Name()` 解包标识符，nil-safe 永不拒）；
+  泛型具化注解保留宽度精度（`Box<i32>` vs `Box<string>`），方言标量保留
+  `scalarTypeofKind`（NoLib 下 checker 盲区），union/字面量仅 checker 未命中时回退。
+  单测 `TestTrackBindingCheckerPriority`（工厂推断/注解字面量/结构体形参三形）；
+  全套件绿（`go vet` 干净）、286 sweep 基线双二进制零 diff（`SWEEP_ZERO_DIFF_286`）、
+  形状 286 全过、投影 62 sa_std + 37 node + 13 deno 全过；
+  本容器无 `sa` 二进制，真机 e2e 以结构校验代替（既定口径）。
+  JEV blast-radius local_only/needs_regression_tests（回归已补）。

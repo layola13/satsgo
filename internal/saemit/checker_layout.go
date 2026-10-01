@@ -375,6 +375,32 @@ func (e *emitter) layoutOfCheckerName(n *ast.Node) *layout {
 	return nil
 }
 
+// checkerLayoutForDecl resolves a struct layout for a declaration name
+// node via the checker: exact interface/class/alias names first, then
+// anonymous field sets via matchLayout. Nil when the checker is blind
+// (nil context, dialect names, unknown shapes). Never refuses.
+func (e *emitter) checkerLayoutForDecl(nameNode *ast.Node) *layout {
+	if e.tcx == nil || nameNode == nil {
+		return nil
+	}
+	nn := nameNode
+	// Parameter/variable declaration nodes carry their identifier under
+	// Name(): query the identifier so GetTypeAtLocation sees the declared
+	// type rather than the declaration form.
+	if nm := nameNode.Name(); nm != nil {
+		nn = nm
+	}
+	if l := e.layoutOfCheckerName(nn); l != nil {
+		return l
+	}
+	if fields, ok := e.tcx.layoutDataFields(nn); ok {
+		if l := e.matchLayout(fields); l != nil {
+			return l
+		}
+	}
+	return nil
+}
+
 // layoutOfNode resolves a struct layout for a base register, consulting
 // the checker when the syntax-recorded map misses: recorded layouts win,
 // then checker interface/class/alias names, then anonymous field sets via
