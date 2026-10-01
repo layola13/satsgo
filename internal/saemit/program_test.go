@@ -379,8 +379,16 @@ func TestLowerProgramNamespaceMemberImport(t *testing.T) {
 		"lib.ts":  constLib,
 	}
 	r2 := LowerProgram("main.ts", constUse)
-	if !r2.Refused {
-		t.Fatalf("expected non-callable-member refusal, got:\n%s", r2.SAI)
+	if r2.Refused {
+		t.Fatalf("expected const link, got diagnostics:\n%s", strings.Join(r2.Diagnostics, "\n"))
+	}
+	strLib := "namespace N {\n  export const S = \"hi\";\n}\nexport function ping(s: string): i32 {\n  return 1;\n}\n"
+	strUse := map[string]string{
+		"main.ts": "import { N, ping } from \"./lib\";\nfunction main(): i32 {\n  return ping(N.S);\n}\n",
+		"lib.ts":  strLib,
+	}
+	if r3 := LowerProgram("main.ts", strUse); r3.Refused {
+		t.Fatalf("expected string-const link, got diagnostics:\n%s", strings.Join(r3.Diagnostics, "\n"))
 	}
 }
 

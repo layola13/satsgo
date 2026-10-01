@@ -36,6 +36,12 @@ type fileExports struct {
 	// binds N.f per member; classes/enums/values stay out so their uses
 	// keep today's loud diagnostics).
 	nsMembers map[string]map[string]string
+	// nsConsts maps a namespace name to member -> fold text for literal
+	// consts (nsConstStr marks string consts); importers fold instead of
+	// binding, mirroring top-level consts. Lets and computed inits stay
+	// out so their uses keep loud diagnostics.
+	nsConsts map[string]map[string]string
+	nsConstStr map[string]map[string]bool
 	// reexp maps a locally-exported name to "fileKey.remote" for
 	// `export {x} from` forms; starFrom lists `export * from` targets.
 	// starProvided marks names this file provides ONLY via star fan-out
@@ -90,6 +96,10 @@ type modResolution struct {
 	// nsMembers maps a namespace name to member -> flat local
 	// (see fileExports.nsMembers).
 	nsMembers map[string]map[string]string
+	// nsConsts maps a namespace name to member -> fold text
+	// (see fileExports.nsConsts).
+	nsConsts map[string]map[string]string
+	nsConstStr map[string]map[string]bool
 }
 
 // unreachableOrder lists files outside the reachable set in sorted order
@@ -561,6 +571,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 					linkKindTmp[p][nm] = "namespace"
 					collectNsProgramSigs(moduleMemberStmts(st), nm, globalRets[p], globalArity[p], globalRest[p], globalDefaults[p])
 					collectNsMembers(moduleMemberStmts(st), nm, expOf[p])
+					collectNsConsts(moduleMemberStmts(st), nm, expOf[p])
 				}
 			case ast.KindExportDeclaration:
 				fromForm := collectReExport(st, p, files, expOf[p])
@@ -794,6 +805,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				defQualified: defQ,
 				defNS:        expOf[tgt].defNS,
 				nsMembers:   expOf[tgt].nsMembers,
+				nsConsts:    expOf[tgt].nsConsts,
+				nsConstStr:  expOf[tgt].nsConstStr,
 			}
 		}
 		links[p] = lk

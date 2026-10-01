@@ -7316,6 +7316,19 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 	// its file (same-file values shadow first, as for calls).
 	if pa.Expression.Kind == ast.KindIdentifier {
 		root := pa.Expression.Text()
+		// Imported namespace consts fold by value (bound at import
+		// from the member tables; mirrors lowerNamespaceMemberRead).
+		if _, ok := e.nsImports[root]; ok {
+			if lit, ok := e.constVals[root+"."+pa.Name().Text()]; ok {
+				if e.constIsStr[root+"."+pa.Name().Text()] {
+					return e.lowerStringLiteral(lit), tString
+				}
+				if isFloatLiteral(lit) {
+					return lit, tF64
+				}
+				return lit, tI32
+			}
+		}
 		if _, ok := e.constVals[root]; !ok && e.modStateOf(root) == nil {
 			if _, ok := e.arrowAliases[root]; !ok && !e.isValueReceiver(root) {
 				if r := e.linkRoute(root); r != "" {
@@ -9339,6 +9352,24 @@ func (e *emitter) lowerImport(st *ast.Node) {
 						}
 						e.enums[local] = members
 						continue
+					}
+					// Namespace literal consts fold by value (mirrors the top-level
+					// const import above; the dotted key keeps them namespaced).
+					if consts, ok := res.nsConsts[remote]; ok {
+						for member, lit := range consts {
+							if e.constVals == nil {
+								e.constVals = map[string]string{}
+							}
+							e.constVals[local+"."+member] = lit
+						}
+						if strs, ok := res.nsConstStr[remote]; ok {
+							for member := range strs {
+								if e.constIsStr == nil {
+									e.constIsStr = map[string]bool{}
+								}
+								e.constIsStr[local+"."+member] = true
+							}
+						}
 					}
 					// Namespace declarations bind per member (`import { N }`
 					// then N.f(); the namespace itself is not a value;

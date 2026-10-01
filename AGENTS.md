@@ -610,6 +610,11 @@
   `import { N }` 后 `N.M.g()` 经虚线键（`N.M.g→N_M_g`）与 Deno 链后的并联分支
   路由；根非导入命名空间原样穿透，深路径未知大声拒。探针真机 42 与 node 一致；
   单测贯通 + 未知深成员拒 2 形；286 sweep 零回退 + check 286 全过；全套件绿。
+- ✅ 命名空间 const 跨文件折叠（`nsConsts/nsConstStr` 双表 + 绑定虚线键 + 读位折叠）：
+  `import { N }` 后 `N.K` 按字面量折叠（数/布/串，照抄同文件读位三臂）；
+  let 与计算初值永不进表，大声依旧。途中抓到具名分支 `continue` 跳过 const
+  绑定（绑定前移修复）。探针 `N.f(N.K)` 真机 14 与 node 一致；单测数/串 const
+  贯通 2 形；286 sweep 零回退 + check 286 全过；全套件绿。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

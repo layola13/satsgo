@@ -1182,3 +1182,83 @@ func collectNsMembers(members []*ast.Node, prefix string, exp *fileExports) {
 		}
 	}
 }
+
+// collectNsConsts records namespace literal const members for cross-file
+// imports into exp.nsConsts (ns -> member -> fold text; nsConstStr marks
+// strings). Literal arms mirror foldNsConstMember; lets, non-const
+// declarators and computed inits stay out so their uses keep loud
+// diagnostics. Nested namespaces recurse under their full path key.
+func collectNsConsts(members []*ast.Node, prefix string, exp *fileExports) {
+	for _, m := range members {
+		if m.Kind == ast.KindModuleDeclaration {
+			if isAmbientModule(m) {
+				continue
+			}
+			nm, ok := moduleDeclName(m)
+			if !ok {
+				continue
+			}
+			sub := nm
+			if prefix != "" {
+				sub = prefix + "_" + nm
+			}
+			collectNsConsts(moduleMemberStmts(m), sub, exp)
+			continue
+		}
+		if m.Kind != ast.KindVariableStatement {
+			continue
+		}
+		vs := m.AsVariableStatement()
+		if vs.DeclarationList.Flags&ast.NodeFlagsConst == 0 {
+			continue
+		}
+		dl := vs.DeclarationList.AsVariableDeclarationList()
+		if len(dl.Declarations.Nodes) != 1 {
+			continue
+		}
+		d := dl.Declarations.Nodes[0]
+		member, ok := bindingNameText(d)
+		if !ok {
+			continue
+		}
+		init := d.Initializer()
+		if init == nil {
+			continue
+		}
+		var lit string
+		isStr := false
+		switch init.Kind {
+		case ast.KindNumericLiteral:
+			lit = init.Text()
+		case ast.KindTrueKeyword:
+			lit = "1"
+		case ast.KindFalseKeyword:
+			lit = "0"
+		case ast.KindStringLiteral:
+			s, ok := stringLiteralText(init)
+			if !ok {
+				continue
+			}
+			lit = s
+			isStr = true
+		default:
+			continue
+		}
+		if exp.nsConsts == nil {
+			exp.nsConsts = map[string]map[string]string{}
+		}
+		if exp.nsConsts[prefix] == nil {
+			exp.nsConsts[prefix] = map[string]string{}
+		}
+		exp.nsConsts[prefix][member] = lit
+		if isStr {
+			if exp.nsConstStr == nil {
+				exp.nsConstStr = map[string]map[string]bool{}
+			}
+			if exp.nsConstStr[prefix] == nil {
+				exp.nsConstStr[prefix] = map[string]bool{}
+			}
+			exp.nsConstStr[prefix][member] = true
+		}
+	}
+}
