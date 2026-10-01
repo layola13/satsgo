@@ -6,7 +6,7 @@ import (
 )
 
 func TestLowerTSXStatic(t *testing.T) {
-	src := "function Greet() {\n  return <div className=\"g\">\n    <h1>Hello</h1>\n    <br />\n  </div>;\n}\n"
+	src := "function Greet() {\n  return <div className=\"g\">\n    <h1>Hello</h1>\n    <p>hi</p>\n  </div>;\n}\n"
 	res := LowerTSX("g.tsx", src)
 	if res.Refused {
 		msgs := []string{}
@@ -18,15 +18,26 @@ func TestLowerTSXStatic(t *testing.T) {
 	for _, want := range []string{
 		"<Component name=\"Greet\">",
 		"<state>",
-		"<div className=\"g\">",
+		"<div class=\"g\">",
 		"<h1>",
 		"Hello",
-		"<br />",
+		"<p>",
 		"</Component>",
 	} {
 		if !strings.Contains(res.SAX, want) {
 			t.Errorf("missing %q:\n%s", want, res.SAX)
 		}
+	}
+	// Non-whitelisted tags refuse (the .sax parser answers UnknownTag;
+	// no react/sax demo uses `br`).
+	br := "function C() {\n  return <div>\n    <br />\n  </div>;\n}\n"
+	if r := LowerTSX("br.tsx", br); !r.Refused {
+		t.Fatalf("expected tag refusal, got:\n%s", r.SAX)
+	}
+	// Non-whitelisted attributes refuse (InvalidAttribute downstream).
+	attr := "function C() {\n  return <div data-x=\"1\">x</div>;\n}\n"
+	if r := LowerTSX("at.tsx", attr); !r.Refused {
+		t.Fatalf("expected attribute refusal, got:\n%s", r.SAX)
 	}
 }
 

@@ -784,3 +784,14 @@
   真机 `sa check` 过 + `sa run` exit 7==3+4 对数；286 sweep 零 diff。
   JEV blast-radius local_only/safe_to_apply 61%（needs_regression 25%，
   全套件 + sweep + 真机三重已覆盖）。
+- ✅ tsx 发射对齐 .sax 白名单（jev t1 + className 映射 87%，白名单双表 +
+  两拒一映射 + 静态测同步 + 新结构契约）：
+  实测消费者硬拒未知标签/属性（`UnknownTag`/`InvalidAttribute`），而我方
+  `<br/>`/`className` 曾照发（`br` 无 demo 用，`className` 非法属性名）——
+  跨仓静默错译。现标签白名单拒、`className→class` 映射（React 既定语义，
+  注释 + `class="g"` 双断言）、余下属性拒；契约逐条镜像 parser.zig
+  （Component/state 平衡、state 唯一排序、插值引用、onMount 形；无堆
+  state 故无 `!` 释放行；真机不可用已注明）。
+  全套件绿、286 sweep 零 diff；红绿验证通过。
+  JEV blast-radius local_only/safe_to_apply 49%（needs_regression 30%，
+  tsx 独立入口 + sweep 零触达已覆盖）。

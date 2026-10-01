@@ -472,6 +472,15 @@ func (x *tsxEmitter) lowerJSXAttrs(open *ast.Node, b *strings.Builder) bool {
 			ok = false
 			return true
 		}
+		// React→DOM identity mapping (documented; asserted in tests).
+		if aname == "className" {
+			aname = "class"
+		}
+		if !saxAttrWhitelist[aname] {
+			x.refuse(a, "attribute %s is not in the .sax surface (see sa_plugin_sax attr_whitelist)", aname)
+			ok = false
+			return true
+		}
 		if at.Initializer == nil {
 			b.WriteString(" " + aname)
 			return false
@@ -488,6 +497,32 @@ func (x *tsxEmitter) lowerJSXAttrs(open *ast.Node, b *strings.Builder) bool {
 		return true
 	})
 	return ok
+}
+
+// saxTagWhitelist mirrors sa_plugin_sax/src/sax/parser.zig tag_whitelist
+// (layout/text/inter/list/media/table). Anything else (e.g. `br`, which no
+// react/sax demo uses) is rejected by the consumer with UnknownTag, so the
+// emitter refuses rather than mistranslating across the repo boundary.
+var saxTagWhitelist = map[string]bool{
+	"div": true, "section": true, "article": true, "header": true,
+	"footer": true, "main": true, "nav": true, "aside": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+	"p": true, "span": true, "label": true, "strong": true, "em": true,
+	"button": true, "input": true, "textarea": true, "select": true,
+	"option": true, "form": true,
+	"ul": true, "ol": true, "li": true,
+	"img": true, "video": true, "canvas": true,
+	"table": true, "thead": true, "tbody": true, "tr": true, "th": true, "td": true,
+}
+
+// saxAttrWhitelist mirrors parser.zig attr_whitelist. `className` maps to
+// `class` (React→DOM identity, jev_choose 87%; asserted in tests); every
+// other non-listed attribute (including lowercase onclick, which is not a
+// React handler) refuses: the consumer answers InvalidAttribute.
+var saxAttrWhitelist = map[string]bool{
+	"class": true, "style": true, "value": true, "placeholder": true,
+	"disabled": true, "id": true, "width": true, "height": true,
+	"renderer": true,
 }
 
 // jsxTagName resolves lowercase intrinsic tags; uppercase (custom)
@@ -514,6 +549,10 @@ func (x *tsxEmitter) jsxTagName(open *ast.Node) (string, bool) {
 	}
 	if 'A' <= name[0] && name[0] <= 'Z' {
 		x.refuse(tag, "custom component <%s> needs the composition slice", name)
+		return "", false
+	}
+	if !saxTagWhitelist[name] {
+		x.refuse(tag, "tag <%s> is not in the .sax surface (see sa_plugin_sax tag_whitelist)", name)
 		return "", false
 	}
 	return name, true
