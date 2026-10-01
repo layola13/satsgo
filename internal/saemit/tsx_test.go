@@ -41,7 +41,7 @@ func TestLowerTSXStatic(t *testing.T) {
 }
 
 func TestLowerTSXDynamicRefuses(t *testing.T) {
-	hook := "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => setN(n + 1)}>x</button>;\n}\n"
+	hook := "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => setN(n + 2)}>x</button>;\n}\n"
 	res := LowerTSX("c.tsx", hook)
 	if !res.Refused {
 		t.Fatalf("expected hooks refusal, got:\n%s", res.SAX)
@@ -226,6 +226,30 @@ func TestLowerTSXClickHandler(t *testing.T) {
 	if bad := checkSAXContract(res.SAX); len(bad) > 0 {
 		t.Errorf("contract violations: %v\n%s", bad, res.SAX)
 	}
+	// sala 07_ui/02_syntax: same-state +/- 1 lowers (counter inc/dec);
+	// other computed shapes stay loud.
+	incSrc := "function Counter() {\n  const [count, setCount] = useState(0);\n  return <section>\n    <button onClick={() => setCount(count + 1)}>+</button>\n    <button onClick={() => setCount(count - 1)}>-</button>\n  </section>;\n}\n"
+	incRes := LowerTSX("inc.tsx", incSrc)
+	if incRes.Refused {
+		msgs := []string{}
+		for _, d := range incRes.Diagnostics {
+			msgs = append(msgs, d.Error())
+		}
+		t.Fatalf("increment refusal:\n%s", strings.Join(msgs, "\n"))
+	}
+	for _, want := range []string{
+		"count = load state+Counter_count as i64",
+		"count = add count, 1",
+		"count = sub count, 1",
+		"store state+Counter_count, count as i64",
+	} {
+		if !strings.Contains(incRes.SAX, want) {
+			t.Errorf("missing %q:\n%s", want, incRes.SAX)
+		}
+	}
+	if bad := checkSAXContract(incRes.SAX); len(bad) > 0 {
+		t.Errorf("contract violations: %v\n%s", bad, incRes.SAX)
+	}
 	cases := []struct {
 		name string
 		src  string
@@ -233,7 +257,10 @@ func TestLowerTSXClickHandler(t *testing.T) {
 		{"named ref", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={setN}>x</button>;\n}\n"},
 		{"params", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={(e) => setN(1)}>x</button>;\n}\n"},
 		{"non-setter", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => console.log(1)}>x</button>;\n}\n"},
-		{"computed", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => setN(n + 1)}>x</button>;\n}\n"},
+		{"computed step", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => setN(n + 2)}>x</button>;\n}\n"},
+		{"computed other state", "function C() {\n  const [n, setN] = useState(0);\n  const [m, setM] = useState(0);\n  return <button onClick={() => setN(m + 1)}>x</button>;\n}\n"},
+		{"computed mul", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => setN(n * 2)}>x</button>;\n}\n"},
+		{"bool increment", "function C() {\n  const [f, setF] = useState(false);\n  return <button onClick={() => setF(f + 1)}>x</button>;\n}\n"},
 		{"other event", "function C() {\n  const [n, setN] = useState(0);\n  return <input onChange={() => setN(1)}>x</input>;\n}\n"},
 	}
 	for _, tc := range cases {

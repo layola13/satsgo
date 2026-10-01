@@ -470,6 +470,35 @@ func (x *tsxEmitter) lowerClickHandler(a *ast.Node, at *ast.JsxAttribute) (strin
 			return fail(s, "setter calls take exactly 1 argument")
 		}
 		arg := sc.Arguments.Nodes[0]
+		field := x.setterOf[sc.Expression.Text()]
+		if field == "" {
+			return fail(s, "setter %s has no state slot", sc.Expression.Text())
+		}
+		// sala 07_ui/02_syntax: handler allows `page = page + 1`
+		// (counter inc/dec). Accept only the same-slot `field +/- 1`
+		// integer form; everything else stays loud.
+		if arg.Kind == ast.KindBinaryExpression {
+			bin := arg.AsBinaryExpression()
+			op := bin.OperatorToken.Kind
+			if (op == ast.KindPlusToken || op == ast.KindMinusToken) &&
+				bin.Left != nil && bin.Left.Kind == ast.KindIdentifier &&
+				bin.Left.Text() == field &&
+				bin.Right != nil && bin.Right.Kind == ast.KindNumericLiteral &&
+				bin.Right.Text() == "1" {
+				if sv, ok := x.stateVars[field]; ok && strings.Contains(sv, "as i1") {
+					return fail(arg, "boolean state %s has no increment shape", field)
+				}
+				verb := "add"
+				if op == ast.KindMinusToken {
+					verb = "sub"
+				}
+				stores = append(stores, fmt.Sprintf("%s = load state+%s_%s as i64", field, x.comp, field))
+				stores = append(stores, fmt.Sprintf("%s = %s %s, 1", field, verb, field))
+				stores = append(stores, fmt.Sprintf("store state+%s_%s, %s as i64", x.comp, field, field))
+				continue
+			}
+			return fail(arg, "setter computed arguments hold only same-state +/- 1 (sala counter shape)")
+		}
 		var val, ty string
 		switch arg.Kind {
 		case ast.KindNumericLiteral:
@@ -483,10 +512,6 @@ func (x *tsxEmitter) lowerClickHandler(a *ast.Node, at *ast.JsxAttribute) (strin
 			val, ty = "0", "i1"
 		default:
 			return fail(arg, "setter arguments must be integer/boolean literals")
-		}
-		field := x.setterOf[sc.Expression.Text()]
-		if field == "" {
-			return fail(s, "setter %s has no state slot", sc.Expression.Text())
 		}
 		stores = append(stores, fmt.Sprintf("store state+%s_%s, %s as %s", x.comp, field, val, ty))
 	}
