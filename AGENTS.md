@@ -585,6 +585,10 @@
 - ✅ 形状校验器同步带码 panic（`tools/check_sai_shape.py` 1 行，零发射器变更）：
   `panic` 终结符接受 `panic(<code>)`（2501/2502/2503/1403），与裸 panic 带码
   发射对齐；`panic(foo)` 非数字仍拒。python 双向验证；286 sweep 形状全过。
+- ✅ linkRoute enum 回归锁（`program_test.go` 纯单测，零产品代码变更）：
+  reachable 全整数 enum 成员经 sharedEnums 直接折叠、无需 import（实测证伪
+  loop1-kind 设想，按删无可删回滚；JEV 回滚裁决）；unreachable enum miss 走
+  loop2 value 分支报 `import it first`（上一轮分流自动覆盖）。单测锁定该形，全套件绿。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

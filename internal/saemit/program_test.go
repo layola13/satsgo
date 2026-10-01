@@ -287,7 +287,7 @@ func TestLowerProgramReexpSameFileRefuses(t *testing.T) {
 // Cross-file misses route to the defining file (kind-aware): importable
 // kinds point at the import, the rest name their gap honestly.
 func TestLinkRouteMisses(t *testing.T) {
-	lib := "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\nexport const K = 7;\nexport class C {\n  v: i32 = 0;\n  constructor(n: i32) {\n    this.v = n;\n  }\n}\nnamespace N {\n  export function f(): i32 {\n    return 1;\n  }\n}\n"
+	lib := "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\nexport const K = 7;\nexport class C {\n  v: i32 = 0;\n  constructor(n: i32) {\n    this.v = n;\n  }\n}\nnamespace N {\n  export function f(): i32 {\n    return 1;\n  }\n}\nexport enum E {\n  A,\n  B,\n}\n"
 	cases := []struct {
 		name string
 		main string
@@ -298,6 +298,7 @@ func TestLinkRouteMisses(t *testing.T) {
 		{"new", "function main(): i32 {\n  const c = new C(3);\n  return c.v;\n}\n", "C is defined in lib.ts; import it first"},
 		{"extends", "class D extends C {\n}\nfunction main(): i32 {\n  return 0;\n}\n", "C is defined in lib.ts; import it first"},
 		{"ns call", "function main(): i32 {\n  return N.f();\n}\n", "N is a namespace defined in lib.ts; cross-file namespace member access is not lowerable yet"},
+		{"enum read", "function main(): i32 {\n  return E.A;\n}\n", "E is defined in lib.ts; import it first"},
 		{"private const", "function main(): i32 {\n  return h();\n}\n", "h is defined in lib.ts but not exported"},
 	}
 	for _, tc := range cases {
