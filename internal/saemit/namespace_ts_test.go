@@ -307,6 +307,24 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "call @A_B_sum()") {
 		t.Errorf("missing nested multi-let call:\n%s", res.SAI)
 	}
+	// Reopen split: single lets across bodies share the slot registry.
+	rsrc := `namespace M {
+  export let a = 1;
+}
+namespace M {
+  export let b = 2;
+  export function sum(): i32 {
+    return a + b;
+  }
+}
+function main(): i32 {
+  return M.sum();
+}
+`
+	res = mustLower(t, "multireopen.ts", rsrc)
+	if !strings.Contains(res.SAI, "call @M_sum()") {
+		t.Errorf("missing reopen-split multi-let call:\n%s", res.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {
