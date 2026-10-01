@@ -435,6 +435,26 @@ func TestLowerProgramNamespaceClassImport(t *testing.T) {
 	}
 }
 
+// An already-imported function used as a value names the real gap
+// (no first-class values) instead of advising a vacuous import.
+func TestLinkRouteFirstClassValue(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { add } from \"./lib\";\nfunction apply(f: (a: i32, b: i32) => i32): i32 {\n  return f(20, 22);\n}\nfunction main(): i32 {\n  return apply(add);\n}\n",
+		"lib.ts":  "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\n",
+	}
+	res := LowerProgram("main.ts", files)
+	if !res.Refused {
+		t.Fatalf("expected first-class refusal, got:\n%s", res.SAI)
+	}
+	got := strings.Join(res.Diagnostics, "\n")
+	if !strings.Contains(got, "add as a value is not lowerable (functions have no first-class value; call add(...) directly)") {
+		t.Errorf("missing first-class diagnostic:\n%s", got)
+	}
+	if strings.Contains(got, "import it first") {
+		t.Errorf("vacuous import advice leaked:\n%s", got)
+	}
+}
+
 func TestLinkNsFileImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",

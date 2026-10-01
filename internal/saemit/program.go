@@ -127,6 +127,12 @@ func (e *emitter) linkRoute(name string) string {
 	if e.link == nil {
 		return ""
 	}
+	// Already available here (own definition or import): advising an
+	// import is vacuous; the gap is the use shape. Functions have no
+	// first-class value in the subset (call them instead).
+	if e.linkExportKind[name] == "function" && (e.localDefs[name] || e.importedNames[name]) {
+		return fmt.Sprintf("%s as a value is not lowerable (functions have no first-class value; call %s(...) directly)", name, name)
+	}
 	file, ok := e.linkExports[name]
 	if !ok {
 		return ""

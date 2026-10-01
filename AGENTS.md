@@ -621,6 +621,10 @@
   顶层实例行为不变）。探针 `c.v` 真机 41 与 node 一致；单测贯通 + 未知类拒；
   286 sweep 零回退 + check 286 全过；saemit 全套件绿（`fswatch` 系容器无
   fanotify 环境项，零交集）。
+- ✅ linkRoute 一阶值诚实文案（`program.go` 顶部 function+已绑定分支 + 单测双断言）：
+  已在手（own/localDefs 或 import）的函数名作值用时，不再劝无用的 import，
+  直说无一阶值并指路直接调用（措辞对齐 Math 别名拒）。既有 linkRoute 单测
+  全用未导入名，零触碰；286 sweep 零回退 + check 286 全过；全套件绿。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。
