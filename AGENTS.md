@@ -795,3 +795,11 @@
   全套件绿、286 sweep 零 diff；红绿验证通过。
   JEV blast-radius local_only/safe_to_apply 49%（needs_regression 30%，
   tsx 独立入口 + sweep 零触达已覆盖）。
+- ✅ tsx onClick handlers 切片（`lowerClickHandler` + 事件分支改写 + 块拼装）：
+  `onClick={() => setX(整数/布尔字面量)}`（表达式体按单语句，块体逐句，
+  与 mount 同字面量规则）发射 `onClick={^onClick_n}` + `@onClick_n:`
+  （store + render + ret，mount-store 惯用法；消费者归一 onClick→onclick、
+  `^` 可选）；命名引用/参数/非 setter/计算参数/他事件大声拒。
+  单测成功 + 5 拒形（含契约）；全套件绿、286 sweep 零 diff；红绿验证通过。
+  JEV blast-radius local_only/safe_to_apply 39%（needs_regression 35%，
+  tsx 独立入口 + sweep 零触达 + 既有拒测全持已覆盖）。

@@ -58,3 +58,51 @@ func TestLowerTSXDynamicRefuses(t *testing.T) {
 		t.Fatalf("expected composition refusal, got:\n%s", res.SAX)
 	}
 }
+
+// Click handlers lower setX(literal) arrows to @onClick_n SA blocks
+// (consumer: onClick={^name}, normalized to onclick). Everything else
+// (named refs, params, non-setter calls, computed args, other events)
+// refuses loudly.
+func TestLowerTSXClickHandler(t *testing.T) {
+	src := "function Counter() {\n  const [count, setCount] = useState(0);\n  return <section>\n    <h1>{count}</h1>\n    <button onClick={() => setCount(5)}>+1</button>\n  </section>;\n}\n"
+	res := LowerTSX("h.tsx", src)
+	if res.Refused {
+		msgs := []string{}
+		for _, d := range res.Diagnostics {
+			msgs = append(msgs, d.Error())
+		}
+		t.Fatalf("unexpected refusal:\n%s", strings.Join(msgs, "\n"))
+	}
+	for _, want := range []string{
+		"onClick={^onClick_1}",
+		"@onClick_1:",
+		"L_ENTRY:",
+		"store state+Counter_count, 5 as i64",
+		"call @render()",
+		"ret",
+	} {
+		if !strings.Contains(res.SAX, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAX)
+		}
+	}
+	if bad := checkSAXContract(res.SAX); len(bad) > 0 {
+		t.Errorf("contract violations: %v\n%s", bad, res.SAX)
+	}
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"named ref", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={setN}>x</button>;\n}\n"},
+		{"params", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={(e) => setN(1)}>x</button>;\n}\n"},
+		{"non-setter", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => console.log(1)}>x</button>;\n}\n"},
+		{"computed", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={() => setN(n + 1)}>x</button>;\n}\n"},
+		{"other event", "function C() {\n  const [n, setN] = useState(0);\n  return <input onChange={() => setN(1)}>x</input>;\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if r := LowerTSX(tc.name+".tsx", tc.src); !r.Refused {
+				t.Fatalf("expected refusal, got:\n%s", r.SAX)
+			}
+		})
+	}
+}

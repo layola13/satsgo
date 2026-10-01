@@ -58,6 +58,11 @@ type tsxEmitter struct {
 	setterOf    map[string]string
 	mountStores []string
 	mountEmpty  bool
+	// handlers accumulates @onClick_n SA blocks; handlerSeq numbers them
+	// (consumer: react parser.zig normalizes onClick→onclick and accepts
+	// ^-prefixed or bare handler references).
+	handlers   []string
+	handlerSeq int
 }
 
 func (x *tsxEmitter) refuse(n *ast.Node, format string, args ...any) {
@@ -115,6 +120,8 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 	x.setterOf = map[string]string{}
 	x.mountStores = nil
 	x.mountEmpty = false
+	x.handlers = nil
+	x.handlerSeq = 0
 	for _, st := range stmts[:len(stmts)-1] {
 		if st.Kind == ast.KindVariableStatement {
 			if !x.lowerUseState(st) {
@@ -163,6 +170,9 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 			b.WriteString("    call @render()\n")
 		}
 		b.WriteString("    ret\n")
+	}
+	for _, h := range x.handlers {
+		b.WriteString(h)
 	}
 	b.WriteString("</Component>\n")
 	x.out.WriteString(b.String())
@@ -343,6 +353,102 @@ func (x *tsxEmitter) lowerUseState(st *ast.Node) bool {
 	return true
 }
 
+// lowerClickHandler lowers onClick={() => setX(lit)} to an @onClick_n SA
+// block (literal stores + render, the mount-store idiom). The attribute
+// references it as onClick={^name} (react parser.zig accepts ^-prefixed or
+// bare references and normalizes onClick→onclick). Anything else (named
+// references, params, non-setter calls, computed args, other events)
+// refuses loudly.
+func (x *tsxEmitter) lowerClickHandler(a *ast.Node, at *ast.JsxAttribute) (string, bool) {
+	fail := func(pos *ast.Node, format string, args ...any) (string, bool) {
+		x.refuse(pos, format, args...)
+		return "", false
+	}
+	init := at.Initializer
+	if init == nil || init.Kind != ast.KindJsxExpression {
+		return fail(a, "onClick needs an inline () => setX(literal) function")
+	}
+	fn := init.AsJsxExpression().Expression
+	if fn == nil || (fn.Kind != ast.KindArrowFunction && fn.Kind != ast.KindFunctionExpression) {
+		return fail(a, "onClick needs an inline () => setX(literal) function")
+	}
+	if len(fn.Parameters()) != 0 {
+		return fail(a, "onClick callback takes no parameters")
+	}
+	fbody := fn.BodyData().Body
+	if fbody == nil {
+		return fail(a, "onClick callback must have a body")
+	}
+	// Expression bodies (`() => setX(5)`) count as a single statement;
+	// block bodies hold only setter(literal) calls.
+	isBlock := fbody.Kind == ast.KindBlock
+	var stmts []*ast.Node
+	if isBlock {
+		stmts = fbody.Statements()
+	} else {
+		stmts = []*ast.Node{fbody}
+	}
+	stores := []string{}
+	for _, s := range stmts {
+		var call *ast.Node
+		if !isBlock {
+			if s.Kind != ast.KindCallExpression {
+				return fail(s, "onClick bodies hold only setter(literal) calls")
+			}
+			call = s
+		} else {
+			if s.Kind != ast.KindExpressionStatement {
+				return fail(s, "onClick bodies hold only setter(literal) calls")
+			}
+			es := s.AsExpressionStatement()
+			if es.Expression == nil || es.Expression.Kind != ast.KindCallExpression {
+				return fail(s, "onClick bodies hold only setter(literal) calls")
+			}
+			call = es.Expression
+		}
+		sc := call.AsCallExpression()
+		if sc.Expression.Kind != ast.KindIdentifier || !x.stateSetters[sc.Expression.Text()] {
+			return fail(s, "onClick bodies hold only setter(literal) calls")
+		}
+		if sc.Arguments == nil || len(sc.Arguments.Nodes) != 1 {
+			return fail(s, "setter calls take exactly 1 argument")
+		}
+		arg := sc.Arguments.Nodes[0]
+		var val, ty string
+		switch arg.Kind {
+		case ast.KindNumericLiteral:
+			if strings.ContainsAny(arg.Text(), ".eE") {
+				return fail(arg, "setter float arguments are not in the subset")
+			}
+			val, ty = arg.Text(), "i64"
+		case ast.KindTrueKeyword:
+			val, ty = "1", "i1"
+		case ast.KindFalseKeyword:
+			val, ty = "0", "i1"
+		default:
+			return fail(arg, "setter arguments must be integer/boolean literals")
+		}
+		field := x.setterOf[sc.Expression.Text()]
+		if field == "" {
+			return fail(s, "setter %s has no state slot", sc.Expression.Text())
+		}
+		stores = append(stores, fmt.Sprintf("store state+%s_%s, %s as %s", x.comp, field, val, ty))
+	}
+	x.handlerSeq++
+	name := fmt.Sprintf("onClick_%d", x.handlerSeq)
+	var b strings.Builder
+	b.WriteString("  @" + name + ":\n  L_ENTRY:\n")
+	for _, s := range stores {
+		b.WriteString("    " + s + "\n")
+	}
+	if len(stores) > 0 {
+		b.WriteString("    call @render()\n")
+	}
+	b.WriteString("    ret\n")
+	x.handlers = append(x.handlers, b.String())
+	return name, true
+}
+
 // bindingIdentText reads a plain identifier out of a binding element.
 func bindingIdentText(el *ast.Node) (string, bool) {
 	be := el.AsBindingElement()
@@ -467,8 +573,20 @@ func (x *tsxEmitter) lowerJSXAttrs(open *ast.Node, b *strings.Builder) bool {
 		}
 		at := a.AsJsxAttribute()
 		aname := at.Name().Text()
+		// Click handlers lower to @onClick_n SA blocks (store literal +
+		// render; consumer references onClick={^name}, normalized to
+		// onclick by react parser.zig). All other onXxx need later slices.
+		if aname == "onClick" {
+			hname, ok2 := x.lowerClickHandler(a, at)
+			if !ok2 {
+				ok = false
+				return true
+			}
+			b.WriteString(" onClick={^" + hname + "}")
+			return false
+		}
 		if len(aname) > 2 && aname[0] == 'o' && aname[1] == 'n' && 'A' <= aname[2] && aname[2] <= 'Z' {
-			x.refuse(a, "event handler %s needs the handlers slice", aname)
+			x.refuse(a, "event handler %s needs the handlers slice (only onClick is in the subset)", aname)
 			ok = false
 			return true
 		}
