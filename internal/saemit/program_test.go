@@ -318,7 +318,8 @@ func TestLinkRouteMisses(t *testing.T) {
 			}
 		})
 	}
-	// Importable kinds turn positive end to end (check-clean).
+
+// Importable kinds turn positive end to end (check-clean).
 	okFiles := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nimport { C } from \"./lib\";\nfunction main(): i32 {\n  const c = new C(3);\n  return add(1, 2) + c.v;\n}\n",
 		"lib.ts":  lib,
@@ -334,6 +335,21 @@ func TestLinkRouteMisses(t *testing.T) {
 
 // Importing from a file with namespace functions lowers (no
 // self-collision, no duplicated diagnostics).
+	// Multi-level heritage across files: the subclass/super chain links
+// through the shared parent table, so an implicit derived ctor in the
+// entry file delegates through the imported mid ctor to the base ctor.
+func TestLowerProgramTransitiveHeritage(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { C } from \"./mid\";\nclass D extends C {\n}\nfunction main(): i32 {\n  const d = new D(3, 4);\n  return d.x + d.y;\n}\n",
+		"mid.ts":  "import { B } from \"./base\";\nexport class C extends B {\n  y: i32 = 0;\n  constructor(x: i32, y: i32) {\n    super(x);\n    this.y = y;\n  }\n}\n",
+		"base.ts": "export class B {\n  x: i32 = 0;\n  constructor(x: i32) {\n    this.x = x;\n  }\n}\n",
+	}
+	res := LowerProgram("main.ts", files)
+	if res.Refused {
+		t.Fatalf("expected link, got diagnostics:\n%s", strings.Join(res.Diagnostics, "\n"))
+	}
+}
+
 func TestLinkNsFileImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",

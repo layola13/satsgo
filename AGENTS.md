@@ -595,6 +595,12 @@
   `enumMemberTable(st, true)` 成功才记，全整数行为不变；串枚举回落通用子集拒
   （单测锁定 `property access .X is not in the SA-lowerable subset`）。
   全套件绿（JEV 排序 #1 + blast-radius local_only）。
+- ✅ 跨文件多级继承 super 链（`program.go` sharedClassParent 4 行 + `program_test.go` 三文件单测）：
+  `classParent` 曾是单 emitter 私有映射，进口商侧多级链断裂（mid 的 `C→B` 在
+  main 不可见，`new D` 报误导性 super 拒；单文件恒过）。现与 classDefs 同形
+  共享（两处 prescan + lowering 接入；单文件 nil 分支不动；环检测顺带跨文件化）。
+  探针 base→mid→main 缺省派生构造打通，真机 check 过 + `sa run` 7 与 node 差分一致。
+  286 sweep 零回退 + check 286 全过；全套件绿（JEV blast-radius local_only）。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

@@ -387,6 +387,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	}
 	sharedLayouts := map[string]*layout{}
 	sharedClassDefs := map[string]*classDef{}
+	sharedClassParent := map[string]string{} // subclass -> direct base (multi-level super chains link across files)
 	sharedStaticDefs := map[string]*classDef{}
 	sharedEnums := map[string]map[string]int64{}
 	globalRets := map[string]map[string]saType{} // file -> name -> ret
@@ -416,6 +417,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		scratch.layouts = sharedLayouts
 		scratch.classDefs = sharedClassDefs
 		scratch.staticDefs = sharedStaticDefs
+		scratch.classParent = sharedClassParent
 		scratch.enums = sharedEnums
 		for _, st := range parsed[p].AsSourceFile().Statements.Nodes {
 			switch st.Kind {
@@ -619,6 +621,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			scratch.layouts = sharedLayouts
 			scratch.classDefs = sharedClassDefs
 			scratch.staticDefs = sharedStaticDefs
+			scratch.classParent = sharedClassParent
 			scratch.enums = sharedEnums
 			for _, st := range parsed[p].AsSourceFile().Statements.Nodes {
 				switch st.Kind {
@@ -866,6 +869,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		e.layouts = sharedLayouts
 		e.classDefs = sharedClassDefs
 		e.staticDefs = sharedStaticDefs
+		e.classParent = sharedClassParent
 		e.enums = sharedEnums
 		e.funcSigs = map[string]saType{}
 		e.funcParams = map[string]int{}
