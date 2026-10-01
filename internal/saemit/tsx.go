@@ -68,6 +68,21 @@ type tsxEmitter struct {
 	// by name downstream (react parser user-component nodes); unknown
 	// uppercase tags, props and children refuse (later slices).
 	comps map[string]bool
+	// propDefs holds each component's declared props (destructured first
+	// param with an inline object type): name + state-slot init text.
+	// Call sites must pass every prop exactly once ({caller state} or
+	// integer/boolean literal); the consumer wires values into the
+	// callee's same-named state slots (componentStateProp), so the
+	// declared init is only the unpassed default (unreachable when the
+	// exact-match gate holds — documented, not relied upon).
+	propDefs map[string][]tsxProp
+}
+
+// tsxProp is one declared component prop (integer/boolean only; strings
+// need the buffer slice, defaults need call semantics — both refuse).
+type tsxProp struct {
+	name string
+	init string
 }
 
 func (x *tsxEmitter) refuse(n *ast.Node, format string, args ...any) {
@@ -93,6 +108,7 @@ func (x *tsxEmitter) lowerSourceFile(sf *ast.SourceFile) {
 	// Pass 1: collect same-file component names so references resolve
 	// regardless of definition order (emission is purely textual).
 	x.comps = map[string]bool{}
+	x.propDefs = map[string][]tsxProp{}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
 			continue
@@ -100,7 +116,13 @@ func (x *tsxEmitter) lowerSourceFile(sf *ast.SourceFile) {
 		if st.Name() == nil || st.Name().Kind != ast.KindIdentifier {
 			continue
 		}
-		x.comps[st.Name().Text()] = true
+		name := st.Name().Text()
+		x.comps[name] = true
+		if props, ok := x.collectProps(st); !ok {
+			return
+		} else {
+			x.propDefs[name] = props
+		}
 	}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
@@ -139,6 +161,15 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 	x.mountEmpty = false
 	x.handlers = nil
 	x.handlerSeq = 0
+	// Declared props seed state slots (interpolation reads them like
+	// useState vars; the consumer wires caller-passed values in).
+	for _, p := range x.propDefs[name] {
+		if _, dup := x.stateVars[p.name]; dup {
+			x.refuse(fn, "duplicate state variable %s", p.name)
+			return
+		}
+		x.stateVars[p.name] = p.init
+	}
 	for _, st := range stmts[:len(stmts)-1] {
 		if st.Kind == ast.KindVariableStatement {
 			if !x.lowerUseState(st) {
@@ -466,6 +497,89 @@ func (x *tsxEmitter) lowerClickHandler(a *ast.Node, at *ast.JsxAttribute) (strin
 	return name, true
 }
 
+// collectProps reads a component's destructured first parameter into
+// state-slot prop declarations (`function Badge({ n }: { n: i32 })`).
+// Integer slots init to 0 (the consumer wires caller-passed values into
+// same-named callee slots; exact-match passing at call sites makes the
+// default unreachable — documented in propDefs). Anything else (missing
+// or named types, renames, defaults, rest, non-integer fields, extra
+// params, non-object params) refuses loudly.
+func (x *tsxEmitter) collectProps(fn *ast.Node) ([]tsxProp, bool) {
+	fail := func(pos *ast.Node, format string, args ...any) ([]tsxProp, bool) {
+		x.refuse(pos, format, args...)
+		return nil, false
+	}
+	params := fn.Parameters()
+	if len(params) == 0 {
+		return nil, true
+	}
+	if len(params) > 1 {
+		return fail(params[1], "components take at most one parameter (the props object)")
+	}
+	pd := params[0].AsParameterDeclaration()
+	nm := pd.Name()
+	if nm == nil || nm.Kind != ast.KindObjectBindingPattern {
+		return fail(params[0], "component parameters must be a destructured props object ({ ... }: { ... })")
+	}
+	ty := pd.Type
+	if ty == nil || ty.Kind != ast.KindTypeLiteral {
+		return fail(params[0], "props need an inline object type ({ ... }: { n: i32 })")
+	}
+	tyOf := map[string]*ast.Node{}
+	for _, m := range ty.AsTypeLiteralNode().Members.Nodes {
+		if m.Kind != ast.KindPropertySignature {
+			return fail(m, "props type holds only plain fields")
+		}
+		fname, ok := bindingNameText(m)
+		if !ok {
+			return fail(m, "props type holds only plain fields")
+		}
+		tyOf[fname] = m.AsPropertySignatureDeclaration().Type
+	}
+	var out []tsxProp
+	seen := map[string]bool{}
+	for _, el := range nm.AsNode().AsBindingPattern().Elements.Nodes {
+		if el.Kind != ast.KindBindingElement {
+			return fail(el, "props pattern holds only plain names")
+		}
+		be := el.AsBindingElement()
+		if be.DotDotDotToken != nil {
+			return fail(el, "rest props are not in the subset")
+		}
+		if be.PropertyName != nil {
+			return fail(el, "renamed props are not in the subset (use shorthand)")
+		}
+		if be.Initializer != nil {
+			return fail(el, "prop defaults need call semantics (pass every prop instead)")
+		}
+		id := be.Name()
+		if id == nil || id.Kind != ast.KindIdentifier {
+			return fail(el, "props pattern holds only plain names")
+		}
+		pname := id.Text()
+		if seen[pname] {
+			return fail(el, "duplicate prop %s", pname)
+		}
+		seen[pname] = true
+		ftn, ok := tyOf[pname]
+		if !ok {
+			return fail(el, "prop %s is missing from the props type", pname)
+		}
+		switch saNameOfType(ftn) {
+		case "i32", "i64", "u32", "u64":
+			out = append(out, tsxProp{name: pname, init: "0"})
+		default:
+			return fail(el, "prop %s needs the value slice (integer only, got %s)", pname, saNameOfType(ftn))
+		}
+	}
+	for fname := range tyOf {
+		if !seen[fname] {
+			return fail(params[0], "props type field %s is not destructured", fname)
+		}
+	}
+	return out, true
+}
+
 // bindingIdentText reads a plain identifier out of a binding element.
 func bindingIdentText(el *ast.Node) (string, bool) {
 	be := el.AsBindingElement()
@@ -477,6 +591,122 @@ func bindingIdentText(el *ast.Node) (string, bool) {
 		return "", false
 	}
 	return nm.Text(), true
+}
+
+// lowerCustomAttrs lowers exact prop passing on a same-file component
+// reference (`<Badge n={count} />`): every declared callee prop passed
+// exactly once, as {caller state} or an integer/boolean literal, emitted
+// verbatim (no reinterpretation). Events on components, spreads, string
+// values, unknown/missing/duplicate props refuse loudly (later slices).
+func (x *tsxEmitter) lowerCustomAttrs(tag string, open *ast.Node, b *strings.Builder, pos *ast.Node) bool {
+	want := map[string]bool{}
+	for _, p := range x.propDefs[tag] {
+		want[p.name] = true
+	}
+	seen := map[string]bool{}
+	ok := true
+	var attrs *ast.Node
+	switch open.Kind {
+	case ast.KindJsxOpeningElement:
+		attrs = open.AsJsxOpeningElement().Attributes
+	case ast.KindJsxSelfClosingElement:
+		attrs = open.AsJsxSelfClosingElement().Attributes
+	}
+	if attrs != nil {
+		attrs.ForEachChild(func(a *ast.Node) bool {
+			if !ok {
+				return true
+			}
+			if a.Kind == ast.KindJsxSpreadAttribute {
+				x.refuse(a, "spread props need the composition slice (pass every prop exactly once)")
+				ok = false
+				return true
+			}
+			if a.Kind != ast.KindJsxAttribute {
+				return false
+			}
+			at := a.AsJsxAttribute()
+			aname := at.Name().Text()
+			if len(aname) > 2 && aname[0] == 'o' && aname[1] == 'n' {
+				x.refuse(a, "handlers on components need the composition slice (only onClick on intrinsics)")
+				ok = false
+				return true
+			}
+			if !want[aname] {
+				x.refuse(a, "unknown prop %s on component %s", aname, tag)
+				ok = false
+				return true
+			}
+			if seen[aname] {
+				x.refuse(a, "duplicate prop %s on component %s", aname, tag)
+				ok = false
+				return true
+			}
+			init := at.Initializer
+			if init == nil {
+				x.refuse(a, "prop %s needs a value ({state} or literal)", aname)
+				ok = false
+				return true
+			}
+			switch init.Kind {
+			case ast.KindJsxExpression:
+				ex := init.AsJsxExpression().Expression
+				if ex == nil {
+					x.refuse(a, "prop %s needs a value ({state} or literal)", aname)
+					ok = false
+					return true
+				}
+				switch ex.Kind {
+				case ast.KindIdentifier:
+					if _, isState := x.stateVars[ex.Text()]; !isState {
+						x.refuse(a, "prop %s reads unknown state {%s}", aname, ex.Text())
+						ok = false
+						return true
+					}
+				case ast.KindNumericLiteral:
+					if strings.ContainsAny(ex.Text(), ".eE") {
+						x.refuse(a, "prop %s float literals are not in the subset", aname)
+						ok = false
+						return true
+					}
+				case ast.KindTrueKeyword, ast.KindFalseKeyword:
+					// Boolean literal props lower verbatim.
+				default:
+					x.refuse(a, "prop %s needs {state} or an integer/boolean literal", aname)
+					ok = false
+					return true
+				}
+			case ast.KindStringLiteral:
+				x.refuse(a, "string props need the buffer slice")
+				ok = false
+				return true
+			default:
+				x.refuse(a, "prop %s needs {state} or an integer/boolean literal", aname)
+				ok = false
+				return true
+			}
+			// Verbatim re-emission: no value reinterpretation.
+			p, en := init.Pos(), init.End()
+			if p < 0 || en > len(x.src) || en <= p {
+				x.refuse(a, "prop %s has no recoverable source text", aname)
+				ok = false
+				return true
+			}
+			seen[aname] = true
+			b.WriteString(" " + aname + "=" + x.src[p:en])
+			return false
+		})
+	}
+	if !ok {
+		return false
+	}
+	for pname := range want {
+		if !seen[pname] {
+			x.refuse(pos, "missing prop %s on component %s (pass every prop exactly once)", pname, tag)
+			return false
+		}
+	}
+	return true
 }
 
 // hasJSXAttrs reports whether an opening/self-closing element carries
@@ -518,17 +748,19 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 			return false
 		}
 		if x.isCustomRef(tag) {
-			// Bare composition only: props ride allow_component_attrs
-			// and children ride <Slot />, both later slices.
+			// Props ride allow_component_attrs downstream; children ride
+			// <Slot />. Both need later slices — only exact literal
+			// passing lowers here (see lowerCustomAttrs).
 			if len(el.Children.Nodes) != 0 {
-				x.refuse(n, "component children need the composition slice (only bare <Badge /> references)")
+				x.refuse(n, "component children need the composition slice (only exact props)")
 				return false
 			}
-			if hasJSXAttrs(el.OpeningElement) {
-				x.refuse(n, "component props need the composition slice (only bare <Badge /> references)")
+			b.WriteString(indent + "<" + tag)
+			if !x.lowerCustomAttrs(tag, el.OpeningElement, b, n) {
 				return false
 			}
-			b.WriteString(indent + "<" + tag + " />\n")
+			b.WriteString(">\n")
+			b.WriteString(indent + "</" + tag + ">\n")
 			return true
 		}
 		b.WriteString(indent + "<" + tag)
@@ -550,9 +782,9 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 		}
 		b.WriteString(indent + "<" + tag)
 		if x.isCustomRef(tag) {
-			// Props on self-closing references need the props slice.
-			if hasJSXAttrs(n) {
-				x.refuse(n, "component props need the composition slice (only bare <Badge /> references)")
+			// Props on self-closing references lower exactly
+			// (see lowerCustomAttrs); bare refs pass vacuously.
+			if !x.lowerCustomAttrs(tag, n, b, n) {
 				return false
 			}
 			b.WriteString(" />\n")

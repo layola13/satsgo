@@ -44,6 +44,8 @@ var contractDangerousAttrs = map[string]bool{
 
 // checkSAXContract validates one emitted .sax document against the
 // consumer-shape rules above. It returns the failure reasons (empty = ok).
+// State and interpolation checks run per <Component> block (each
+// component owns its slots); component references resolve document-wide.
 func checkSAXContract(sax string) []string {
 	var bad []string
 	if n := strings.Count(sax, "<Component name="); n == 0 {
@@ -55,50 +57,19 @@ func checkSAXContract(sax string) []string {
 	if strings.Count(sax, "<state>") != strings.Count(sax, "</state>") {
 		bad = append(bad, "unbalanced state tags")
 	}
-	// State block: unique, sorted, ident-shaped names.
-	if si := strings.Index(sax, "<state>"); si >= 0 {
-		ej := strings.Index(sax, "</state>")
-		vars := []string{}
-		for _, m := range contractStateLine.FindAllStringSubmatch(sax[si:ej], -1) {
-			vars = append(vars, m[1])
-		}
-		seen := map[string]bool{}
-		for i, v := range vars {
-			if seen[v] {
-				bad = append(bad, "duplicate state var "+v)
-			}
-			seen[v] = true
-			if i > 0 && vars[i-1] >= v {
-				bad = append(bad, "state vars not sorted")
-				break
-			}
-		}
-		// Interpolations must reference declared state.
-		for _, m := range contractInterp.FindAllStringSubmatch(sax, -1) {
-			if !seen[m[1]] {
-				bad = append(bad, "interpolation of undeclared state {"+m[1]+"}")
-			}
-		}
-	}
-	// onMount shape.
-	if strings.Contains(sax, "@onMount:") {
-		hook := sax[strings.Index(sax, "@onMount:"):]
-		if end := strings.Index(hook, "</Component>"); end >= 0 {
-			hook = hook[:end]
-		}
-		if !strings.Contains(hook, "L_ENTRY:") || !strings.Contains(hook, "ret") {
-			bad = append(bad, "@onMount block missing L_ENTRY:/ret")
-		}
-	}
-	// Tag/attribute gates mirror the consumer: only dangerous tags
-	// and dangerous attributes are hard refusals (lowercase tags and
-	// aria-/data- attributes pass; events arrive as onClick={^name}).
-	// Uppercase tags must resolve to a sibling <Component> (bare
-	// composition links by name downstream).
 	defs := map[string]bool{}
 	for _, m := range contractCompDef.FindAllStringSubmatch(sax, -1) {
 		defs[m[1]] = true
 	}
+	locs := contractCompDef.FindAllStringIndex(sax, -1)
+	for i, loc := range locs {
+		end := len(sax)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		bad = append(bad, checkSAXComponentChunk(sax[loc[0]:end])...)
+	}
+	// Custom tag references resolve document-wide.
 	for _, m := range contractTag.FindAllStringSubmatch(sax, -1) {
 		tag := m[1]
 		if tag == "Component" || tag == "state" {
@@ -114,6 +85,57 @@ func checkSAXContract(sax string) []string {
 	for _, m := range contractAttr.FindAllStringSubmatch(sax, -1) {
 		if contractDangerousAttrs[m[1]] {
 			bad = append(bad, "dangerous attribute "+m[1])
+		}
+	}
+	return bad
+}
+
+// contractAttrValue matches ={...} and ="..." attribute values so the
+// interpolation check can skip prop/event references (caller-scope names,
+// not callee state reads).
+var contractAttrValue = regexp.MustCompile(`=\{[^}]*\}|="[^"]*"`)
+
+// checkSAXComponentChunk validates one <Component> block: state entries
+// unique/sorted, template interpolations referencing its own state, and
+// @onMount shape when present.
+func checkSAXComponentChunk(chunk string) []string {
+	var bad []string
+	si := strings.Index(chunk, "<state>")
+	if si < 0 {
+		return bad
+	}
+	ej := strings.Index(chunk, "</state>")
+	if ej < 0 {
+		return bad
+	}
+	vars := []string{}
+	for _, m := range contractStateLine.FindAllStringSubmatch(chunk[si:ej], -1) {
+		vars = append(vars, m[1])
+	}
+	seen := map[string]bool{}
+	for i, v := range vars {
+		if seen[v] {
+			bad = append(bad, "duplicate state var "+v)
+		}
+		seen[v] = true
+		if i > 0 && vars[i-1] >= v {
+			bad = append(bad, "state vars not sorted")
+			break
+		}
+	}
+	stripped := contractAttrValue.ReplaceAllString(chunk, " ")
+	for _, m := range contractInterp.FindAllStringSubmatch(stripped, -1) {
+		if !seen[m[1]] {
+			bad = append(bad, "interpolation of undeclared state {"+m[1]+"}")
+		}
+	}
+	if strings.Contains(chunk, "@onMount:") {
+		hook := chunk[strings.Index(chunk, "@onMount:"):]
+		if end := strings.Index(hook, "</Component>"); end >= 0 {
+			hook = hook[:end]
+		}
+		if !strings.Contains(hook, "L_ENTRY:") || !strings.Contains(hook, "ret") {
+			bad = append(bad, "@onMount block missing L_ENTRY:/ret")
 		}
 	}
 	return bad

@@ -107,6 +107,53 @@ func TestLowerTSXComposition(t *testing.T) {
 		})
 	}
 }
+
+// Exact prop passing: callee destructures ({ n }: { n: i32 }) into state
+// slots; call sites pass every prop exactly once ({caller state} or
+// integer/boolean literal, verbatim). Missing/extra/unknown/string/
+// computed shapes refuse loudly.
+func TestLowerTSXProps(t *testing.T) {
+	src := "function Badge({ n }: { n: i32 }) {\n  return <span>{n}</span>;\n}\nfunction App() {\n  const [count, setCount] = useState(0);\n  return <div>\n    <Badge n={count} />\n  </div>;\n}\n"
+	res := LowerTSX("props.tsx", src)
+	if res.Refused {
+		msgs := []string{}
+		for _, d := range res.Diagnostics {
+			msgs = append(msgs, d.Error())
+		}
+		t.Fatalf("unexpected refusal:\n%s", strings.Join(msgs, "\n"))
+	}
+	for _, want := range []string{
+		"n = 0",
+		"<Badge n={count} />",
+		"{n}",
+	} {
+		if !strings.Contains(res.SAX, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAX)
+		}
+	}
+	if bad := checkSAXContract(res.SAX); len(bad) > 0 {
+		t.Errorf("contract violations: %v\n%s", bad, res.SAX)
+	}
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"missing", "function Badge({ n }: { n: i32 }) {\n  return <span>{n}</span>;\n}\nfunction App() {\n  return <div>\n    <Badge />\n  </div>;\n}\n"},
+		{"extra", "function Badge({ n }: { n: i32 }) {\n  return <span>{n}</span>;\n}\nfunction App() {\n  const [count, setCount] = useState(0);\n  return <div>\n    <Badge n={count} m={count} />\n  </div>;\n}\n"},
+		{"string", "function Badge({ n }: { n: i32 }) {\n  return <span>{n}</span>;\n}\nfunction App() {\n  return <div>\n    <Badge n=\"x\" />\n  </div>;\n}\n"},
+		{"computed", "function Badge({ n }: { n: i32 }) {\n  return <span>{n}</span>;\n}\nfunction App() {\n  const [count, setCount] = useState(0);\n  return <div>\n    <Badge n={count + 1} />\n  </div>;\n}\n"},
+		{"untyped", "function Badge({ n }) {\n  return <span>{n}</span>;\n}\nfunction App() {\n  return <div>\n    <Badge n={1} />\n  </div>;\n}\n"},
+		{"string slot", "function Badge({ s }: { s: string }) {\n  return <span>{s}</span>;\n}\nfunction App() {\n  return <div>\n    <Badge s={1} />\n  </div>;\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if r := LowerTSX(tc.name+".tsx", tc.src); !r.Refused {
+				t.Fatalf("expected refusal, got:\n%s", r.SAX)
+			}
+		})
+	}
+}
+
 // Click handlers lower setX(literal) arrows to @onClick_n SA blocks
 // (consumer: onClick={^name}, normalized to onclick). Everything else
 // (named refs, params, non-setter calls, computed args, other events)

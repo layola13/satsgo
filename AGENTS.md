@@ -825,3 +825,12 @@
   props 需 slot 上下文投影，深水，另立项）。
   单测成功 + 前向 + props/children 拒（含契约）；全套件绿、286 sweep 零 diff；
   红绿验证通过。JEV blast-radius local_only/safe_to_apply 83%。
+- ✅ tsx props 精确传递（两遍 prop 表 + 被调注槽 + 调用点精确校验 + 原文直通）：
+  被调 `({ n }: { n: i32 })` 解构注 state 槽（整数；串/改名/默认/rest/命名
+  类型/多余 params 拒）；调用点全量精确传递（`{调用方state}`/整数布尔字面量，
+  原文切片零重解释；缺/多/未知/串/计算拒）；消费者按名装配被调槽
+  （componentStateProp，假设已文档化，精确门守卫）。
+  单测成功 + 6 拒形（含契约）；契约按 Component 分块 + 属性值剥离；
+  全套件绿、286 sweep 零 diff；红绿验证通过。
+  JEV blast-radius local_only/safe_to_apply 43%（needs_regression 35%，
+  独立入口 + sweep 零触达 + 既有用例全持已覆盖）。
