@@ -34,16 +34,17 @@ type heritageInfo struct {
 	hasExtends bool
 }
 
-// parseHeritage reads `extends`/`implements` off a class declaration.
+// parseHeritage reads `extends`/`implements` off a class declaration or
+// expression (both carry the same heritage-clause list shape).
 // Implements lists are erased (type-only). Extends must be a single plain
 // identifier; anything dynamic refuses loudly. Reports ok=false after
 // refusing.
-func (e *emitter) parseHeritage(cd *ast.ClassDeclaration, st *ast.Node) (heritageInfo, bool) {
+func (e *emitter) parseHeritage(clauses *ast.NodeList, st *ast.Node) (heritageInfo, bool) {
 	var hi heritageInfo
-	if cd.HeritageClauses == nil || len(cd.HeritageClauses.Nodes) == 0 {
+	if clauses == nil || len(clauses.Nodes) == 0 {
 		return hi, true
 	}
-	for _, h := range cd.HeritageClauses.Nodes {
+	for _, h := range clauses.Nodes {
 		hc := h.AsHeritageClause()
 		if hc.Token == ast.KindExtendsKeyword {
 			if hi.hasExtends || len(hc.Types.Nodes) != 1 {

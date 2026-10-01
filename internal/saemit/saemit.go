@@ -8738,8 +8738,8 @@ func (e *emitter) lowerClassExpression(name string, init, pos *ast.Node) {
 
 // recordClassNamed records a class declaration or expression. forceName
 // overrides the declared name (anonymous class expressions record under
-// their bound const name). Class expressions refuse heritage loudly:
-// parseHeritage/inheritClass are declaration-shaped (see class_heritage.go).
+// their bound const name). Heritage uses the shared declaration machinery
+// (parseHeritage/inheritClass take clause lists and shape-agnostic defs).
 func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 	var members []*ast.Node
 	var heritage *ast.NodeList
@@ -8752,10 +8752,9 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 		ce := st.AsClassExpression()
 		members = ce.Members.Nodes
 		heritage = ce.HeritageClauses
-		if heritage != nil && len(heritage.Nodes) > 0 {
-			e.refuse(st, "class expression inheritance is not lowerable yet (use a class declaration)")
-			return
-		}
+		// Heritage shares the declaration machinery below
+		// (parseHeritage takes the clause list; layouts, member
+		// inheritance, ctor/super rules are shape-agnostic).
 	default:
 		e.refuse(st, "class record of %s is not lowerable", st.Kind.String())
 		return
@@ -8812,9 +8811,9 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 	l := &layout{name: name, types: map[string]string{}, ftypes: map[string]string{}, offsets: map[string]int{}, fdefs: map[string]*ast.Node{}}
 	off := 0
 	if heritage != nil && len(heritage.Nodes) > 0 {
-		// Only declarations reach here (expressions with heritage
-		// refuse above), so the declaration assert is safe.
-		hi, ok := e.parseHeritage(st.AsClassDeclaration(), st)
+		// Declarations and expressions both arrive with their clause
+		// list (see recordClassNamed switch above).
+		hi, ok := e.parseHeritage(heritage, st)
 		if !ok {
 			if len(def.statics) > 0 {
 				if e.staticDefs == nil {

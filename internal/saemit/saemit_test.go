@@ -1269,12 +1269,36 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "call @f(41)") {
 		t.Errorf("missing top-level fn call in output:\n%s", res.SAI)
 	}
-	// Expression heritage refuses loudly (declaration-shaped machinery).
+	// Expression heritage shares the declaration machinery
+	// (parseHeritage/inheritClass): a declared base links, an unknown
+	// base stays loud through the shared unknown-base diagnostic.
+	ok := `class B {
+  x: i32 = 0;
+  constructor(n: i32) {
+    this.x = n;
+  }
+}
+const C = class extends B {
+  y: i32 = 0;
+  constructor(n: i32, m: i32) {
+    super(n);
+    this.y = m;
+  }
+};
+function main(): i32 {
+  const c = new C(3, 4);
+  return c.x + c.y;
+}
+`
+	res = mustLower(t, "exprherit.ts", ok)
+	if !strings.Contains(res.SAI, "return ") {
+		t.Errorf("missing return in expression-heritage output:\n%s", res.SAI)
+	}
 	bad := Lower("refuse.ts", "function main(): i32 {\n  const C = class extends Object {\n  };\n  return 0;\n}\n")
 	if !bad.Refused {
 		t.Fatalf("expected heritage refusal, lowered:\n%s", bad.SAI)
 	}
-	if !strings.Contains(diagText(bad), "class expression inheritance") {
+	if !strings.Contains(diagText(bad), "extends unknown base Object") {
 		t.Errorf("missing heritage diagnostic:\n%s", diagText(bad))
 	}
 }

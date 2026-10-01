@@ -777,3 +777,10 @@
   现直说（tag 无一阶值，唯 `String.raw` 可用；`String.raw` 路径不动）。
   全套件绿、286 sweep 零 diff（此拒文 sweep 零命中）。
   JEV blast-radius local_only/safe_to_apply 96%。
+- ✅ 类表达式继承复用声明机械（jev_thinking 78%，`parseHeritage` 泛化为收子句表 +
+  删表达式拒 + 旧拒测转正）：
+  `const C = class extends B` 走同一布局/方法继承 + ctor/super 规则
+  （`B(3,4)` 实例化贯通；未知基 `Object` 照旧经共享未知基拒文大声）。
+  真机 `sa check` 过 + `sa run` exit 7==3+4 对数；286 sweep 零 diff。
+  JEV blast-radius local_only/safe_to_apply 61%（needs_regression 25%，
+  全套件 + sweep + 真机三重已覆盖）。
