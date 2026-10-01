@@ -242,6 +242,21 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "call @M_get(") {
 		t.Errorf("missing string multi-let call:\n%s", res.SAI)
 	}
+	// `var` shares the non-const declarator path (same slot mechanics).
+	vsrc := `namespace M {
+  export var a = 1, b = 2;
+  export function sum(): i32 {
+    return a + b;
+  }
+}
+function main(): i32 {
+  return M.sum();
+}
+`
+	res = mustLower(t, "multivar.ts", vsrc)
+	if !strings.Contains(res.SAI, "call @M_sum()") {
+		t.Errorf("missing var multi-let call:\n%s", res.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {
