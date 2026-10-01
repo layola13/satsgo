@@ -1881,7 +1881,9 @@ func (e *emitter) lowerDoWhile(st *ast.Node) {
 // lowerTry mirrors sa_plugin_ts parseTryCatch: SA-ASM has no exception
 // edges and throw lowers to panic (unresumable), so a try whose body can
 // throw refuses loudly; otherwise the body runs and the catch handler is
-// skipped (dead code), while a finally block always runs.
+// skipped (dead code), while a finally block always runs. SLA parity: SLA
+// has no try statement (only postfix ? for Result/Option), so both
+// frontends agree catch can never resume.
 func (e *emitter) lowerTry(st *ast.Node) {
 	ts := st.AsTryStatement()
 	if containsThrow(ts.TryBlock) {
@@ -1913,8 +1915,12 @@ func (e *emitter) lowerTry(st *ast.Node) {
 	e.terminated = false
 }
 
-// containsThrow reports whether a block can throw (then catch is unreachably
-// dead and the try must refuse rather than miscompile).
+// containsThrow reports whether a try body itself can throw (then catch is
+// unreachably dead and the try must refuse rather than miscompile).
+// Nested function/arrow bodies are not descended into: a throw there fires
+// on call, not while the try body runs. SLA parity note: SLA has no try
+// statement at all (only postfix ? propagation for Result/Option); neither
+// frontend has exception edges, so catch is dead code in both.
 func containsThrow(n *ast.Node) bool {
 	found := false
 	var walk func(x *ast.Node)
@@ -1924,6 +1930,10 @@ func containsThrow(n *ast.Node) bool {
 		}
 		if x.Kind == ast.KindThrowStatement {
 			found = true
+			return
+		}
+		// A nested function body throws on call, not in this try body.
+		if x.Kind == ast.KindFunctionDeclaration || x.Kind == ast.KindFunctionExpression || x.Kind == ast.KindArrowFunction {
 			return
 		}
 		x.ForEachChild(func(c *ast.Node) bool {

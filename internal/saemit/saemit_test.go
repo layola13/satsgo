@@ -965,6 +965,26 @@ func TestCodedPanics(t *testing.T) {
 // refuse at the inner call so unwrap never masks them. Locks the SLA
 // boundary (TS Promise != SLA future<T>; SLA 314/315 nested-suspension
 // gap has no silent counterpart here).
+// Try precision: a throw nested inside a function declared in the try body
+// fires on call, not while the body runs, so the try still lowers (catch
+// dead, finally runs); a direct throw in the body still refuses loudly.
+// SLA parity: neither frontend has exception edges (SLA has no try at all).
+func TestTryNestedFunctionThrow(t *testing.T) {
+	ok := "function main(): i32 {\n  try {\n    const bomb = (): void => {\n      throw \"boom\";\n    };\n  } catch (e) {\n  } finally {\n  }\n  return 7;\n}\n"
+	res := mustLower(t, "try_nested.ts", ok)
+	if !strings.Contains(res.SAI, "return 7") && !strings.Contains(res.SAI, "7") {
+		t.Errorf("try with nested-fn throw should lower the body, got:\n%s", res.SAI)
+	}
+	bad := "function main(): i32 {\n  try {\n    throw \"boom\";\n  } catch (e) {\n    return 1;\n  }\n  return 7;\n}\n"
+	r := Lower("try_direct.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected direct-throw-in-try refusal, got:\n%s", r.SAI)
+	}
+	if got := diagText(r); !strings.Contains(got, "throw inside try is not lowerable (catch cannot resume after panic)") {
+		t.Errorf("missing try/throw diagnostic:\n%s", got)
+	}
+}
+
 func TestAsyncSyncUnwrapHonest(t *testing.T) {
 	single := "async function fetch(): i32 {\n  return 41;\n}\nasync function main(): i32 {\n  const v = await fetch();\n  return v + 1;\n}\n"
 	res := mustLower(t, "async.ts", single)

@@ -732,3 +732,14 @@
   sla 对照：try 为后缀 `?` 传播（无异常边，TS try/catch 保持 panic 语义），
   async 为状态机（satsgo await 保持同步 unwrap，不复刻）。
   单测 `TestLinkRouteNamespaceMembers` 3 形 + 既有期望更新；全套件绿。
+- ✅ async 诚实单测（`TestAsyncSyncUnwrapHonest`，零产品代码变更 + await 注释对齐）：
+  纯值 await 链解包（263 单层 + 264 跨函数嵌套值 await 照常 lowering，
+  `call @fetch/@wrap` 双断言）；真挂起在内层调用点已大声拒
+ （timer-await 锁 Phase-2 拒文），unwrap 永不掩盖挂起。
+  sla 对照：TS Promise ≠ SLA future<T>（single/two/linear-8/join2 状态机；
+  314/315 跨 async fn 嵌套挂起仍为共享层缺口）。全套件绿。
+- ✅ try 精度（`containsThrow` 不进嵌套函数/箭头体 + 注释 sla 对齐）：
+  try 体内箭头里 throw 按调用时触发，不再误拒（catch 死码/finally 照常）；
+  体内直接 throw 仍大声拒。sla 对照：SLA 无 try 语句（仅后缀 `?` 传播
+  Result/Option），两前端皆无异常边。286 零用例含 try/throw，sweep 不可触达。
+  单测 `TestTryNestedFunctionThrow`（放行 + 拒文双断言）；全套件绿。
