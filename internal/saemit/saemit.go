@@ -1360,15 +1360,34 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 				if q, ok := dottedBaseName(nw.Expression); ok {
 					if _, _, ok := e.splitNsQualified(q); ok {
 						cname = q
+					} else if root := dottedRoot(nw.Expression); root != "" {
+					// Imported namespace member class (cross-file `new N.C()`):
+					// the shared table holds the layout (same-file keeps
+					// the path above).
+					if _, ok := e.nsImports[root]; ok {
+						if _, ok := e.classDefs[q]; ok {
+							cname = q
+						}
+					}
 					}
 				}
 			}
 			if cname != "" {
-				if _, ok := e.classDefs[cname]; ok {
+				if cd, ok := e.classDefs[cname]; ok {
 					if e.varClass == nil {
 						e.varClass = map[string]string{}
 					}
 					e.varClass[name] = cname
+					// The instance layout is known at construction: record
+					// it so field reads never depend on checker sight
+					// (cross-file instances are checker-blind; recorded
+					// layouts keep priority per layoutOfNode).
+					if cd.layout != nil {
+						if e.varLayouts == nil {
+							e.varLayouts = map[string]*layout{}
+						}
+						e.varLayouts[name] = cd.layout
+					}
 					// Retarget per-instance fn fields from the result temp
 					// (lowerNewClass records under it) to the bound name.
 					if fields, ok := e.instFnFields[val]; ok {
@@ -7736,6 +7755,23 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 	// `new NS.C()` instantiates namespace member classes (export-checked;
 	// a shadowing value at the root falls through to the generic refuse).
 	if nw.Expression.Kind == ast.KindPropertyAccessExpression {
+		// Imported namespace member class (cross-file `new N.C()`): the
+		// member layout lives in the shared table; the import proves the
+		// use. Same-file namespaces keep the shadowing path below, and
+		// anything else falls through to the loud refuses there.
+		if root := dottedRoot(nw.Expression); root != "" {
+			if _, ok := e.nsImports[root]; ok {
+				if q, ok := dottedBaseName(nw.Expression); ok {
+					// A same-file namespace keeps its own path below (privacy
+					// included); only genuinely cross-file members route here.
+					if _, _, ok := e.splitNsQualified(q); !ok {
+						if _, ok := e.classDefs[q]; ok {
+							return e.lowerNewClass(q, nw, n)
+						}
+					}
+				}
+			}
+		}
 		if r := dottedRoot(nw.Expression); r == "" || !e.isValueReceiver(r) {
 			if q, ok := dottedBaseName(nw.Expression); ok {
 				if ns, mem, ok := e.splitNsQualified(q); ok {

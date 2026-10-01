@@ -415,6 +415,26 @@ func TestLowerProgramNestedNamespaceImport(t *testing.T) {
 	}
 }
 
+// Cross-file namespace member classes (`import { N }` then new N.C()).
+func TestLowerProgramNamespaceClassImport(t *testing.T) {
+	lib := "namespace N {\n  export class C {\n    v: i32 = 0;\n    constructor(n: i32) {\n      this.v = n;\n    }\n  }\n}\n"
+	ok := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  const c = new N.C(41);\n  return c.v;\n}\n",
+		"lib.ts":  lib,
+	}
+	if res := LowerProgram("main.ts", ok); res.Refused {
+		t.Fatalf("expected link, got diagnostics:\n%s", strings.Join(res.Diagnostics, "\n"))
+	}
+	bad := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  const c = new N.Bogus(1);\n  return 0;\n}\n",
+		"lib.ts":  lib,
+	}
+	r := LowerProgram("main.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected unknown-class refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLinkNsFileImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",
