@@ -578,6 +578,16 @@ func TestLinkRouteValueSplit(t *testing.T) {
 	if strings.Contains(got, "not exported by") {
 		t.Errorf("false not-exported diagnostic leaked:\n%s", got)
 	}
+	// Multi-declarator consts fold per declarator at the import too
+	// (second declarator resolves and folds; true-machine exit 2).
+	multiConst := map[string]string{
+		"main.ts": "import { B } from \"./lib\";\nfunction main(): i32 {\n  return B;\n}\n",
+		"lib.ts":  "export const A = 1, B = 2;\n",
+	}
+	res := mustLowerProgram(t, "main.ts", multiConst)
+	if !strings.Contains(res.SAI, "return 2") {
+		t.Errorf("missing multi-const fold:\n%s", res.SAI)
+	}
 }
 
 func TestLinkNsFileImport(t *testing.T) {
