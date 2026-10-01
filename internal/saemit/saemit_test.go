@@ -932,6 +932,33 @@ func TestScaffoldLayout(t *testing.T) {
 	}
 }
 
+// String enum members refuse loudly at read sites (they previously
+// folded to ordinals silently: S.A ("a") lowered to return 0). Integer
+// members of mixed enums keep folding; all-integer enums are untouched.
+func TestStringEnumReadRefuses(t *testing.T) {
+	str := "enum S {\n  A = \"a\",\n  B = \"b\",\n}\nfunction main(): string {\n  return S.A;\n}\n"
+	r := Lower("str.ts", str)
+	if !r.Refused {
+		t.Fatalf("expected string-enum refusal, got:\n%s", r.SAI)
+	}
+	if got := diagText(r); !strings.Contains(got, "string enum member S.A is not lowerable") {
+		t.Errorf("missing string-enum diagnostic:\n%s", got)
+	}
+	mix := "enum M {\n  A = 0,\n  B = \"b\",\n}\nfunction main(): i32 {\n  return M.A;\n}\n"
+	res := mustLower(t, "mix.ts", mix)
+	if !strings.Contains(res.SAI, "return 0") {
+		t.Errorf("integer member must still fold, got:\n%s", res.SAI)
+	}
+	mixBad := "enum M {\n  A = 0,\n  B = \"b\",\n}\nfunction main(): string {\n  return M.B;\n}\n"
+	r2 := Lower("mixbad.ts", mixBad)
+	if !r2.Refused {
+		t.Fatalf("expected mixed string-member refusal, got:\n%s", r2.SAI)
+	}
+	if got := diagText(r2); !strings.Contains(got, "string enum member M.B is not lowerable") {
+		t.Errorf("missing mixed string-enum diagnostic:\n%s", got)
+	}
+}
+
 // Coded panics: bare `panic` is rejected by the assembler, so every
 // runtime abort carries a code (25xx satsgo block; 1403 registry OOM).
 func TestCodedPanics(t *testing.T) {

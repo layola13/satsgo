@@ -841,3 +841,10 @@
   Slot 属性、动态 children 大声拒。
   单测成功 + 3 拒形（含契约 + 双自锁）；全套件绿、286 sweep 零 diff；
   红绿验证通过。JEV blast-radius local_only/safe_to_apply 64%。
+- ✅ 串枚举读静默错译止血（`enumNonInt` 集 + recordEnum 逐成员记集 + 两读分支
+  先查点名拒 + `TestStringEnumReadRefuses`）：
+  非严格编号核给串成员记序数，`S.A`（"a"）静默降成 `return 0`。
+  现串/计算初值成员进集，读位先查拒（整数成员照折，混合双断言）；
+  序数表不动（防编号核漂移），旁路已排除（唯二消费者）。
+  全套件绿、286 sweep 零 diff（洞潜伏，零用户影响）；红绿验证通过。
+  JEV blast-radius local_only/safe_to_apply 96%。

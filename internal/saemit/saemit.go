@@ -477,6 +477,11 @@ type emitter struct {
 	funcSigs map[string]saType
 	// enums maps EnumName -> member -> ordinal (auto-numbered variants).
 	enums map[string]map[string]int64
+	// enumNonInt marks EnumName -> member for string/computed members:
+	// recordEnum numbers every named member (non-strict), so without
+	// this set string reads would silently fold to ordinals. Reads
+	// check this set first and refuse loudly; integer members fold.
+	enumNonInt map[string]map[string]bool
 	// importedFrom maps a local value name to its module ("fs"/"net") for
 	// `import { readFile } from "fs"` style calls. importedRemote maps
 	// the local name to the remote export name (`import { a as b }`
@@ -7204,6 +7209,10 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 	if pa.Expression.Kind == ast.KindPropertyAccessExpression {
 		if q, ok := dottedBaseName(pa.Expression); ok {
 			if members, ok := e.enums[q]; ok {
+				if e.enumNonInt[q][pa.Name().Text()] {
+					e.refuse(n, "string enum member %s.%s is not lowerable (only all-integer enums fold ordinals)", q, pa.Name().Text())
+					return "0", tUnknown
+				}
 				if ord, ok := members[pa.Name().Text()]; ok {
 					return fmt.Sprintf("%d", ord), tI32
 				}
@@ -7238,6 +7247,10 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 	// Enum.Member folds to its ordinal as a value.
 	if pa.Expression.Kind == ast.KindIdentifier {
 		if members, ok := e.enums[e.qualify(pa.Expression.Text())]; ok {
+			if e.enumNonInt[e.qualify(pa.Expression.Text())][pa.Name().Text()] {
+				e.refuse(n, "string enum member %s.%s is not lowerable (only all-integer enums fold ordinals)", pa.Expression.Text(), pa.Name().Text())
+				return "0", tUnknown
+			}
 			if ord, ok := members[pa.Name().Text()]; ok {
 				return fmt.Sprintf("%d", ord), tI32
 			}
@@ -8483,6 +8496,8 @@ func enumMemberTable(st *ast.Node, strict bool) (map[string]int64, bool) {
 
 // recordEnum records auto-numbered variants (explicit =N honored), mirroring
 // sa_plugin_ts EnumDef. Enum.Member folds to its ordinal at use sites.
+// String/computed members land in enumNonInt (the numbering core still
+// assigns them ordinals): reads refuse instead of silently folding to 0.
 func (e *emitter) recordEnum(st *ast.Node) {
 	name := "<anon>"
 	if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
@@ -8494,6 +8509,27 @@ func (e *emitter) recordEnum(st *ast.Node) {
 		e.enums = map[string]map[string]int64{}
 	}
 	e.enums[name] = m
+	// Per-member integer check (independent of the strict table's
+	// all-or-nothing fate): only string/computed-initialized members
+	// land in the set; integer members of mixed enums keep folding.
+	set := map[string]bool{}
+	for _, mem := range st.AsEnumDeclaration().Members.Nodes {
+		mname, ok := bindingNameText(mem)
+		if !ok {
+			continue
+		}
+		if init := mem.AsEnumMember().Initializer; init != nil {
+			if _, ok := integerInit(init); !ok {
+				set[mname] = true
+			}
+		}
+	}
+	if len(set) > 0 {
+		if e.enumNonInt == nil {
+			e.enumNonInt = map[string]map[string]bool{}
+		}
+		e.enumNonInt[name] = set
+	}
 }
 
 // recordLayout builds the static byte-offset table for an interface.
