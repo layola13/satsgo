@@ -589,6 +589,12 @@
   reachable 全整数 enum 成员经 sharedEnums 直接折叠、无需 import（实测证伪
   loop1-kind 设想，按删无可删回滚；JEV 回滚裁决）；unreachable enum miss 走
   loop2 value 分支报 `import it first`（上一轮分流自动覆盖）。单测锁定该形，全套件绿。
+- ✅ linkRoute 串枚举诚实缺口（`program.go` loop2 诊断索引 6 行 + `program_test.go` lib/用例）：
+  unreachable 诊断索引曾把所有具名 enum 记为 value，串/计算枚举 miss 经上一轮
+  分流误报 `import it first`（import 也救不了，违拒则大声）。现 kind 仅当
+  `enumMemberTable(st, true)` 成功才记，全整数行为不变；串枚举回落通用子集拒
+  （单测锁定 `property access .X is not in the SA-lowerable subset`）。
+  全套件绿（JEV 排序 #1 + blast-radius local_only）。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

@@ -681,7 +681,12 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				}
 			case ast.KindEnumDeclaration:
 				if st.Name() != nil && st.Name().Kind == ast.KindIdentifier {
-					linkKindTmp[p][st.Name().Text()] = "value"
+					// Only all-integer enums fold by value once imported: string
+					// and computed members stay loud, so their misses must not
+					// promise an import that cannot help.
+					if _, ok := enumMemberTable(st, true); ok {
+						linkKindTmp[p][st.Name().Text()] = "value"
+					}
 					if hasExportModifier(st) {
 						linkExpTmp[p][st.Name().Text()] = true
 					}
