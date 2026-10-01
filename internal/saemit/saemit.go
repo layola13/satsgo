@@ -5396,6 +5396,11 @@ func (e *emitter) lowerArrayMethod(recv, method string, args []string, types []s
 			return "", tUnknown, false
 		}
 		if e.modStrTmps[args[0]] {
+			// Demand probe 2026-10-01: zero hits across 286 sweep +
+			// demos (kept loud deliberately). Lifting needs 16-wide
+			// element threading through push/index/clone/methods plus
+			// the sci-side array memory model (see todo/03 notes);
+			// implement on first real use case, not speculatively.
 			e.refuse(pos, "module string array elements are not lowerable yet (4-wide slots hold i32 only)")
 			return "0", tUnknown, true
 		}
@@ -7868,6 +7873,7 @@ func (e *emitter) lowerArrayLiteral(n *ast.Node) (string, saType) {
 				continue
 			}
 			v, _ := e.lowerExpr(el)
+			// Demand probe 2026-10-01: zero hits (see push-site note).
 			if e.modStrTmps[v] {
 				e.refuse(el, "module string array elements are not lowerable yet (4-wide slots hold i32 only)")
 				return "0", tUnknown
@@ -7882,6 +7888,7 @@ func (e *emitter) lowerArrayLiteral(n *ast.Node) (string, saType) {
 		// Module-string headers are 16 bytes; 4-wide slots would
 		// truncate them (pure-literal arrays stay node-consumable for
 		// Buffer.concat-style backends, so only marked temps refuse).
+		// Demand probe 2026-10-01: zero hits (see push-site note).
 		if e.modStrTmps[v] {
 			e.refuse(el, "module string array elements are not lowerable yet (4-wide slots hold i32 only)")
 			return "0", tUnknown

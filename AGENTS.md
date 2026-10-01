@@ -767,3 +767,7 @@
   红绿验证：单藏产品双文件跑新断言红（旧 yet 拒文），恢复后绿；
   链接 SAI 真机 `sa check` 过（5 指令）；286 sweep 零 diff。
   JEV blast-radius local_only/safe_to_apply 81%。
+- ⏸ 模块串数组 yet 维持大声拒（jev_thinking 96%，注释三处，零产品语义变更）：
+  需求探针 2026-10-01：286 sweep + demos 零命中； lifting 需 16 宽全链路 +
+  sci 数组内存模型，发现在真实用例时再实现，不做推测复杂化。
+  全套件绿、286 sweep 零 diff。
