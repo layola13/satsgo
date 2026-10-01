@@ -808,6 +808,9 @@ func (e *emitter) emitModStoreString(ms *modState, text string, pos *ast.Node) (
 // emitModStoreStringDispatch routes one string-slot assignment: literal
 // and folded-const RHS store directly; anything computed refuses loudly
 // (its buffer has no module lifetime: storing the bits would dangle).
+// Lifting needs an owning copy (alloc+copy into module-lifetime storage),
+// which waits on the sci memory model (no memcpy primitive; alloc lifetime
+// unverified) and the first real use case — jev_thinking 91%, not speculative.
 func (e *emitter) emitModStoreStringDispatch(ms *modState, rhs *ast.Node, pos *ast.Node) (string, saType, bool) {
 	if text, ok := e.modStringText(rhs); ok {
 		return e.emitModStoreString(ms, text, pos)
@@ -820,7 +823,8 @@ func (e *emitter) emitModStoreStringDispatch(ms *modState, rhs *ast.Node, pos *a
 // same-width ints retag via trunc, i32 widens via sext, ints enter f64 via
 // sitofp, f64 bits spill through scratch. String slots refuse here: their
 // stores go through emitModStoreString with literal text (a widened temp
-// cannot prove @const-immortal data). Anything else refuses loudly
+// cannot prove @const-immortal data; owning copy waits on the sci memory
+// model — see emitModStoreStringDispatch). Anything else refuses loudly
 // (handle copies never reach here: arrays cannot register).
 func (e *emitter) modWiden(ms *modState, src, srcKind string, srcType saType, pos *ast.Node) (string, bool) {
 	_ = srcKind
@@ -1027,7 +1031,9 @@ func (e *emitter) emitModLoadField(ms *modState, mf *modField, pos *ast.Node) (s
 
 // emitModStoreObject lowers one whole-object literal assignment to per-
 // field status-checked sets (ensure first), then materializes the header
-// as the assignment value (chained stores keep a real struct).
+// as the assignment value (chained stores keep a real struct). Computed
+// RHS refuses: per-field values would need owning copies (same sci memory
+// model precondition as computed strings — see emitModStoreStringDispatch).
 func (e *emitter) emitModStoreObject(ms *modState, rhs *ast.Node, pos *ast.Node) (string, saType, bool) {
 	if rhs == nil || rhs.Kind != ast.KindObjectLiteralExpression {
 		e.refuse(pos, "module state %s stores object literals only (computed objects are not lowerable yet)", ms.qual)
