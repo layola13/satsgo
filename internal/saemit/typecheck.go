@@ -83,6 +83,93 @@ func (t *typeCtx) nullable(n *ast.Node) bool {
 	return isNullish(ty.Flags())
 }
 
+// inferredReturnType maps a function declaration/expression's checker
+// return type to an SA type when it is a concrete scalar (todo/02#6 fifth
+// knife: the "declare `-> T`" gate upgrades from a syntax-Kind refusal to
+// a checker-typed verdict). number/string/boolean (literals included)
+// mirror annotationType exactly (`number` reads i32, the integer
+// discipline); void/undefined read void (the default); any/unknown,
+// disagreeing unions/intersections and all exotic shapes yield false so
+// the legacy loud refusal applies unchanged.
+// Nil-safe: no context (or any checker failure) reports unknown.
+func (t *typeCtx) inferredReturnType(fn *ast.Node) (saType, bool) {
+	if t == nil || t.check == nil || fn == nil {
+		return tUnknown, false
+	}
+	var out saType
+	ok := false
+	func() {
+		defer func() {
+			_ = recover()
+		}()
+		ty := t.check.GetTypeAtLocation(fn)
+		if ty == nil {
+			return
+		}
+		sigs := t.check.GetSignaturesOfType(ty, checker.SignatureKindCall)
+		if len(sigs) == 0 {
+			return
+		}
+		rt := t.check.GetReturnTypeOfSignature(sigs[0])
+		if rt == nil {
+			return
+		}
+		// Unions fold only when every member agrees on one scalar
+		// (the checker spells `boolean` as `true|false`; the same rule
+		// typeofKind uses). `string|undefined` and friends disagree and
+		// stay loud.
+		var flats []*checker.Type
+		if rt.Flags()&checker.TypeFlagsUnionOrIntersection != 0 {
+			flats = rt.Types()
+		} else {
+			flats = []*checker.Type{rt}
+		}
+		if len(flats) == 0 {
+			return
+		}
+		// NOTE: tUnknown spells "i32", so unanimity needs its own
+		// boolean sentinel rather than a got==tUnknown comparison.
+		got := tUnknown
+		have := false
+		for _, m := range flats {
+			s, good := scalarReturnKind(m)
+			if !good {
+				return
+			}
+			if !have {
+				got, have = s, true
+			} else if got != s {
+				return
+			}
+		}
+		out, ok = got, have
+	}()
+	if !ok {
+		return tUnknown, false
+	}
+	return out, true
+}
+
+// scalarReturnKind maps one checker type to its SA scalar (mirror of
+// annotationType's keyword table: `number` reads i32). any/unknown and
+// all exotic shapes fail.
+func scalarReturnKind(ty *checker.Type) (saType, bool) {
+	f := ty.Flags()
+	switch {
+	case f&checker.TypeFlagsAnyOrUnknown != 0:
+		return tUnknown, false
+	case f&checker.TypeFlagsStringLike != 0:
+		return tString, true
+	case f&checker.TypeFlagsNumberLike != 0:
+		return tI32, true
+	case f&checker.TypeFlagsBooleanLike != 0:
+		return tBool, true
+	case f&checker.TypeFlagsVoid != 0 || f&checker.TypeFlagsUndefined != 0:
+		return tVoid, true
+	}
+	return tUnknown, false
+}
+
 func isNullish(f checker.TypeFlags) bool {
 	return f&checker.TypeFlagsNullable != 0 || f&checker.TypeFlagsUndefined != 0
 }

@@ -883,3 +883,16 @@
   形状 286 全过、投影 62 sa_std + 37 node + 13 deno 全过；
   本容器无 `sa` 二进制，真机 e2e 以结构校验代替（既定口径）。
   JEV blast-radius local_only/needs_regression_tests（回归已补）。
+- ✅ 返回类型 checker 推断第五刀（todo/02#6，`inferredReturnType` + `scalarReturnKind`）：
+  无注解函数经签名返回类型定 `-> T`（`number→i32` 与注解同形，`boolean` 按 `true|false`
+  全体一致折叠，`any`/分歧联合/异形恒大声拒，方言注解盲区诚实回退）；
+  途中修出两潜伏：`tUnknown` 字面即 `"i32"` 致哨兵恒假（改独立 bool 哨兵）、
+  `string` 签名渲染为 `ptr`（断言按实际）。
+  聚类依据：npm 单文件重测 lodash-es 35/609、date-fns 262/1912 与基线一致（零 panic），
+  Top 簇（无注解返回 247/顶层变量/跨文件调用）皆 program 通道 artifacts，非 Kind 可杀，
+  故本刀只收有类型 TS 形，JS-any 形保持诚实拒。
+  单测 `TestInferredReturnScalar/Refuses`（4 过形 + any/union 拒形，原拒文逐字锁）；
+  全套件绿、286 sweep 双二进制零 diff、形状 286 全过、投影 62+37+13 全过。
+  JEV blast-radius local_only/needs_regression_tests（回归已补）。
+- 特权备忘（用户 2026-10-02 授予）：sci 难啃特性可用宏降级（如 try/for）；
+  候选：try 异常边、async 状态机、数组内存模型（待 sci 侧先定模型后启用）。

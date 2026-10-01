@@ -898,6 +898,9 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	// Missing annotation means void (mirrors the `-> T` rule: a
 	// value-returning function must declare it). The pre-scan agrees.
 	// Top-level unannotated bodies take co-located .d.ts returns.
+	// Otherwise the checker decides concrete scalar returns (todo/02#6:
+	// `number` reads i32 exactly like its keyword annotation; anything
+	// exotic keeps the legacy loud refusal in lowerReturn).
 	e.retType = tVoid
 	if fd := fn.AsFunctionDeclaration(); fd.Type != nil {
 		e.retType = annotationType(fd.Type)
@@ -907,7 +910,11 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	} else if !savedInFunc {
 		if r, ok := e.dtsRet[name]; ok {
 			e.retType = r
+		} else if rt, ok := e.tcx.inferredReturnType(fn); ok {
+			e.retType = rt
 		}
+	} else if rt, ok := e.tcx.inferredReturnType(fn); ok {
+		e.retType = rt
 	}
 	for _, p := range params {
 		pname, ok := bindingNameText(p.AsNode())
@@ -1055,6 +1062,9 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	}
 	// Return type: explicit annotation wins; otherwise an expression body
 	// or any parameter means a value function (reference value_fn rule).
+	// A remaining void default consults the checker for concrete scalar
+	// returns (todo/02#6, same rule as lowerFunction; the i32 default
+	// above is untouched).
 	ret := tVoid
 	if retNode != nil {
 		ret = annotationType(retNode)
@@ -1069,6 +1079,8 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 		}
 		if body.Kind != ast.KindBlock || len(pnames) > 0 {
 			ret = tI32
+		} else if rt, ok := e.tcx.inferredReturnType(arrow); ok {
+			ret = rt
 		}
 	}
 	// Captures: free identifiers minus params, minus locals declared in
