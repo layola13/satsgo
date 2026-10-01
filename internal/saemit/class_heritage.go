@@ -233,6 +233,9 @@ func (e *emitter) checkSuperAccess(n *ast.Node, segs []string) bool {
 	}
 	if len(segs) > 0 {
 		if cd := e.classDefOf(e.thisSelf); cd != nil {
+			// Same-class reads refuse too (no inline machinery exists
+			// anywhere yet): super reuses whatever lands first.
+			// Demand probe 2026-10-01 zero; first use triggers.
 			if _, ok := cd.getters[segs[0]]; ok {
 				e.refuse(n, "getter super.%s needs inline support (not yet)", segs[0])
 				return false

@@ -7357,7 +7357,9 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 		return v, t
 	}
 	// Accessor reads refuse precisely (inlining with `this` binding and
-	// side-effect ordering is a later slice).
+	// side-effect ordering is a later slice: no same-class inline
+	// machinery exists to reuse for super either — demand probe 2026-10-01
+	// zero across 286, first real use case triggers; jev_thinking).
 	if pa.Expression.Kind == ast.KindIdentifier {
 		if cd := e.classDefOf(pa.Expression.Text()); cd != nil {
 			if _, ok := cd.getters[pa.Name().Text()]; ok {
