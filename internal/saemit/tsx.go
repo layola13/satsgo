@@ -76,6 +76,10 @@ type tsxEmitter struct {
 	// declared init is only the unpassed default (unreachable when the
 	// exact-match gate holds — documented, not relied upon).
 	propDefs map[string][]tsxProp
+	// slotDefs marks components whose template declares a <Slot />
+	// outlet: only they accept children (consumer drops or errors
+	// otherwise — refused here instead).
+	slotDefs map[string]bool
 }
 
 // tsxProp is one declared component prop (integer/boolean only; strings
@@ -109,6 +113,7 @@ func (x *tsxEmitter) lowerSourceFile(sf *ast.SourceFile) {
 	// regardless of definition order (emission is purely textual).
 	x.comps = map[string]bool{}
 	x.propDefs = map[string][]tsxProp{}
+	x.slotDefs = map[string]bool{}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
 			continue
@@ -118,6 +123,9 @@ func (x *tsxEmitter) lowerSourceFile(sf *ast.SourceFile) {
 		}
 		name := st.Name().Text()
 		x.comps[name] = true
+		if hasSlotOutlet(st) {
+			x.slotDefs[name] = true
+		}
 		if props, ok := x.collectProps(st); !ok {
 			return
 		} else {
@@ -732,8 +740,37 @@ func hasJSXAttrs(open *ast.Node) bool {
 	return found
 }
 
-// isCustomRef reports a same-file component reference (bare composition;
-// props and children need later slices and are gated at the call sites).
+// hasSlotOutlet reports whether a component body declares a bare <Slot />
+// outlet (attributes ride the deep slot-context machinery — later).
+func hasSlotOutlet(fn *ast.Node) bool {
+	found := false
+	var walk func(n *ast.Node)
+	walk = func(n *ast.Node) {
+		if n == nil || found {
+			return
+		}
+		if n.Kind == ast.KindJsxSelfClosingElement {
+			if tag := n.AsJsxSelfClosingElement().TagName; tag != nil &&
+				tag.Kind == ast.KindIdentifier && tag.Text() == "Slot" &&
+				!hasJSXAttrs(n) {
+				found = true
+				return
+			}
+		}
+		n.ForEachChild(func(c *ast.Node) bool {
+			walk(c)
+			return false
+		})
+	}
+	if body := fn.BodyData().Body; body != nil {
+		walk(body)
+	}
+	return found
+}
+
+// isCustomRef reports a same-file component reference (composition;
+// props lower exactly via lowerCustomAttrs, children need a <Slot />
+// outlet in the callee — both gated at the call sites).
 func (x *tsxEmitter) isCustomRef(tag string) bool {
 	return tag != "" && 'A' <= tag[0] && tag[0] <= 'Z' && x.comps[tag]
 }
@@ -747,12 +784,16 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 		if !ok {
 			return false
 		}
+		if tag == "Slot" {
+			x.refuse(n, "Slot takes no children or attributes (bare <Slot /> only)")
+			return false
+		}
 		if x.isCustomRef(tag) {
-			// Props ride allow_component_attrs downstream; children ride
-			// <Slot />. Both need later slices — only exact literal
-			// passing lowers here (see lowerCustomAttrs).
-			if len(el.Children.Nodes) != 0 {
-				x.refuse(n, "component children need the composition slice (only exact props)")
+			// Children lower in caller scope (static elements, text and
+			// {caller state} reuse lowerJSXChild); the callee must
+			// declare a <Slot /> outlet or the children have no home.
+			if len(el.Children.Nodes) != 0 && !x.slotDefs[tag] {
+				x.refuse(n, "component %s has no <Slot /> outlet for children", tag)
 				return false
 			}
 			b.WriteString(indent + "<" + tag)
@@ -760,6 +801,11 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 				return false
 			}
 			b.WriteString(">\n")
+			for _, ch := range el.Children.Nodes {
+				if !x.lowerJSXChild(ch, b, indent+"  ") {
+					return false
+				}
+			}
 			b.WriteString(indent + "</" + tag + ">\n")
 			return true
 		}
@@ -779,6 +825,16 @@ func (x *tsxEmitter) lowerJSXNode(n *ast.Node, b *strings.Builder, indent string
 		tag, ok := x.jsxTagName(n)
 		if !ok {
 			return false
+		}
+		if tag == "Slot" {
+			// The outlet carries no attributes of its own (contextProps
+			// and contextScope ride the deep slot machinery — later).
+			if hasJSXAttrs(n) {
+				x.refuse(n, "Slot attributes need the composition slice (bare <Slot /> only)")
+				return false
+			}
+			b.WriteString(indent + "<Slot />\n")
+			return true
 		}
 		b.WriteString(indent + "<" + tag)
 		if x.isCustomRef(tag) {
@@ -959,6 +1015,11 @@ func (x *tsxEmitter) jsxTagName(open *ast.Node) (string, bool) {
 	if name == "" {
 		x.refuse(tag, "empty tag name")
 		return "", false
+	}
+	// <Slot /> is the reserved children outlet (attributes ride the
+	// deep slot-context machinery — refused at the call sites).
+	if name == "Slot" {
+		return name, true
 	}
 	if 'A' <= name[0] && name[0] <= 'Z' {
 		// Same-file components pass through by name (consumer links

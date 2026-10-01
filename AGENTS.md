@@ -834,3 +834,10 @@
   全套件绿、286 sweep 零 diff；红绿验证通过。
   JEV blast-radius local_only/safe_to_apply 43%（needs_regression 35%，
   独立入口 + sweep 零触达 + 既有用例全持已覆盖）。
+- ✅ tsx Slot children（Slot 保留字 + 两遍 outlet 表 + 定制 children 改走
+  lowerJSXChild + 无 outlet 拒 + 契约存在规则）：
+  被调裸 `<Slot />` 直通（属性拒，深水上下文另立项）；调用方 children 复用
+  既有静态/文本/`{调用方state}` 路（调用方作用域原文保留）；无 outlet、
+  Slot 属性、动态 children 大声拒。
+  单测成功 + 3 拒形（含契约 + 双自锁）；全套件绿、286 sweep 零 diff；
+  红绿验证通过。JEV blast-radius local_only/safe_to_apply 64%。

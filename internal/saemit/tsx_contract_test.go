@@ -32,6 +32,9 @@ var contractInterp = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 var contractTag = regexp.MustCompile(`</?([A-Za-z][A-Za-z0-9._-]*)`)
 var contractAttr = regexp.MustCompile(`\s([A-Za-z_:][A-Za-z0-9_.:-]*)=`)
 var contractCompDef = regexp.MustCompile(`<Component name="([A-Za-z_][A-Za-z0-9_]*)">`)
+// contractCustomOpen matches custom-element opening tags; the checker
+// pairs each non-self-closing one with its close tag to find children.
+var contractCustomOpen = regexp.MustCompile(`<([A-Z][A-Za-z0-9_]*)\b([^>]*?)>`)
 
 // contractDangerous mirrors react parser.zig dangerous_tags /
 // dangerous_attrs (the only hard refusals on the tag/attribute axes).
@@ -61,18 +64,22 @@ func checkSAXContract(sax string) []string {
 	for _, m := range contractCompDef.FindAllStringSubmatch(sax, -1) {
 		defs[m[1]] = true
 	}
+	chunks := map[string]string{}
 	locs := contractCompDef.FindAllStringIndex(sax, -1)
 	for i, loc := range locs {
 		end := len(sax)
 		if i+1 < len(locs) {
 			end = locs[i+1][0]
 		}
-		bad = append(bad, checkSAXComponentChunk(sax[loc[0]:end])...)
+		chunk := sax[loc[0]:end]
+		chunks[contractCompDef.FindStringSubmatch(chunk)[1]] = chunk
+		bad = append(bad, checkSAXComponentChunk(chunk)...)
 	}
-	// Custom tag references resolve document-wide.
+	// Custom tag references resolve document-wide; elements carrying
+	// children need a <Slot /> outlet in the referenced component.
 	for _, m := range contractTag.FindAllStringSubmatch(sax, -1) {
 		tag := m[1]
-		if tag == "Component" || tag == "state" {
+		if tag == "Component" || tag == "state" || tag == "Slot" {
 			continue
 		}
 		if contractDangerousTags[tag] {
@@ -80,6 +87,30 @@ func checkSAXContract(sax string) []string {
 		}
 		if tag[0] >= 'A' && tag[0] <= 'Z' && !defs[tag] {
 			bad = append(bad, "unresolved component <"+tag+">")
+		}
+	}
+	// A custom element carrying children (<Tag>...</Tag>) needs a
+	// <Slot /> outlet in the referenced component's block.
+	for _, loc := range contractCustomOpen.FindAllStringSubmatchIndex(sax, -1) {
+		tag := sax[loc[2]:loc[3]]
+		if tag == "Component" {
+			continue
+		}
+		attrs := sax[loc[4]:loc[5]]
+		if strings.HasSuffix(strings.TrimRight(attrs, " \t"), "/") {
+			continue
+		}
+		close := "</" + tag + ">"
+		rest := sax[loc[1]:]
+		ci := strings.Index(rest, close)
+		if ci < 0 {
+			continue
+		}
+		if strings.TrimSpace(rest[:ci]) == "" {
+			continue
+		}
+		if def, ok := chunks[tag]; !ok || !strings.Contains(def, "<Slot") {
+			bad = append(bad, "children passed to component without <Slot />: "+tag)
 		}
 	}
 	for _, m := range contractAttr.FindAllStringSubmatch(sax, -1) {
@@ -173,5 +204,10 @@ func TestTSXSAXContract(t *testing.T) {
 	ghost := "<Component name=\"C\">\n  <state>\n    n = 0\n  </state>\n  <div>\n    {ghost}\n  </div>\n</Component>\n"
 	if bad := checkSAXContract(ghost); len(bad) == 0 {
 		t.Errorf("checker must flag undeclared interpolation:\n%s", ghost)
+	}
+	// Children without a <Slot /> outlet must fail the contract.
+	noslot := "<Component name=\"B\">\n  <span>hi</span>\n</Component>\n<Component name=\"A\">\n  <B>x</B>\n</Component>\n"
+	if bad := checkSAXContract(noslot); len(bad) == 0 {
+		t.Errorf("checker must flag children without <Slot />:\n%s", noslot)
 	}
 }
