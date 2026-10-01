@@ -749,3 +749,9 @@
   依据：单文件口径 link==nil 使 linkRoute 分支恒空（文案零触达），
   await/containsThrow 注释与精度修正未覆盖 286 语料（零 try/throw 用例）。
   planck 语料本环境缺失（`/content/planck.js` 不存在），program 口径待补。
+- ✅ linkRoute 未导入一阶值诚实分支（`saemit.go` 标识读位 + 单测）：
+  value 位裸读跨文件函数（`apply(add)` 未导入形）曾劝 `import it first`，
+  但 import 也救不了（无一阶值）。现按 Math 别名前例直报一阶值缺口
+  （与已绑定分支同文案）；类/new/extends 位不动（import 真能救）。
+  红绿验证：单藏产品代码跑新单测红（漏出 import 劝告），恢复后绿。
+  单测 `TestLinkRouteUnimportedFirstClassValue`；全套件绿。

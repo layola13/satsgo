@@ -2157,6 +2157,14 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 			e.refuse(n, "Math.%s as a value is not lowerable (call Math.%s(...) directly)", g, g)
 			return "0", tUnknown
 		}
+		// Functions have no first-class value: a cross-file function name
+		// read as a value names the real gap even when unimported
+		// (importing cannot help; call it directly). Mirrors the Math-alias
+		// value refusal above and the bound-function linkRoute branch.
+		if e.linkExportKind[n.Text()] == "function" {
+			e.refuse(n, "%s as a value is not lowerable (functions have no first-class value; call %s(...) directly)", n.Text(), n.Text())
+			return "0", tUnknown
+		}
 		if r := e.linkRoute(n.Text()); r != "" {
 			e.refuse(n, "%s", r)
 			return "0", tUnknown

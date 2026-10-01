@@ -455,6 +455,27 @@ func TestLinkRouteFirstClassValue(t *testing.T) {
 	}
 }
 
+// An unimported function read as a value names the real gap too:
+// importing cannot help (no first-class values), so linkRoute must not
+// advise an import here either.
+func TestLinkRouteUnimportedFirstClassValue(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "function apply(f: (a: i32, b: i32) => i32): i32 {\n  return f(20, 22);\n}\nfunction main(): i32 {\n  return apply(add);\n}\n",
+		"lib.ts":  "export function add(a: i32, b: i32): i32 {\n  return a + b;\n}\n",
+	}
+	res := LowerProgram("main.ts", files)
+	if !res.Refused {
+		t.Fatalf("expected first-class refusal, got:\n%s", res.SAI)
+	}
+	got := strings.Join(res.Diagnostics, "\n")
+	if !strings.Contains(got, "add as a value is not lowerable (functions have no first-class value; call add(...) directly)") {
+		t.Errorf("missing first-class diagnostic:\n%s", got)
+	}
+	if strings.Contains(got, "import it first") {
+		t.Errorf("vacuous import advice leaked:\n%s", got)
+	}
+}
+
 // Unimported namespace members route to the import (N.f/N.K/new N.C/
 // N.M.g all lower once `import { N }` binds), never to a backend gap.
 func TestLinkRouteNamespaceMembers(t *testing.T) {
