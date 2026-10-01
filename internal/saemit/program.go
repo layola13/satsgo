@@ -90,6 +90,10 @@ type modResolution struct {
 	// no ordinal table exists (and single-file string reads refuse),
 	// so importers name this gap instead of reporting "not exported".
 	nonIntEnums map[string]bool
+	// lets marks exported let/var literals: never folded (reassignment
+	// would stale the fold), so importers name this gap instead of
+	// reporting "not exported".
+	lets map[string]bool
 	// qualified maps an export name to its linked @name (direct defs and
 	// resolved re-exports alike; default imports use defQualified).
 	qualified    map[string]string
@@ -156,11 +160,21 @@ func (e *emitter) linkRoute(name string) string {
 		// stays panic-semantics for the same reason.
 		return fmt.Sprintf("%s is defined in %s; import it first (import { %s } then %s.f(...)/%s.K/new %s.C())", name, file, name, name, name, name)
 	case "value":
+		// Exported lets can never link by value (reassignment would stale
+		// the importer's fold): name the gap even though the name IS
+		// exported — "import it first" would be a vacuous promise.
+		if e.linkLets[name] {
+			return fmt.Sprintf("%s is defined in %s, but exported let values cannot link by value (reassignment would stale the fold; use const or keep it file-local)", name, file)
+		}
 		// Exported literal const scalars link by value (globalConsts):
-		// a miss is an import away, not a backend gap. Unexported or
-		// non-const values (let, templates, objects) stay an honest gap.
+		// a miss is an import away, not a backend gap.
 		if e.linkExported[name] {
 			return fmt.Sprintf("%s is defined in %s; import it first", name, file)
+		}
+		// Unexported const literals need only an export (mirrors the
+		// generic fallthrough); unexported lets stay an honest gap.
+		if e.linkValueConst[name] {
+			return fmt.Sprintf("%s is defined in %s but not exported (export it, then import it)", name, file)
 		}
 		return fmt.Sprintf("%s is defined in %s, but cross-file value imports are not lowerable yet", name, file)
 	}
@@ -428,6 +442,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	globalConstStr := map[string]map[string]bool{} // file -> name -> string const
 	globalEnums := map[string]map[string]map[string]int64{} // file -> enum -> member -> ordinal
 	globalNonIntEnums := map[string]map[string]bool{} // file -> enum with string/computed members
+	globalLets := map[string]map[string]bool{} // file -> exported let/var literal (never folds: reassignment)
+	globalValueConst := map[string]map[string]bool{} // file -> const literal (export is the fix when missing)
 	globalArity := map[string]map[string]int{}
 	globalRest := map[string]map[string]bool{}
 	linkKindTmp := map[string]map[string]string{} // file -> name -> kind
@@ -441,6 +457,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		globalConstStr[p] = map[string]bool{}
 		globalEnums[p] = map[string]map[string]int64{}
 		globalNonIntEnums[p] = map[string]bool{}
+		globalLets[p] = map[string]bool{}
+		globalValueConst[p] = map[string]bool{}
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
 		globalDefaults[p] = map[string][]bool{}
@@ -510,6 +528,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 							ast.KindNoSubstitutionTemplateLiteral:
 							if name, ok := bindingNameText(d); ok {
 								linkKindTmp[p][name] = "value"
+								// Const-ness splits the miss advice: unexported
+								// const literals need only an export; lets can
+								// never fold (reassignment), exported or not.
+								isConstHere := st.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst != 0
+								if isConstHere {
+									globalValueConst[p][name] = true
+								} else if hasExportModifier(st) {
+									globalLets[p][name] = true
+								}
 								// Exported CONST scalars link by value (let
 								// stays out: reassignment would stale the
 								// importer's fold, and the importer's const
@@ -765,6 +792,18 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 						ast.KindTrueKeyword, ast.KindFalseKeyword,
 						ast.KindNoSubstitutionTemplateLiteral:
 						linkKindTmp[p][name] = "value"
+						isConstHere := st.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst != 0
+						if isConstHere {
+							if globalValueConst[p] == nil {
+								globalValueConst[p] = map[string]bool{}
+							}
+							globalValueConst[p][name] = true
+						} else if hasExportModifier(st) {
+							if globalLets[p] == nil {
+								globalLets[p] = map[string]bool{}
+							}
+							globalLets[p][name] = true
+						}
 					}
 					if hasExportModifier(st) {
 						linkExpTmp[p][name] = true
@@ -831,6 +870,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				constStr:     globalConstStr[tgt],
 				enums:        globalEnums[tgt],
 				nonIntEnums:  globalNonIntEnums[tgt],
+				lets:         globalLets[tgt],
 				qualified:    expOf[tgt].reexpQualified,
 				defLocal:     expOf[tgt].defLocal,
 				defQualified: defQ,
@@ -871,6 +911,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	linkExports := map[string]string{}
 	linkExportKind := map[string]string{}
 	linkExported := map[string]bool{}
+	// linkLets marks exported let/var literals (never foldable);
+	// linkValueConst marks const literals (export is the fix when
+	// missing). Both route honest miss diagnostics (see linkRoute).
+	linkLets := map[string]bool{}
+	linkValueConst := map[string]bool{}
 	// Reachable files first (tie priority), then the unreachable
 	// diagnostic index (a miss can name a file worth importing).
 	mergeOrder := append(append([]string{}, reachable...), unreachableOrder(parsed, reachable)...)
@@ -886,6 +931,16 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			if _, ok := linkExportKind[name]; !ok {
 				linkExportKind[name] = kind
 				linkExports[name] = p
+			}
+		}
+		for name := range globalLets[p] {
+			if _, ok := linkLets[name]; !ok {
+				linkLets[name] = true
+			}
+		}
+		for name := range globalValueConst[p] {
+			if _, ok := linkValueConst[name]; !ok {
+				linkValueConst[name] = true
 			}
 		}
 		if ex, ok := expOf[p]; ok {
@@ -914,6 +969,8 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		e.linkExports = linkExports
 		e.linkExportKind = linkExportKind
 		e.linkExported = linkExported
+		e.linkLets = linkLets
+		e.linkValueConst = linkValueConst
 		e.tcx = tcx
 		// .d.ts return overrides for unannotated bodies in this file.
 		e.dtsRet = map[string]saType{}

@@ -507,6 +507,62 @@ func TestLinkRouteNamespaceMembers(t *testing.T) {
 	}
 }
 
+// Cross-file values split three ways: unexported const literals need
+// only an export; exported lets can never fold (reassignment would
+// stale the fold), so both the import and the miss name that gap;
+// unexported lets stay an honest gap (neither export nor import helps).
+func TestLinkRouteValueSplit(t *testing.T) {
+	// Unexported const: adding export is the fix.
+	unexp := map[string]string{
+		"main.ts": "function main(): i32 {\n  return K;\n}\n",
+		"lib.ts":  "const K = 7;\n",
+	}
+	r := LowerProgram("main.ts", unexp)
+	if !r.Refused {
+		t.Fatalf("expected refusal, got:\n%s", r.SAI)
+	}
+	got := strings.Join(r.Diagnostics, "\n")
+	if !strings.Contains(got, "K is defined in lib.ts but not exported (export it, then import it)") {
+		t.Errorf("missing not-exported advice:\n%s", got)
+	}
+	if strings.Contains(got, "not lowerable yet") {
+		t.Errorf("stale yet-gap leaked:\n%s", got)
+	}
+	// Exported let: the import names the fold gap (not "not exported"),
+	// and the miss must not promise an import that cannot help.
+	expLet := map[string]string{
+		"main.ts": "import { X } from \"./lib\";\nfunction main(): i32 {\n  return X;\n}\n",
+		"lib.ts":  "export let X = 7;\n",
+	}
+	r = LowerProgram("main.ts", expLet)
+	if !r.Refused {
+		t.Fatalf("expected refusal, got:\n%s", r.SAI)
+	}
+	got = strings.Join(r.Diagnostics, "\n")
+	if !strings.Contains(got, "let X cannot link by value") {
+		t.Errorf("missing let-fold diagnostic:\n%s", got)
+	}
+	if strings.Contains(got, "not exported by") {
+		t.Errorf("false not-exported diagnostic leaked:\n%s", got)
+	}
+	if strings.Contains(got, "import it first") {
+		t.Errorf("vacuous import promise leaked:\n%s", got)
+	}
+	// Unexported let: neither export nor import helps — honest gap.
+	unexpLet := map[string]string{
+		"main.ts": "function main(): i32 {\n  return Y;\n}\n",
+		"lib.ts":  "let Y = 7;\n",
+	}
+	r = LowerProgram("main.ts", unexpLet)
+	if !r.Refused {
+		t.Fatalf("expected refusal, got:\n%s", r.SAI)
+	}
+	got = strings.Join(r.Diagnostics, "\n")
+	if !strings.Contains(got, "cross-file value imports are not lowerable yet") {
+		t.Errorf("missing yet-gap diagnostic:\n%s", got)
+	}
+}
+
 func TestLinkNsFileImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",

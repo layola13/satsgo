@@ -409,6 +409,11 @@ type emitter struct {
 	linkExports    map[string]string
 	linkExportKind map[string]string
 	linkExported   map[string]bool
+	// linkLets marks exported let/var literals (never foldable) and
+	// linkValueConst marks const literals (see linkRoute for the
+	// kind-aware miss diagnostic).
+	linkLets       map[string]bool
+	linkValueConst map[string]bool
 	// linkSeeded marks signatures pre-seeded from the program link
 	// (globalRets); namespace prescan exempts them from collision
 	// refusal (a seeded member signature is the member itself).
@@ -9522,6 +9527,13 @@ func (e *emitter) lowerImport(st *ast.Node) {
 					// the gap instead of the false "not exported".
 					if res.nonIntEnums[remote] {
 						e.refuse(el, "enum %s has string/computed members (only all-integer enums link; single-file string reads are not lowerable either)", remote)
+						continue
+					}
+					// Exported lets are exported in TS but never fold
+					// (reassignment would stale the importer's fold);
+					// name the gap instead of the false "not exported".
+					if res.lets[remote] {
+						e.refuse(el, "let %s cannot link by value (reassignment would stale the importer's fold; use const or keep it file-local)", remote)
 						continue
 					}
 					if _, ok := res.exports[remote]; !ok {

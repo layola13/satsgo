@@ -850,3 +850,11 @@
   JEV blast-radius local_only/safe_to_apply 96%。
   物化（串成员切片双轨）经 jev_thinking 97% 暂缓：需求探针全零
   （286/program/文档），首个真实用例触发，见代码注记。
+- ✅ 跨文件值三拆诚实诊断（`globalLets`/`globalValueConst` 并线 + linkRoute
+  值三拆 + 进口商 lets 先查 + `TestLinkRouteValueSplit`）：
+  实锤三谎：未导出 const 藏加 export 解；导出 let 谎报 not exported；
+  linkRoute 对导出 let 许诺 import 即可实则必拒。现未导出 const 指 export、
+  导出 let import 期与 miss 位双点名（重赋值污染折叠）、未导出 let 守 yet；
+  折叠/绑定语义零动。既有 export-const 用例全持。
+  全套件绿、286 sweep 零 diff；红绿验证通过。
+  JEV blast-radius local_only/safe_to_apply 89%。
