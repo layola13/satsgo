@@ -867,3 +867,10 @@
   矩阵收敛：串双槽（exit 7）、var 同路径、无初值后存、混合初值、嵌套路径（A.B）、重开拆分（跨体共享槽）——
   同语句重名与文件域同形放行（一致，非新洞）；真机 exit 全对数。
   JEV blast-radius local_only/needs_regression_tests（回归测已补）。
+- ✅ 命名空间 multi-const 前向读静默错译止血（prescan 按 declarator 登记 + `foldNsConstMember` 按名定位 + backtick 臂）：
+  `export const A = 1, B = 2` 在函数之后时，前向读漏出裸寄存器 `add A, B`（`sa check` 拒收）；
+  单 backtick-const 前向读同洞（预存）。现 prescan 逐 declarator 定种（arrow/const）登记、
+  折叠按名找 declarator、backtick 臂与 drain 原样镜像；drain 路径零动；
+  multi-arrow-const 仍在 drain 拒（tryTopLevelArrow 单形）。
+  全套件绿、286 sweep 零 diff；红绿验证通过；真机 exit 3/7 对数。
+  JEV blast-radius local_only/safe_to_apply 80%。

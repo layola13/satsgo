@@ -327,6 +327,45 @@ function main(): i32 {
 	}
 }
 
+func TestLowerNamespaceMultiDeclaratorConst(t *testing.T) {
+	// Multi-declarator consts fold per declarator at prescan, so forward
+	// reads resolve regardless of member order (previously `add A, B`
+	// leaked as bare registers: silent mistranslation).
+	fwd := `namespace M {
+  export function sum(): i32 {
+    return A + B;
+  }
+  export const A = 1, B = 2;
+}
+function main(): i32 {
+  return M.sum();
+}
+`
+	res := mustLower(t, "multiconstfwd.ts", fwd)
+	if !strings.Contains(res.SAI, "add 1, 2") {
+		t.Errorf("missing folded forward read:\n%s", res.SAI)
+	}
+	// Single pure-backtick consts fold at prescan too (same hole class:
+	// forward reads previously leaked the raw name).
+	bt := "namespace M {\n  export function get(): string {\n    return S;\n  }\n  export const S = `hi`;\n}\nfunction main(): i32 {\n  const s = M.get();\n  if (s == \"hi\") {\n    return 7;\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "btfwd.ts", bt)
+	if !strings.Contains(res.SAI, "hi") {
+		t.Errorf("missing folded backtick forward read:\n%s", res.SAI)
+	}
+	// Multi-declarator arrow consts still refuse at the drain (single
+	// arrow consts lower via tryTopLevelArrow, which is single-shape).
+	mix := `namespace M {
+  export const f = () => 1, K = 2;
+}
+function main(): i32 {
+  return 0;
+}
+`
+	if r := Lower("multiconstarrow.ts", mix); !r.Refused {
+		t.Fatalf("expected multi-arrow refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerNamespaceRefusals(t *testing.T) {
 	cases := []struct {
 		name string

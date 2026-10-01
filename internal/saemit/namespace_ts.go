@@ -325,23 +325,38 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 				}
 				continue
 			}
-			if len(dl.Declarations.Nodes) != 1 {
-				continue
-			}
 			// Only `const` members reach here (mutable members return
-			// through the per-declarator path above).
-			d := dl.Declarations.Nodes[0]
-			nm, ok := bindingNameText(d)
-			if !ok {
+			// through the per-declarator path above). Multi-declarator
+			// consts register per declarator (arrow declarators keep
+			// arrow kind for call routing; literal ones fold below).
+			// Any declarator without a plain name skips the whole
+			// statement so the drain refuses loudly as before.
+			type nsConstPart struct {
+				name string
+				kind string
+			}
+			var parts []nsConstPart
+			for _, d := range dl.Declarations.Nodes {
+				nm, ok := bindingNameText(d)
+				if !ok {
+					parts = nil
+					break
+				}
+				dkind := nsKindConst
+				if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+					dkind = nsKindArrow
+				}
+				parts = append(parts, nsConstPart{name: nm, kind: dkind})
+			}
+			if len(parts) == 0 {
 				continue
 			}
-			raw = nm
-			init := d.Initializer()
-			if init != nil && init.Kind == ast.KindArrowFunction {
-				kind = nsKindArrow
-			} else {
-				kind = nsKindConst
+			for _, p := range parts {
+				if !e.nsRegisterOne(m, p.name, p.kind) {
+					return
+				}
 			}
+			continue
 		case ast.KindClassDeclaration:
 			if m.Name() == nil || m.Name().Kind != ast.KindIdentifier {
 				continue
@@ -442,15 +457,30 @@ func (e *emitter) nsRegisterOne(m *ast.Node, raw, kind string) bool {
 		}
 	}
 	return true
-}// foldNsConstMember folds one literal const member (mirrors the literal
-// arms of tryTopLevelConst; arrow members stay callees for the drain).
-// Recording-only: no code emits, so prescan order never matters.
+}
+
+// foldNsConstMember folds one literal const member (mirrors the literal
+// arms of tryTopLevelConst, including pure backticks; arrow members stay
+// callees for the drain). It folds the declarator whose qualified name
+// matches q, so multi-declarator consts fold per member. Recording-only:
+// no code emits, so prescan order never matters.
 func (e *emitter) foldNsConstMember(m *ast.Node, q string) {
 	dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
-	if len(dl.Declarations.Nodes) != 1 {
+	var d *ast.Node
+	for _, cand := range dl.Declarations.Nodes {
+		nm, ok := bindingNameText(cand)
+		if !ok {
+			continue
+		}
+		if e.nsDefName(nm) != q {
+			continue
+		}
+		d = cand
+		break
+	}
+	if d == nil {
 		return
 	}
-	d := dl.Declarations.Nodes[0]
 	init := d.Initializer()
 	if init == nil {
 		return
@@ -479,6 +509,18 @@ func (e *emitter) foldNsConstMember(m *ast.Node, q string) {
 			e.constIsStr = map[string]bool{}
 		}
 		e.constVals[q] = s
+		e.constIsStr[q] = true
+	case ast.KindNoSubstitutionTemplateLiteral:
+		// Pure backtick consts fold like string literals (same cooked
+		// n.Text() the value-position lowering feeds to
+		// lowerStringLiteral; escapes preserved).
+		if e.constVals == nil {
+			e.constVals = map[string]string{}
+		}
+		if e.constIsStr == nil {
+			e.constIsStr = map[string]bool{}
+		}
+		e.constVals[q] = init.Text()
 		e.constIsStr[q] = true
 	case ast.KindPropertyAccessExpression:
 		pa := init.AsPropertyAccessExpression()
