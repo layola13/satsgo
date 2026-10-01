@@ -219,6 +219,29 @@ function main(): i32 {
 	if r := Lower("multiletbad.ts", bad); !r.Refused {
 		t.Fatalf("expected refusal, got:\n%s", r.SAI)
 	}
+	// String multi-declarators share the same slot path (one slot per
+	// declarator, string width dispatched at the store).
+	strs := `namespace M {
+  export let s1 = "a", s2 = "b";
+  export function get(i: i32): string {
+    if (i == 0) {
+      return s1;
+    }
+    return s2;
+  }
+}
+function main(): i32 {
+  const s = M.get(0);
+  if (s == "a") {
+    return 7;
+  }
+  return 0;
+}
+`
+	res = mustLower(t, "multiletstr.ts", strs)
+	if !strings.Contains(res.SAI, "call @M_get(") {
+		t.Errorf("missing string multi-let call:\n%s", res.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {
