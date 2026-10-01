@@ -175,13 +175,18 @@ func TestLowerNamespaceMultiDeclaratorLet(t *testing.T) {
   export function sum(): i32 {
     return a + b;
   }
+  export function bump(): i32 {
+    a += 10;
+    b += 20;
+    return a + b;
+  }
 }
 function main(): i32 {
-  return M.sum();
+  return M.sum() + M.bump();
 }
 `
 	res := mustLower(t, "multilet.ts", src)
-	for _, want := range []string{`@import "sa_std/modstate.sai"`, "call @M_sum()"} {
+	for _, want := range []string{`@import "sa_std/modstate.sai"`, "call @M_sum()", "call @M_bump()"} {
 		if !strings.Contains(res.SAI, want) {
 			t.Errorf("missing %q in output:\n%s", want, res.SAI)
 		}
