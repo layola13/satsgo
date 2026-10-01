@@ -7565,7 +7565,9 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 	} else {
 		segs = append([]string{cur.Text()}, segs...)
 	}
-	// Accessor writes refuse precisely (same inline-support reason).
+	// Accessor writes refuse precisely (same inline-support reason:
+	// no inline machinery exists; first real use case triggers —
+	// demand probe 2026-10-01 zero; jev_thinking t2).
 	if cd := e.classDefOf(segs[0]); cd != nil {
 		if _, ok := cd.setters[segs[len(segs)-1]]; ok {
 			e.refuse(cur, "setter %s.%s needs inline support (not yet)", segs[0], segs[len(segs)-1])
