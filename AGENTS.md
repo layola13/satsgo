@@ -755,3 +755,15 @@
   （与已绑定分支同文案）；类/new/extends 位不动（import 真能救）。
   红绿验证：单藏产品代码跑新单测红（漏出 import 劝告），恢复后绿。
   单测 `TestLinkRouteUnimportedFirstClassValue`；全套件绿。
+- ✅ 纯 backtick const 跨文件折叠（`program.go` prescan + `tryTopLevelConst` +
+  `staticLiteralText` 三点 + 单测扩展）：
+  `export const S = \`hi\`` 曾记 kind 却永不进表（`stringLiteralText` 仅认
+  双引号串，`tryTopLevelConst`/`staticLiteralText` 开关表亦无此 kind），
+  跨文件 import 报 yet 缺口。实证值位 lowering 对双 kind 同喂 `n.Text()`
+  进 `lowerStringLiteral`（cooked 一致，转义保留），故三点照串同形收录
+  （`globalConsts` + `constStr` + `constVals` + 静态折叠；`stringLiteralText`
+  不放宽，显式分支，调用点零行为变更）。仅 const（immutable）进表，
+  `let`/模板表达式/对象/桶链/未导出恒拒如旧。
+  红绿验证：单藏产品双文件跑新断言红（旧 yet 拒文），恢复后绿；
+  链接 SAI 真机 `sa check` 过（5 指令）；286 sweep 零 diff。
+  JEV blast-radius local_only/safe_to_apply 81%。

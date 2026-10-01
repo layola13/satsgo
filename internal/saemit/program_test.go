@@ -610,6 +610,21 @@ func TestLowerProgramConstValueImport(t *testing.T) {
 			t.Errorf("const value import must lower cleanly, got: %s", d)
 		}
 	}
+	// Pure backtick consts fold exactly like string literals
+	// (same cooked n.Text() both positions; escapes preserved).
+	bt := map[string]string{
+		"main.ts": "import { GREET } from \"./c\";\nfunction main(): string {\n  return GREET;\n}\n",
+		"c.ts":    "export const GREET = `hi`;\n",
+	}
+	resBT := mustLowerProgram(t, "main.ts", bt)
+	if !strings.Contains(resBT.SAI, "hi") {
+		t.Errorf("missing backtick const fold in linked output:\n%s", resBT.SAI)
+	}
+	for _, d := range resBT.Diagnostics {
+		if strings.Contains(d, "not exported") || strings.Contains(d, "not lowerable") {
+			t.Errorf("backtick const import must lower cleanly, got: %s", d)
+		}
+	}
 	// Object consts never travel (no constVals form).
 	obj := map[string]string{
 		"main.ts": "import { O } from \"./c\";\nfunction main(): i32 {\n  return O.x;\n}\n",

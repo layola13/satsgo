@@ -522,6 +522,14 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 											globalConsts[p][name] = s
 											globalConstStr[p][name] = true
 										}
+									// Pure backtick consts fold exactly like
+									// string literals (value-position lowering
+									// feeds n.Text() to lowerStringLiteral for
+									// both kinds; probed cooked-identical).
+									case ast.KindNoSubstitutionTemplateLiteral:
+										expOf[p].exports[name] = true
+										globalConsts[p][name] = init.Text()
+										globalConstStr[p][name] = true
 									case ast.KindTrueKeyword:
 										expOf[p].exports[name] = true
 										globalConsts[p][name] = "1"

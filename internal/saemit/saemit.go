@@ -2271,7 +2271,7 @@ func (e *emitter) tryTopLevelConst(st *ast.Node) bool {
 		// only sees literals, and the untaken arm may not exist.
 		init = e.probeFoldedInit(init)
 		switch init.Kind {
-		case ast.KindNumericLiteral, ast.KindStringLiteral, ast.KindTrueKeyword, ast.KindFalseKeyword:
+		case ast.KindNumericLiteral, ast.KindStringLiteral, ast.KindNoSubstitutionTemplateLiteral, ast.KindTrueKeyword, ast.KindFalseKeyword:
 			if e.constVals == nil {
 				e.constVals = map[string]string{}
 			}
@@ -2285,6 +2285,14 @@ func (e *emitter) tryTopLevelConst(st *ast.Node) bool {
 					continue
 				}
 				e.constVals[name] = s
+				e.constIsStr[name] = true
+				continue
+			}
+			// Pure backtick consts fold like string literals
+			// (value-position lowering uses n.Text() for both;
+			// probed cooked-identical, escapes preserved).
+			if init.Kind == ast.KindNoSubstitutionTemplateLiteral {
+				e.constVals[name] = init.Text()
 				e.constIsStr[name] = true
 				continue
 			}
@@ -8593,6 +8601,10 @@ func staticLiteralText(n *ast.Node) (string, saType, bool) {
 				return s, tString, true
 			}
 			return "", tUnknown, false
+		case ast.KindNoSubstitutionTemplateLiteral:
+			// Pure backtick literal: same cooked text the value-position
+			// lowering feeds to lowerStringLiteral (probed identical).
+			return n.Text(), tString, true
 		case ast.KindTrueKeyword:
 			return "1", tBool, true
 		case ast.KindFalseKeyword:
