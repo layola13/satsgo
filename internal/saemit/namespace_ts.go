@@ -295,27 +295,41 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 			kind = nsKindFunc
 		case ast.KindVariableStatement:
 			dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+			// Mutable multi-declarator lets register per declarator
+			// (each scalar non-arrow declarator is an independent
+			// slot, same as file-scope preRegisterModStates). Any
+			// exotic declarator skips the whole statement so the
+			// drain refuses loudly as before.
+			if m.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst == 0 {
+				var letNames []string
+				for _, d := range dl.Declarations.Nodes {
+					nm, ok := bindingNameText(d)
+					if !ok {
+						letNames = nil
+						break
+					}
+					if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+						letNames = nil
+						break
+					}
+					letNames = append(letNames, nm)
+				}
+				if len(letNames) == 0 {
+					continue
+				}
+				for _, nm := range letNames {
+					e.nsRegisterOne(m, nm, nsKindLet)
+					if e.refused {
+						return
+					}
+				}
+				continue
+			}
 			if len(dl.Declarations.Nodes) != 1 {
 				continue
 			}
-			// Only `const` members fold (mutable scalar members lower to
-			// module-state slots; anything else refuses at lowering).
-			if m.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst == 0 {
-				d := dl.Declarations.Nodes[0]
-				nm, ok := bindingNameText(d)
-				if !ok {
-					continue
-				}
-				// Arrow lets stay callees (lowering refuses them as
-				// state, same as today); scalar lets record for
-				// qualified-first resolution and slot lowering.
-				if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
-					continue
-				}
-				raw = nm
-				kind = nsKindLet
-				break
-			}
+			// Only `const` members reach here (mutable members return
+			// through the per-declarator path above).
 			d := dl.Declarations.Nodes[0]
 			nm, ok := bindingNameText(d)
 			if !ok {
@@ -355,70 +369,80 @@ func (e *emitter) nsPreScan(members []*ast.Node) {
 		default:
 			continue
 		}
-		q := e.nsDefName(raw)
-		// Prescans repeat (file-wide pass plus per-body passes): same-node
-		// re-registration skips wholesale (slot registration refuses
-		// duplicates, so replaying it would false-refuse). A DIFFERENT
-		// node under an occupied member name is a duplicate (reopening or
-		// not, TS rejects it); fresh collisions with outside definitions
-		// refuse as before.
-		if prev, ok := e.nsMemberNodes[q]; ok {
-			if prev != m {
-				e.refuse(m, "namespace member %s is already declared (duplicates are not lowerable)", q)
-				return
-			}
-			continue
-		}
-		if e.nsNameTaken(q) && !(e.linkSeeded[q] && !e.directTopFuncs[q]) {
-			e.refuse(m, "namespace member %s collides with an existing definition", q)
+		if !e.nsRegisterOne(m, raw, kind) {
 			return
-		}
-		if e.nsMembers == nil {
-			e.nsMembers = map[string]string{}
-		}
-		if e.nsMemberNodes == nil {
-			e.nsMemberNodes = map[string]*ast.Node{}
-		}
-		e.nsMembers[q] = kind
-		e.nsMemberNodes[q] = m
-		if memberExported(m) {
-			e.nsExports[e.nsPath()][raw] = true
-		}
-		if kind == nsKindFunc {
-			e.registerNsFuncSig(m, q)
-		}
-		// Value recording lives in prescan (not drain): consts fold and
-		// lets register slots now, so cross-body member reads and later
-		// top-level code resolve. Both are pure recording (literal inits
-		// only); the drain replays idempotently (see lowerNamespaceMember).
-		if kind == nsKindConst {
-			e.foldNsConstMember(m, q)
-		}
-		if kind == nsKindLet {
-			e.registerNsLetMember(m, q)
-		}
-		// Type-space recording lives in prescan (not drain): layouts,
-		// enums and classes resolve for code lowered before the drain
-		// (e.g. a top-level main calling N.f, or N.f itself). Same-node
-		// re-prescan overwrites identically; drain skips re-recording.
-		switch kind {
-		case nsKindClass:
-			if _, ok := e.classDefs[q]; !ok {
-				e.recordClass(m)
-				if e.refused {
-					return
-				}
-			}
-		case nsKindInterface, nsKindEnum, nsKindType:
-			e.lowerTypeDecl(m)
-			if e.refused {
-				return
-			}
 		}
 	}
 }
 
-// foldNsConstMember folds one literal const member (mirrors the literal
+// nsRegisterOne registers one prescanned member (qualified name, kind,
+// value and type recording). It reports false when prescan must abort
+// (a loud refuse was emitted); true means registered or idempotently
+// skipped (same-node re-prescan). Multi-declarator lets call it once per
+// declarator with the shared statement node.
+func (e *emitter) nsRegisterOne(m *ast.Node, raw, kind string) bool {
+	q := e.nsDefName(raw)
+	// Prescans repeat (file-wide pass plus per-body passes): same-node
+	// re-registration skips wholesale (slot registration refuses
+	// duplicates, so replaying it would false-refuse). A DIFFERENT
+	// node under an occupied member name is a duplicate (reopening or
+	// not, TS rejects it); fresh collisions with outside definitions
+	// refuse as before.
+	if prev, ok := e.nsMemberNodes[q]; ok {
+		if prev != m {
+			e.refuse(m, "namespace member %s is already declared (duplicates are not lowerable)", q)
+			return false
+		}
+		return true
+	}
+	if e.nsNameTaken(q) && !(e.linkSeeded[q] && !e.directTopFuncs[q]) {
+		e.refuse(m, "namespace member %s collides with an existing definition", q)
+		return false
+	}
+	if e.nsMembers == nil {
+		e.nsMembers = map[string]string{}
+	}
+	if e.nsMemberNodes == nil {
+		e.nsMemberNodes = map[string]*ast.Node{}
+	}
+	e.nsMembers[q] = kind
+	e.nsMemberNodes[q] = m
+	if memberExported(m) {
+		e.nsExports[e.nsPath()][raw] = true
+	}
+	if kind == nsKindFunc {
+		e.registerNsFuncSig(m, q)
+	}
+	// Value recording lives in prescan (not drain): consts fold and
+	// lets register slots now, so cross-body member reads and later
+	// top-level code resolve. Both are pure recording (literal inits
+	// only); the drain replays idempotently (see lowerNamespaceMember).
+	if kind == nsKindConst {
+		e.foldNsConstMember(m, q)
+	}
+	if kind == nsKindLet {
+		e.registerNsLetMember(m, q)
+	}
+	// Type-space recording lives in prescan (not drain): layouts,
+	// enums and classes resolve for code lowered before the drain
+	// (e.g. a top-level main calling N.f, or N.f itself). Same-node
+	// re-prescan overwrites identically; drain skips re-recording.
+	switch kind {
+	case nsKindClass:
+		if _, ok := e.classDefs[q]; !ok {
+			e.recordClass(m)
+			if e.refused {
+				return false
+			}
+		}
+	case nsKindInterface, nsKindEnum, nsKindType:
+		e.lowerTypeDecl(m)
+		if e.refused {
+			return false
+		}
+	}
+	return true
+}// foldNsConstMember folds one literal const member (mirrors the literal
 // arms of tryTopLevelConst; arrow members stay callees for the drain).
 // Recording-only: no code emits, so prescan order never matters.
 func (e *emitter) foldNsConstMember(m *ast.Node, q string) {
@@ -470,21 +494,26 @@ func (e *emitter) foldNsConstMember(m *ast.Node, q string) {
 }
 
 // registerNsLetMember registers one mutable scalar member slot (pure
-// recording; declarations emit no code). Refusals (exotic inits) surface
-// here at prescan with the same diagnostics as the drain path.
+// recording; declarations emit no code). It locates the declarator whose
+// qualified name matches q, so multi-declarator lets register per member.
+// Refusals (exotic inits) surface here at prescan with the same diagnostics
+// as the drain path.
 func (e *emitter) registerNsLetMember(m *ast.Node, q string) {
 	dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
-	if len(dl.Declarations.Nodes) != 1 {
+	for _, d := range dl.Declarations.Nodes {
+		nm, ok := bindingNameText(d)
+		if !ok {
+			continue
+		}
+		if e.nsDefName(nm) != q {
+			continue
+		}
+		if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+			return
+		}
+		e.registerModDeclarator(d, q)
 		return
 	}
-	d := dl.Declarations.Nodes[0]
-	if _, ok := bindingNameText(d); !ok {
-		return
-	}
-	if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
-		return
-	}
-	e.registerModDeclarator(d, q)
 }
 
 // nsNameTaken reports qualified-name collisions against every definition
@@ -594,28 +623,46 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 		// members refuse loudly at check time, same as consts today.
 		if m.AsVariableStatement().DeclarationList.Flags&ast.NodeFlagsConst == 0 {
 			dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
-			if len(dl.Declarations.Nodes) != 1 {
-				e.refuse(m, "multi-declarator mutable namespace state is not lowerable (split into single declarations)")
-				return
+			// Multi-declarator lets lower per declarator (each scalar
+			// non-arrow declarator is an independent slot). A statement
+			// is only eligible when EVERY declarator qualifies; otherwise
+			// the single-shape refuses below name the real gap (splitting
+			// still fixes multi-declarator statements).
+			eligible := len(dl.Declarations.Nodes) > 0
+			for _, d := range dl.Declarations.Nodes {
+				if _, ok := bindingNameText(d); !ok {
+					eligible = false
+					break
+				}
+				if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+					eligible = false
+					break
+				}
 			}
-			d := dl.Declarations.Nodes[0]
-			nm, ok := bindingNameText(d)
-			if !ok {
-				e.refuse(m, "destructured mutable namespace state is not lowerable (scalar let only)")
-				return
-			}
-			if init := d.Initializer(); init != nil && init.Kind == ast.KindArrowFunction {
+			if !eligible {
+				if len(dl.Declarations.Nodes) != 1 {
+					e.refuse(m, "multi-declarator mutable namespace state is not lowerable (split into single declarations)")
+					return
+				}
+				d := dl.Declarations.Nodes[0]
+				if _, ok := bindingNameText(d); !ok {
+					e.refuse(m, "destructured mutable namespace state is not lowerable (scalar let only)")
+					return
+				}
 				e.refuse(m, "arrow mutable namespace state is not lowerable (use const for callees)")
 				return
 			}
 			// Already registered at prescan (cross-body reads resolve);
 			// the drain replays only if prescan was bypassed. A present
 			// slot is always ours: prescan refused genuine collisions.
-			if _, ok := e.modVars[e.nsDefName(nm)]; ok {
-				return
+			for _, d := range dl.Declarations.Nodes {
+				nm, _ := bindingNameText(d)
+				if _, ok := e.modVars[e.nsDefName(nm)]; ok {
+					continue
+				}
+				// Declarations emit no code; use sites call the registry.
+				e.registerModDeclarator(d, e.nsDefName(nm))
 			}
-			// Declarations emit no code; use sites call the registry.
-			e.registerModDeclarator(d, e.nsDefName(nm))
 			return
 		}
 		// Arrow consts emit callees; pure literals fold (both qualified

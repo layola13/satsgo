@@ -857,4 +857,10 @@
   导出 let import 期与 miss 位双点名（重赋值污染折叠）、未导出 let 守 yet；
   折叠/绑定语义零动。既有 export-const 用例全持。
   全套件绿、286 sweep 零 diff；红绿验证通过。
-  JEV blast-radius local_only/safe_to_apply 89%。
+   JEV blast-radius local_only/safe_to_apply 89%。
+- ✅ 命名空间 multi-declarator let（prescan 按 declarator 登记 + drain 逐个建槽 + `TestLowerNamespaceMultiDeclaratorLet`）：
+  `export let a = 1, b = 2` 曾整句拒；现每 declarator 独立成槽（与文件域 `preRegisterModStates` 同形），
+  任一 exotic（解构/arrow）整句保持原拒文；prescan 抽 `nsRegisterOne`（同节点重扫幂等，异节点仍判重）；
+  `registerNsLetMember` 改按 declarator 定位（单调用点同步）；const 路径零动（jev let-only 切片）。
+  全套件绿、286 sweep 零 diff；红绿验证通过（藏产品代码则新测红）；真机 `sa check` 过 + run exit 3==1+2 对数。
+  JEV blast-radius local_only/needs_regression_tests（回归测已补）。

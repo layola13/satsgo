@@ -167,6 +167,55 @@ function main(): i32 {
 	}
 }
 
+func TestLowerNamespaceMultiDeclaratorLet(t *testing.T) {
+	// Multi-declarator mutable members lower per declarator (each scalar
+	// non-arrow declarator is an independent module-state slot).
+	src := `namespace M {
+  export let a = 1, b = 2;
+  export function sum(): i32 {
+    return a + b;
+  }
+}
+function main(): i32 {
+  return M.sum();
+}
+`
+	res := mustLower(t, "multilet.ts", src)
+	for _, want := range []string{`@import "sa_std/modstate.sai"`, "call @M_sum()"} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q in output:\n%s", want, res.SAI)
+		}
+	}
+	// Cross-body forward reads resolve through prescan recording.
+	cross := `namespace M {
+  export function sum(): i32 {
+    return a + b;
+  }
+}
+namespace M {
+  export let a = 1, b = 2;
+}
+function main(): i32 {
+  return M.sum();
+}
+`
+	res = mustLower(t, "multiletcross.ts", cross)
+	if !strings.Contains(res.SAI, "call @M_sum()") {
+		t.Errorf("missing cross-body call:\n%s", res.SAI)
+	}
+	// Mixed exotic declarators still refuse loudly.
+	bad := `namespace M {
+  export let a = 1, f = () => 1;
+}
+function main(): i32 {
+  return 0;
+}
+`
+	if r := Lower("multiletbad.ts", bad); !r.Refused {
+		t.Fatalf("expected refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerNamespaceRefusals(t *testing.T) {
 	cases := []struct {
 		name string
