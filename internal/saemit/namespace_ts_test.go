@@ -257,6 +257,23 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "call @M_sum()") {
 		t.Errorf("missing var multi-let call:\n%s", res.SAI)
 	}
+	// Uninitialized declarators register bare slots; later stores fill them.
+	nsrc := `namespace M {
+  export let a: i32, b: i32;
+  export function init(): i32 {
+    a = 1;
+    b = 2;
+    return a + b;
+  }
+}
+function main(): i32 {
+  return M.init();
+}
+`
+	res = mustLower(t, "multinoinit.ts", nsrc)
+	if !strings.Contains(res.SAI, "call @M_init()") {
+		t.Errorf("missing uninitialized multi-let call:\n%s", res.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {
