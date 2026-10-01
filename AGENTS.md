@@ -601,6 +601,11 @@
   共享（两处 prescan + lowering 接入；单文件 nil 分支不动；环检测顺带跨文件化）。
   探针 base→mid→main 缺省派生构造打通，真机 check 过 + `sa run` 7 与 node 差分一致。
   286 sweep 零回退 + check 286 全过；全套件绿（JEV blast-radius local_only）。
+- ✅ 命名空间声明跨文件调用（`link_namespace.go` 新模块 + `program.go` 记录/装配 + `saemit.go` 具名分支拦截）：
+  `import { N }` 按成员绑定（`N→f→N_f`，复用 `nsImports` 调用/解构/跨文件根三位
+  读者，零新路由代码）；命名空间本身非值，未知成员与非 callable 成员大声拒。
+  探针 `N.f(41)` 真机 check 过 + `sa run` 42 与 node 差分一致；单测 3 形；
+  286 sweep 零回退 + check 286 全过；全套件绿。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

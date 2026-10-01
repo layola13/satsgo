@@ -1122,3 +1122,63 @@ func collectNsProgramSigs(members []*ast.Node, prefix string, rets map[string]sa
 		}
 	}
 }
+
+// collectNsMembers records namespace callable members for cross-file
+// imports into exp.nsMembers: ns -> member -> flat local (N_f,
+// mirroring the sig keys in collectNsProgramSigs). Only function
+// declarations and single arrow consts; classes, enums, consts and
+// values stay out so their cross-file uses keep loud diagnostics.
+// Nested namespaces recurse under their full path key.
+func collectNsMembers(members []*ast.Node, prefix string, exp *fileExports) {
+	flat := func(raw string) string {
+		if prefix == "" {
+			return raw
+		}
+		return prefix + "_" + raw
+	}
+	if exp.nsMembers == nil {
+		exp.nsMembers = map[string]map[string]string{}
+	}
+	if exp.nsMembers[prefix] == nil {
+		exp.nsMembers[prefix] = map[string]string{}
+	}
+	for _, m := range members {
+		if m.Kind == ast.KindModuleDeclaration {
+			if isAmbientModule(m) {
+				continue
+			}
+			nm, ok := moduleDeclName(m)
+			if !ok {
+				continue
+			}
+			sub := nm
+			if prefix != "" {
+				sub = prefix + "_" + nm
+			}
+			collectNsMembers(moduleMemberStmts(m), sub, exp)
+			continue
+		}
+		if m.Kind == ast.KindFunctionDeclaration {
+			if m.Name() == nil || m.Name().Kind != ast.KindIdentifier {
+				continue
+			}
+			exp.nsMembers[prefix][m.Name().Text()] = flat(m.Name().Text())
+			continue
+		}
+		if m.Kind == ast.KindVariableStatement {
+			dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+			if len(dl.Declarations.Nodes) != 1 {
+				continue
+			}
+			d := dl.Declarations.Nodes[0]
+			nm, ok := bindingNameText(d)
+			if !ok {
+				continue
+			}
+			if init := d.Initializer(); init == nil || init.Kind != ast.KindArrowFunction {
+				continue
+			}
+			exp.nsMembers[prefix][nm] = flat(nm)
+		}
+	}
+}

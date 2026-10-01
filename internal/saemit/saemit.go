@@ -9337,6 +9337,13 @@ func (e *emitter) lowerImport(st *ast.Node) {
 						e.enums[local] = members
 						continue
 					}
+					// Namespace declarations bind per member (`import { N }`
+					// then N.f(); the namespace itself is not a value;
+					// see link_namespace.go).
+					if members, ok := res.nsMembers[remote]; ok {
+						bindNSMembers(e, local, remote, res, members)
+						continue
+					}
 					if _, ok := res.exports[remote]; !ok {
 						e.refuse(el, "%s is not exported by %s", remote, mod)
 						continue

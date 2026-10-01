@@ -350,6 +350,40 @@ func TestLowerProgramTransitiveHeritage(t *testing.T) {
 	}
 }
 
+// Cross-file `namespace N` calls: `import { N }` binds per member
+// (the namespace itself is not a value); unknown members and
+// non-callable members refuse loudly.
+func TestLowerProgramNamespaceMemberImport(t *testing.T) {
+	lib := "namespace N {\n  export function f(a: i32): i32 {\n    return a + 1;\n  }\n}\n"
+	ok := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  return N.f(41);\n}\n",
+		"lib.ts":  lib,
+	}
+	if res := LowerProgram("main.ts", ok); res.Refused {
+		t.Fatalf("expected link, got diagnostics:\n%s", strings.Join(res.Diagnostics, "\n"))
+	}
+	bad := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  return N.bogus(1);\n}\n",
+		"lib.ts":  lib,
+	}
+	r := LowerProgram("main.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected unknown-member refusal, got:\n%s", r.SAI)
+	}
+	if got := strings.Join(r.Diagnostics, "\n"); !strings.Contains(got, "N.bogus is not exported by its module") {
+		t.Errorf("missing unknown-member diagnostic:\n%s", got)
+	}
+	constLib := "namespace N {\n  export const K = 7;\n}\n"
+	constUse := map[string]string{
+		"main.ts": "import { N } from \"./lib\";\nfunction main(): i32 {\n  return N.K;\n}\n",
+		"lib.ts":  constLib,
+	}
+	r2 := LowerProgram("main.ts", constUse)
+	if !r2.Refused {
+		t.Fatalf("expected non-callable-member refusal, got:\n%s", r2.SAI)
+	}
+}
+
 func TestLinkNsFileImport(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { add } from \"./lib\";\nfunction main(): i32 {\n  return add(1, 2);\n}\n",
