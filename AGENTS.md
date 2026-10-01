@@ -771,3 +771,9 @@
   需求探针 2026-10-01：286 sweep + demos 零命中； lifting 需 16 宽全链路 +
   sci 数组内存模型，发现在真实用例时再实现，不做推测复杂化。
   全套件绿、286 sweep 零 diff。
+- ✅ tagged 模板他 tag 拒文诚实化（jev_thinking 81%，拒文 + 单测同步，零 lowering 变更）：
+  旧文案 yet（需 strings 数组）名不副实：tag 调用本身需一阶函数值，
+  而子集原则性拒一阶值（linkRoute 两分支已锁），数组建成也调不动。
+  现直说（tag 无一阶值，唯 `String.raw` 可用；`String.raw` 路径不动）。
+  全套件绿、286 sweep 零 diff（此拒文 sweep 零命中）。
+  JEV blast-radius local_only/safe_to_apply 96%。

@@ -7942,8 +7942,9 @@ func (e *emitter) rawNoSubText(n *ast.Node) (string, bool) {
 
 // lowerTaggedTemplate lowers tagged templates. `String.raw` cooks
 // nothing (raw parts plus normally-rendered substitutions); any other
-// tag refuses loudly (the tag receives the strings array plus values,
-// and string arrays are not lowerable yet).
+// tag refuses loudly: calling the tag needs it as a first-class function
+// value (functions have no first-class value in the subset; cf. linkRoute),
+// so even a materialized strings array could not dispatch it.
 func (e *emitter) lowerTaggedTemplate(n *ast.Node) (string, saType) {
 	tt := n.AsTaggedTemplateExpression()
 	if tag := tt.Tag; tag.Kind == ast.KindPropertyAccessExpression {
@@ -7953,7 +7954,7 @@ func (e *emitter) lowerTaggedTemplate(n *ast.Node) (string, saType) {
 			return e.lowerRawTemplate(tt.Template, n)
 		}
 	}
-	e.refuse(n, "tagged templates are not lowerable yet (tag(strings, ...values) needs the strings array)")
+	e.refuse(n, "tagged templates are not lowerable (tag functions have no first-class value; String.raw is the only supported tag)")
 	return "0", tUnknown
 }
 

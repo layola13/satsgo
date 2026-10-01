@@ -1371,7 +1371,8 @@ function main(): i32 {
 }
 
 // `String.raw` cooks nothing (raw parts, rendered substitutions); other
-// tags refuse loudly (the strings array is not lowerable yet).
+// tags refuse loudly (tag functions have no first-class value, so even a
+// materialized strings array could not dispatch them).
 func TestTaggedTemplate(t *testing.T) {
 	src := `function main(): i32 {
   const a = String.raw` + "`a\\nb${41}c`" + `;
@@ -1400,7 +1401,7 @@ func TestTaggedTemplate(t *testing.T) {
 	if !bad.Refused {
 		t.Fatalf("expected tag refusal, lowered:\n%s", bad.SAI)
 	}
-	if !strings.Contains(diagText(bad), "tagged templates are not lowerable yet") {
+	if !strings.Contains(diagText(bad), "tagged templates are not lowerable (tag functions have no first-class value; String.raw is the only supported tag)") {
 		t.Errorf("missing tag diagnostic:\n%s", diagText(bad))
 	}
 }
