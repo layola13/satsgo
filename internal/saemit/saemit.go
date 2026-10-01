@@ -481,6 +481,9 @@ type emitter struct {
 	// recordEnum numbers every named member (non-strict), so without
 	// this set string reads would silently fold to ordinals. Reads
 	// check this set first and refuse loudly; integer members fold.
+	// Materialization (dual-track string slices) waits for the first
+	// real use case (demand probe 2026-10-01: zero across 286) —
+	// jev_thinking 97% — not built speculatively.
 	enumNonInt map[string]map[string]bool
 	// importedFrom maps a local value name to its module ("fs"/"net") for
 	// `import { readFile } from "fs"` style calls. importedRemote maps

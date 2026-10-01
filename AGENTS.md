@@ -848,3 +848,5 @@
   序数表不动（防编号核漂移），旁路已排除（唯二消费者）。
   全套件绿、286 sweep 零 diff（洞潜伏，零用户影响）；红绿验证通过。
   JEV blast-radius local_only/safe_to_apply 96%。
+  物化（串成员切片双轨）经 jev_thinking 97% 暂缓：需求探针全零
+  （286/program/文档），首个真实用例触发，见代码注记。
