@@ -960,6 +960,32 @@ func TestCodedPanics(t *testing.T) {
 
 // Decorators and `using` used to lower silently (dropping definition-time
 // effects and disposal); both refuse loudly now.
+// Async honesty: pure-value await chains unwrap (demos 263/264 stay
+// lowered, incl. cross-fn nested await of values); genuine suspensions
+// refuse at the inner call so unwrap never masks them. Locks the SLA
+// boundary (TS Promise != SLA future<T>; SLA 314/315 nested-suspension
+// gap has no silent counterpart here).
+func TestAsyncSyncUnwrapHonest(t *testing.T) {
+	single := "async function fetch(): i32 {\n  return 41;\n}\nasync function main(): i32 {\n  const v = await fetch();\n  return v + 1;\n}\n"
+	res := mustLower(t, "async.ts", single)
+	if !strings.Contains(res.SAI, "call @fetch()") {
+		t.Errorf("await should unwrap to a direct call, got:\n%s", res.SAI)
+	}
+	nested := "async function fetch(): i32 {\n  return 41;\n}\nasync function wrap(): i32 {\n  const v = await fetch();\n  return v + 1;\n}\nasync function main(): i32 {\n  const v = await wrap();\n  return v;\n}\n"
+	res2 := mustLower(t, "async_nested.ts", nested)
+	if !strings.Contains(res2.SAI, "call @wrap()") || !strings.Contains(res2.SAI, "call @fetch()") {
+		t.Errorf("nested value-await should lower both calls, got:\n%s", res2.SAI)
+	}
+	timer := "async function main(): i32 {\n  const v = await setTimeout(1);\n  return v;\n}\n"
+	r := Lower("async_timer.ts", timer)
+	if !r.Refused {
+		t.Fatalf("expected timer-await refusal, got:\n%s", r.SAI)
+	}
+	if got := diagText(r); !strings.Contains(got, "needs an event loop with callback dispatch (async timers are Phase 2)") {
+		t.Errorf("missing Phase-2 timer diagnostic:\n%s", got)
+	}
+}
+
 func TestLoudDecoratorUsing(t *testing.T) {
 	cases := []struct {
 		name string
