@@ -274,6 +274,22 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "call @M_init()") {
 		t.Errorf("missing uninitialized multi-let call:\n%s", res.SAI)
 	}
+	// Mixed initialized/uninitialized declarators in one statement.
+	xsrc := `namespace M {
+  export let a = 1, b: i32;
+  export function f(): i32 {
+    b = 2;
+    return a + b;
+  }
+}
+function main(): i32 {
+  return M.f();
+}
+`
+	res = mustLower(t, "multimix.ts", xsrc)
+	if !strings.Contains(res.SAI, "call @M_f()") {
+		t.Errorf("missing mixed multi-let call:\n%s", res.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {
