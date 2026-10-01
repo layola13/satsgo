@@ -864,4 +864,6 @@
   `registerNsLetMember` 改按 declarator 定位（单调用点同步）；const 路径零动（jev let-only 切片）。
   全套件绿、286 sweep 零 diff；红绿验证通过（藏产品代码则新测红）；真机 `sa check` 过 + run exit 3==1+2 对数；
   复合赋值交互（`M.a += 10` 走槽，run exit 33==11+22）一并锁入回归测。
+  矩阵收敛：串双槽（exit 7）、var 同路径、无初值后存、混合初值、嵌套路径（A.B）、重开拆分（跨体共享槽）——
+  同语句重名与文件域同形放行（一致，非新洞）；真机 exit 全对数。
   JEV blast-radius local_only/needs_regression_tests（回归测已补）。
