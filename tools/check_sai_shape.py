@@ -62,7 +62,7 @@ def check(path):
         if terminated:
             err(path, i, f"dead code after terminator: {line}")
             continue
-        if line == "panic":
+        if line == "panic" or re.match(r"^panic\(\d+\)$", line):
             terminated = True
             continue
         if line in ("break", "continue") or line.startswith("throw"):

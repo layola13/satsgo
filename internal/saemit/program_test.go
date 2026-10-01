@@ -294,7 +294,7 @@ func TestLinkRouteMisses(t *testing.T) {
 		want string
 	}{
 		{"call", "function main(): i32 {\n  return add(1, 2);\n}\n", "add is defined in lib.ts; import it first"},
-		{"const read", "function main(): i32 {\n  return K;\n}\n", "K is defined in lib.ts, but cross-file value imports are not lowerable yet"},
+		{"const read", "function main(): i32 {\n  return K;\n}\n", "K is defined in lib.ts; import it first"},
 		{"new", "function main(): i32 {\n  const c = new C(3);\n  return c.v;\n}\n", "C is defined in lib.ts; import it first"},
 		{"extends", "class D extends C {\n}\nfunction main(): i32 {\n  return 0;\n}\n", "C is defined in lib.ts; import it first"},
 		{"ns call", "function main(): i32 {\n  return N.f();\n}\n", "N is a namespace defined in lib.ts; cross-file namespace member access is not lowerable yet"},

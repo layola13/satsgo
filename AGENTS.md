@@ -578,6 +578,13 @@
   单测 1 项（三臂形状 + 单次调用 + 串 len + 模块槽 + 坏目标拒）；
   全套件绿、286 sweep 零回退 + check 全过；  真机 `sa run` 六形 31 对数。
   JEV blast-radius local_only 98%。
+- ✅ linkRoute 值分支按导出态分流（`program.go` + 注释，`program_test.go` 1 行同步）：
+  exported 字面量 const miss 报 `import it first`（值导入已落地，缺的是 import
+  不是后端）；未导出/let/模板/对象仍诚实缺口。`TestLinkRouteMisses` const 期望同步；
+  全套件绿、286 sweep 零回退 + check 286 全过、差分 259+27 基线吻合。
+- ✅ 形状校验器同步带码 panic（`tools/check_sai_shape.py` 1 行，零发射器变更）：
+  `panic` 终结符接受 `panic(<code>)`（2501/2502/2503/1403），与裸 panic 带码
+  发射对齐；`panic(foo)` 非数字仍拒。python 双向验证；286 sweep 形状全过。
 - ✅ 尖括号断言擦除（`<T>x` 与 `as` 同形；`satisfies` 早已擦除）：
   `lowerExpr` + `staticLiteralText` 双侧加 `KindTypeAssertionExpression`
   （静态折叠同步，`static K = <number>7` 照折）。

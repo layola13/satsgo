@@ -113,14 +113,22 @@ func (e *emitter) linkRoute(name string) string {
 	if !ok {
 		return ""
 	}
-	// Namespaces and values aren't name-importable at all: their message
-	// names the gap regardless of export flags (namespaces are never in
-	// expOf.exports). Functions and classes point at the import when
+	// Namespaces aren't name-importable at all: their message names the
+	// gap regardless of export flags (namespaces are never in
+	// expOf.exports). Exported literal const values link by value, so a
+	// miss points at the import; other values stay an honest gap.
+	// Functions and classes point at the import when
 	// exported, else at the missing export.
 	switch e.linkExportKind[name] {
 	case "namespace":
 		return fmt.Sprintf("%s is a namespace defined in %s; cross-file namespace member access is not lowerable yet", name, file)
 	case "value":
+		// Exported literal const scalars link by value (globalConsts):
+		// a miss is an import away, not a backend gap. Unexported or
+		// non-const values (let, templates, objects) stay an honest gap.
+		if e.linkExported[name] {
+			return fmt.Sprintf("%s is defined in %s; import it first", name, file)
+		}
 		return fmt.Sprintf("%s is defined in %s, but cross-file value imports are not lowerable yet", name, file)
 	}
 	if e.linkExported[name] {
