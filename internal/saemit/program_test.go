@@ -297,7 +297,7 @@ func TestLinkRouteMisses(t *testing.T) {
 		{"const read", "function main(): i32 {\n  return K;\n}\n", "K is defined in lib.ts; import it first"},
 		{"new", "function main(): i32 {\n  const c = new C(3);\n  return c.v;\n}\n", "C is defined in lib.ts; import it first"},
 		{"extends", "class D extends C {\n}\nfunction main(): i32 {\n  return 0;\n}\n", "C is defined in lib.ts; import it first"},
-		{"ns call", "function main(): i32 {\n  return N.f();\n}\n", "N is a namespace defined in lib.ts; cross-file namespace member access is not lowerable yet"},
+		{"ns call", "function main(): i32 {\n  return N.f();\n}\n", "N is defined in lib.ts; import it first (import { N } then N.f(...)/N.K/new N.C())"},
 		{"enum read", "function main(): i32 {\n  return E.A;\n}\n", "E is defined in lib.ts; import it first"},
 		{"string enum read", "function main(): i32 {\n  return S.X;\n}\n", "property access .X is not in the SA-lowerable subset"},
 		{"private const", "function main(): i32 {\n  return h();\n}\n", "h is defined in lib.ts but not exported"},
@@ -452,6 +452,37 @@ func TestLinkRouteFirstClassValue(t *testing.T) {
 	}
 	if strings.Contains(got, "import it first") {
 		t.Errorf("vacuous import advice leaked:\n%s", got)
+	}
+}
+
+// Unimported namespace members route to the import (N.f/N.K/new N.C/
+// N.M.g all lower once `import { N }` binds), never to a backend gap.
+func TestLinkRouteNamespaceMembers(t *testing.T) {
+	lib := "namespace N {\n  export function f(): i32 {\n    return 1;\n  }\n  export const K = 7;\n  export class C {\n    v: i32 = 0;\n    constructor(n: i32) {\n      this.v = n;\n    }\n  }\n  export namespace M {\n    export function g(): i32 {\n      return 2;\n    }\n  }\n}\n"
+	cases := []struct {
+		name string
+		main string
+	}{
+		{"const", "function main(): i32 {\n  return N.K;\n}\n"},
+		{"new", "function main(): i32 {\n  const c = new N.C(3);\n  return c.v;\n}\n"},
+		{"nested", "function main(): i32 {\n  return N.M.g();\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			files := map[string]string{"main.ts": tc.main, "lib.ts": lib}
+			res := LowerProgram("main.ts", files)
+			if !res.Refused {
+				t.Fatalf("expected refusal, got:\n%s", res.SAI)
+			}
+			got := strings.Join(res.Diagnostics, "\n")
+			want := "N is defined in lib.ts; import it first (import { N } then N.f(...)/N.K/new N.C())"
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q in diagnostics:\n%s", want, got)
+			}
+			if strings.Contains(got, "not lowerable yet") {
+				t.Errorf("stale backend-gap advice leaked:\n%s", got)
+			}
+		})
 	}
 }
 

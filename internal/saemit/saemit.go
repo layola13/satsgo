@@ -2196,9 +2196,13 @@ func (e *emitter) lowerExpr(n *ast.Node) (string, saType) {
 		}
 		return e.thisSelf, tArray
 	case ast.KindAwaitExpression:
-		// Await unwraps synchronously: the subset has no concurrent
-		// runtime (async lowers to direct calls; sa_std async.sla
-		// drivers are Phase 2), so await v ≡ v when v is a value.
+		// Await unwraps synchronously for value shapes: TS Promise is not
+		// SLA future<T> (SLA lowers single/two/linear-8/join2 via a real
+		// state machine; cross-async-fn nested await is still a shared-layer
+		// gap per rosetta 314/315). Satsgo keeps await v = v for pure values
+		// (demos 263/264 stay lowered); genuine suspensions refuse loudly at
+		// the inner call (async timers are Phase 2, Promise/new-Promise fall
+		// to their existing loud refuses), so unwrap never masks a suspension.
 		return e.lowerExpr(n.AsAwaitExpression().Expression)
 	case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression, ast.KindTypeAssertionExpression:
 		// Type-only assertions erase (angle `<T>x` included: same
@@ -3393,8 +3397,19 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 		// A dotted call whose root names a cross-file definable routes
 		// to its file instead of the generic first-class refuse (same-
 		// file values shadow: folds, slots and aliases win first).
+		// Nested chains (N.M.g) route on the leftmost root via
+		// dottedRoot; single-level keeps the exact-identifier path.
 		if pa := call.Expression.AsPropertyAccessExpression(); pa.Expression.Kind == ast.KindIdentifier {
 			root := pa.Expression.Text()
+			if _, ok := e.constVals[root]; !ok && e.modStateOf(root) == nil {
+				if _, ok := e.arrowAliases[root]; !ok {
+					if r := e.linkRoute(root); r != "" {
+						e.refuse(n, "%s", r)
+						return "0", tUnknown
+					}
+				}
+			}
+		} else if root := dottedRoot(call.Expression); root != "" {
 			if _, ok := e.constVals[root]; !ok && e.modStateOf(root) == nil {
 				if _, ok := e.arrowAliases[root]; !ok {
 					if r := e.linkRoute(root); r != "" {
@@ -7787,6 +7802,18 @@ func (e *emitter) lowerNew(n *ast.Node) (string, saType) {
 					}
 					e.refuse(n, "%s.%s is not a class", ns, mem)
 					return "0", tUnknown
+				}
+			}
+		}
+		// Unimported namespace roots route to the defining file (new N.C
+		// lowers once `import { N }` binds); same-file values shadow first.
+		if root := dottedRoot(nw.Expression); root != "" {
+			if _, ok := e.constVals[root]; !ok && e.modStateOf(root) == nil {
+				if _, ok := e.arrowAliases[root]; !ok && !e.isValueReceiver(root) {
+					if r := e.linkRoute(root); r != "" {
+						e.refuse(n, "%s", r)
+						return "0", tUnknown
+					}
 				}
 			}
 		}

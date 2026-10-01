@@ -723,5 +723,12 @@
   单测 2 项（13 子断言：6 miss 品类 + 自碰撞正反）；全套件绿、
   286 sweep 零回退 + check 全过；planck 拒文件 49→48、零干净新增
   （新增诊断全在已拒文件，品类全属既有大声家族）。
-  JEV consistency 首审曾 flag 转正风险（66%），按 feature 级验证消化；
-  blast-radius safe_to_apply 84%。
+   JEV consistency 首审曾 flag 转正风险（66%），按 feature 级验证消化；
+   blast-radius safe_to_apply 84%。
+- ✅ linkRoute 命名空间诚实文案（`program.go` namespace 分支 + 调用/new 双侧 dottedRoot）：
+  `N.f/N.K/new N.C/N.M.g` 在 `import { N }` 后均已打通，裸 miss 不再报后端缺口，
+  改指 import。调用侧补嵌套链 dottedRoot（`N.M.g`），new 侧补 dottedRoot 回退
+  （`new N.C`）；同文件值遮蔽优先，单文件（link==nil）零行为变更。
+  sla 对照：try 为后缀 `?` 传播（无异常边，TS try/catch 保持 panic 语义），
+  async 为状态机（satsgo await 保持同步 unwrap，不复刻）。
+  单测 `TestLinkRouteNamespaceMembers` 3 形 + 既有期望更新；全套件绿。

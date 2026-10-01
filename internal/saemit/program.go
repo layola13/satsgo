@@ -145,7 +145,12 @@ func (e *emitter) linkRoute(name string) string {
 	// exported, else at the missing export.
 	switch e.linkExportKind[name] {
 	case "namespace":
-		return fmt.Sprintf("%s is a namespace defined in %s; cross-file namespace member access is not lowerable yet", name, file)
+		// Namespaces route per member once imported (N.f/N.M.g calls,
+		// N.K const folds, new N.C instantiations); a bare miss is an
+		// import away, not a backend gap. SLA has no try/catch edges
+		// either (postfix ? propagates Result/Option); TS try/catch
+		// stays panic-semantics for the same reason.
+		return fmt.Sprintf("%s is defined in %s; import it first (import { %s } then %s.f(...)/%s.K/new %s.C())", name, file, name, name, name, name)
 	case "value":
 		// Exported literal const scalars link by value (globalConsts):
 		// a miss is an import away, not a backend gap. Unexported or
