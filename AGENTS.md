@@ -743,3 +743,9 @@
   体内直接 throw 仍大声拒。sla 对照：SLA 无 try 语句（仅后缀 `?` 传播
   Result/Option），两前端皆无异常边。286 零用例含 try/throw，sweep 不可触达。
   单测 `TestTryNestedFunctionThrow`（放行 + 拒文双断言）；全套件绿。
+- ✅ 286 sweep 零回退实证（三连提交 ac7d50606/710584774/57a2b71ee）：
+  基线 `origin/main` vs 现栈双二进制逐 demo 比（`pass/refused` 状态 +
+  `src/main.sai` sha256）：286/286 全同，`SWEEP_ZERO_DIFF_286`。
+  依据：单文件口径 link==nil 使 linkRoute 分支恒空（文案零触达），
+  await/containsThrow 注释与精度修正未覆盖 286 语料（零 try/throw 用例）。
+  planck 语料本环境缺失（`/content/planck.js` 不存在），program 口径待补。
