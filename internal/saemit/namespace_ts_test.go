@@ -290,6 +290,23 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "call @M_f()") {
 		t.Errorf("missing mixed multi-let call:\n%s", res.SAI)
 	}
+	// Nested namespaces qualify per declarator under the extended path.
+	nsrc2 := `namespace A {
+  export namespace B {
+    export let x = 1, y = 2;
+    export function sum(): i32 {
+      return x + y;
+    }
+  }
+}
+function main(): i32 {
+  return A.B.sum();
+}
+`
+	res = mustLower(t, "multinest.ts", nsrc2)
+	if !strings.Contains(res.SAI, "call @A_B_sum()") {
+		t.Errorf("missing nested multi-let call:\n%s", res.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {
