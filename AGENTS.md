@@ -803,3 +803,13 @@
   单测成功 + 5 拒形（含契约）；全套件绿、286 sweep 零 diff；红绿验证通过。
   JEV blast-radius local_only/safe_to_apply 39%（needs_regression 35%，
   tsx 独立入口 + sweep 零触达 + 既有拒测全持已覆盖）。
+- ⏸ tsx 口径错配纠正（jev_thinking 91%，白名单双表换危险串双表 + 门改写 +
+  静态测翻转 + 契约加固）：昨日按 sa_plugin_sax 表拒 `br`/`data-x`，
+  但目标命令 `sa react` 用 react parser（标签=白名单+任意小写非危险，
+  属性=除 on*/危险串外放行，`className` 消费者自映射）——镜像错了消费者。
+  现校准到 react：仅危险标签/定制大写与危险属性拒；`className` 映射保留
+  （与消费者幂等）；契约 checker 自锁危险串门 + wide 正形 + ghost 否定。
+  全套件绿、286 sweep 零 diff。
+  JEV blast-radius 首审 needs_regression_tests 96% →加固(契约自锁+wide正形)
+  复审仍 needs_regression_tests 65%；全套件 + sweep 双绿后合入（独立入口，
+  零 sweep 触达）。

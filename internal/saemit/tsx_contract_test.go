@@ -3,10 +3,12 @@ package saemit
 // .sax shape contract (todo/04_tsx.md road 1, tasks 3+4).
 //
 // LowerTSX output must satisfy the structural requirements of the real
-// consumer grammar (sa_plugin_sax/src/sax/parser.zig); `sa react build`
-// is unavailable in this environment (no react subcommand in this sci
-// binary, no plugin .so), so the contract mirrors the parser rule by
-// rule instead of a round-trip:
+// consumer grammar (sa_plugin_react/src/react/parser.zig — the `sa react`
+// target; NOT the narrower sa_plugin_sax tables, which reject e.g. `br`
+// that react accepts). `sa react build` is unavailable in this
+// environment (no react subcommand in this sci binary, no plugin .so),
+// so the contract mirrors the parser rule by rule instead of a
+// round-trip:
 //
 //   - <Component name="X"> ... </Component> balanced (parseComponent).
 //   - <state> ... </state> balanced; entries `name = expr` with ident
@@ -14,8 +16,9 @@ package saemit
 //   - {name} interpolations reference declared state vars only.
 //   - @onMount blocks (when emitted) contain L_ENTRY: and ret
 //     (lifecycle hook shape, counter demo).
-//   - every tag is in tag_whitelist, every attribute in attr_whitelist
-//     after the className→class map (UnknownTag/InvalidAttribute).
+//   - tags: anything lowercase and non-dangerous (isIntrinsicTag);
+//     attributes: anything but on*/dangerous strings (isSupportedAttr),
+//     className→class mapped (idempotent with the consumer).
 //   - releases (`!`) are absent: integer/boolean state holds no buffers,
 //     so no cleanup lines are owed (string state refuses elsewhere).
 import (
@@ -26,6 +29,17 @@ import (
 
 var contractStateLine = regexp.MustCompile(`(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$`)
 var contractInterp = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var contractTag = regexp.MustCompile(`</?([A-Za-z][A-Za-z0-9._-]*)`)
+var contractAttr = regexp.MustCompile(`\s([A-Za-z_:][A-Za-z0-9_.:-]*)=`)
+
+// contractDangerous mirrors react parser.zig dangerous_tags /
+// dangerous_attrs (the only hard refusals on the tag/attribute axes).
+var contractDangerousTags = map[string]bool{
+	"script": true, "iframe": true, "object": true, "embed": true, "template": true,
+}
+var contractDangerousAttrs = map[string]bool{
+	"innerHTML": true, "outerHTML": true, "dangerouslySetInnerHTML": true, "srcDoc": true,
+}
 
 // checkSAXContract validates one emitted .sax document against the
 // consumer-shape rules above. It returns the failure reasons (empty = ok).
@@ -75,6 +89,26 @@ func checkSAXContract(sax string) []string {
 			bad = append(bad, "@onMount block missing L_ENTRY:/ret")
 		}
 	}
+	// Tag/attribute gates mirror the consumer: only dangerous tags
+	// and dangerous attributes are hard refusals (lowercase tags and
+	// aria-/data- attributes pass; events arrive as onClick={^name}).
+	for _, m := range contractTag.FindAllStringSubmatch(sax, -1) {
+		tag := m[1]
+		if tag == "Component" || tag == "state" {
+			continue
+		}
+		if contractDangerousTags[tag] {
+			bad = append(bad, "dangerous tag <"+tag+">")
+		}
+		if tag[0] >= 'A' && tag[0] <= 'Z' {
+			bad = append(bad, "custom component <"+tag+"> needs composition")
+		}
+	}
+	for _, m := range contractAttr.FindAllStringSubmatch(sax, -1) {
+		if contractDangerousAttrs[m[1]] {
+			bad = append(bad, "dangerous attribute "+m[1])
+		}
+	}
 	return bad
 }
 
@@ -86,6 +120,9 @@ func TestTSXSAXContract(t *testing.T) {
 		{"static", "function Greet() {\n  return <div className=\"g\">\n    <h1>Hello</h1>\n  </div>;\n}\n"},
 		{"state", "function Counter() {\n  const [count, setCount] = useState(0);\n  return <section>\n    <h1>{count}</h1>\n  </section>;\n}\n"},
 		{"mount", "function Counter() {\n  const [count, setCount] = useState(0);\n  useEffect(() => { setCount(5); }, []);\n  return <section>\n    <h1>{count}</h1>\n  </section>;\n}\n"},
+		// Recalibration lock: lowercase tags outside the old sax tables
+		// (br) and aria-/data- attributes pass the react consumer.
+		{"wide", "function C() {\n  return <div data-x=\"1\">\n    <br />\n    <p>hi</p>\n  </div>;\n}\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
