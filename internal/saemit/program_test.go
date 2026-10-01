@@ -561,6 +561,23 @@ func TestLinkRouteValueSplit(t *testing.T) {
 	if !strings.Contains(got, "cross-file value imports are not lowerable yet") {
 		t.Errorf("missing yet-gap diagnostic:\n%s", got)
 	}
+	// Multi-declarator lets route per declarator at the import too
+	// (both `a` and `b` name the fold gap, never "not exported").
+	multiLet := map[string]string{
+		"main.ts": "import { b } from \"./lib\";\nfunction main(): i32 {\n  return b;\n}\n",
+		"lib.ts":  "export let a = 1, b = 2;\n",
+	}
+	r = LowerProgram("main.ts", multiLet)
+	if !r.Refused {
+		t.Fatalf("expected refusal, got:\n%s", r.SAI)
+	}
+	got = strings.Join(r.Diagnostics, "\n")
+	if !strings.Contains(got, "let b cannot link by value") {
+		t.Errorf("missing multi-let fold diagnostic:\n%s", got)
+	}
+	if strings.Contains(got, "not exported by") {
+		t.Errorf("false not-exported diagnostic leaked:\n%s", got)
+	}
 }
 
 func TestLinkNsFileImport(t *testing.T) {
