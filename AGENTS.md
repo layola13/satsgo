@@ -972,13 +972,14 @@
   JEV blast-radius local_only/safe_to_apply。
 - ✅ 路二 onClick 直调刀（ctx=root 惯例，`bind_event` + `@export` handler）：
   `onClick={(ctx) => …}` 体仅 ctx DOM 写（setAttribute/removeAttribute/
-  textContent=），经 `bind_event` 绑 root（handler 名 `*const` 引用，
-  `CapabilityMismatch` 边界已探明：starred 声明必须配 starred 实参）；
+  textContent=/appendChild 嵌套 `document.createElement` 经主表达式管线，
+  handle 检查天然拒非句柄），经 `bind_event` 绑 root（handler 名 `*const`
+  引用，`CapabilityMismatch` 边界已探明：starred 声明必须配 starred 实参）；
   无 ffi wrapper（无 react ctx 结构可解，事件读取不在本刀）。
-  setX/余形一律大声拒。单测正形 + textContent + 4 拒形；
-  `click.sai` 经 `sa check` 独立通过 + 形状过（形状工具 SIG 认 `@export`）。
-  `Lower()` 零改 → 286 零影响；全套件绿。
-  JEV blast-radius local_only/safe_to_apply 75%。
+  setX/余形一律大声拒。单测正形 + textContent/appendChild + 5 拒形；
+  `click.sai`/`appchild.sai` 经 `sa check` 独立通过 + 形状过（形状工具
+  SIG 认 `@export`）。`Lower()` 零改 → 286 零影响；全套件绿。
+  JEV blast-radius local_only/safe_to_apply 75%/68%。
 - ✅ 路二 float 插值刀（`@sa_fmt_f64_into` 精度 6，模板既有策略）：
   float `useState` 初值进 `fltConsts`，沿既有 f64 臂渲染；
   `flt.sai` 经 `sa check` + 形状过。`Lower()` 零改 → 286 零影响。

@@ -650,7 +650,10 @@ func (x *tsxDirect) lowerHandlerAssign(hd directHandler, es *ast.Node) bool {
 }
 
 // lowerHandlerCall lowers one ctx method call statement
-// (ctx.setAttribute / ctx.removeAttribute with string literals).
+// (ctx.setAttribute / ctx.removeAttribute with string literals,
+// ctx.appendChild with a nested document.createElement/createTextNode
+// call lowered through the main expression pipeline; the handle check
+// inside lowerDomMethod refuses anything else loudly).
 func (x *tsxDirect) lowerHandlerCall(hd directHandler, call *ast.Node) bool {
 	e := x.e
 	ce := call.AsCallExpression()
@@ -664,6 +667,22 @@ func (x *tsxDirect) lowerHandlerCall(hd directHandler, call *ast.Node) bool {
 		return false
 	}
 	method := pa.Name().Text()
+	if method == "appendChild" {
+		if ce.Arguments == nil || len(ce.Arguments.Nodes) != 1 {
+			x.refuse(call, "ctx.appendChild takes exactly 1 node in the direct slice")
+			return false
+		}
+		res, _ := e.lowerExpr(ce.Arguments.Nodes[0])
+		if e.refused {
+			return false
+		}
+		if _, _, claimed := e.lowerDomMethod(hd.ctxName, method, []string{res}, nil, call); !claimed {
+			x.refuse(call, "handler DOM call %s rejected", method)
+			return false
+		}
+		x.useExtern("sax_dom_append_child")
+		return true
+	}
 	args := []string{}
 	if ce.Arguments != nil {
 		for _, a := range ce.Arguments.Nodes {
@@ -695,7 +714,7 @@ func (x *tsxDirect) lowerHandlerCall(hd directHandler, call *ast.Node) bool {
 		}
 		return true
 	default:
-		x.refuse(call, "handler DOM call %s is not in the direct slice (setAttribute/removeAttribute/textContent only)", method)
+		x.refuse(call, "handler DOM call %s is not in the direct slice (setAttribute/removeAttribute/appendChild/textContent only)", method)
 		return false
 	}
 }

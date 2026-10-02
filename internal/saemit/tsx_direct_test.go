@@ -153,6 +153,18 @@ func TestTSXDirectClick(t *testing.T) {
 	if !strings.Contains(res.SAI, "call @sax_dom_set_text(") {
 		t.Errorf("missing set_text handler:\n%s", res.SAI)
 	}
+	// appendChild with a nested createElement lowers through the main
+	// expression pipeline; non-handle args refuse loudly.
+	app := "function C() {\n  return <div>\n    <button onClick={(root) => root.appendChild(document.createElement(\"span\"))}>go</button>\n  </div>;\n}\n"
+	res = mustLowerDirect(t, "clickapp.tsx", app)
+	for _, want := range []string{
+		"call @sax_dom_create(",
+		"call @sax_dom_append_child(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
 	cases := []struct {
 		name string
 		src  string
@@ -162,6 +174,7 @@ func TestTSXDirectClick(t *testing.T) {
 		{"setx", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={(r) => setN(1)}>x</button>;\n}\n", "only ctx DOM statements"},
 		{"namedref", "function C() {\n  return <button onClick={go}>x</button>;\n}\n", "inline arrow"},
 		{"otherhandler", "function C() {\n  return <button onChange={(r) => r.setAttribute(\"a\", \"b\")}>x</button>;\n}\n", "handlers slice"},
+		{"nonhandle", "function C() {\n  return <button onClick={(r) => r.appendChild(7)}>x</button>;\n}\n", "takes a DOM node handle"},
 	}
 	for _, c := range cases {
 		r := LowerTSXDirect("clk_"+c.name+".tsx", c.src)
