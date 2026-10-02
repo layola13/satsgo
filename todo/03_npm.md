@@ -61,10 +61,14 @@ checker 回退在真实 JS 上成立）。
    其次 deno（`Deno.*`→`deno.sai`）、bun（`Bun.*`→`bun.sai`），最后才用 `sa_std` 模拟。
    投影表加 Backend 维度；`@import` 指向插件 `.sai`；u32 状态码 + slot-alloc/load 形状
    与现有 fallible-trio 一致；deno/bun 补投影前先索取 exported-symbols 清单。
-   现状：pilot 已落（`os.platform/arch/homedir/tmpdir/hostname` → `node.sai`，
-   Backend 维度 + u32 约定 + 37 node 符号门禁全过）；全量分批另立项：
-   P1 path/url/querystring，P2 crypto/hash/uuid，P3 http client/server/websocket，
-   每批按 pilot 模式（映射表 + 单测 + 投影门禁计数递增），deno/bun 待清单。
+    现状：pilot 已落（`os.platform/arch/homedir/tmpdir/hostname` → `node.sai`，
+    Backend 维度 + u32 约定 + 37 node 符号门禁全过）；全量分批另立项：
+    P1 path/url/querystring，P2 crypto/hash/uuid，P3 http client/server/websocket，
+    每批按 pilot 模式（映射表 + 单测 + 投影门禁计数递增），deno/bun 待清单。
+    进展 2026-10-02：P1 补 `path.basename`（string2，ext 必填）+
+    `punycode.encode/decode`（string1；白名单加 `punycode`/`node:punycode`），
+    node 契约 37→40 全过（sala 12_node 章 u32 约定；`toNamespacedPath`
+    不在 export 清单，本批不投）。
 7. [x] 转译失败的依赖在 `subset-report.txt` 按包聚合报错（不淹没在文件级 diagnostic 里）。
    已验证可用（2026-10-02 实测：多文件 program 拒后 `subset-report.txt`
    按 `lib.ts:`/`main.ts:` 文件头聚合；`Unresolved` 按包聚合见 #6）：

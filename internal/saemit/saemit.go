@@ -9671,8 +9671,8 @@ func (e *emitter) lowerImport(st *ast.Node) {
 		e.refuse(st, "non-literal module specifiers are not lowerable")
 		return
 	}
-	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" || mod == "crypto" || mod == "querystring" || mod == "url" || mod == "util" ||
-		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" || mod == "node:crypto" || mod == "node:querystring" || mod == "node:url" || mod == "node:util" {
+	if mod == "fs" || mod == "net" || mod == "path" || mod == "os" || mod == "crypto" || mod == "querystring" || mod == "url" || mod == "util" || mod == "punycode" ||
+		mod == "node:fs" || mod == "node:net" || mod == "node:path" || mod == "node:os" || mod == "node:crypto" || mod == "node:querystring" || mod == "node:url" || mod == "node:util" || mod == "node:punycode" {
 		// Record named imports so bare calls (readFile(...)) resolve via
 		// the projection table at call sites ("node:" maps to the same
 		// backend table; node-plugin symbols carry Backend: "node").

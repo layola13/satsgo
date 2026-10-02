@@ -258,6 +258,14 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string1", Note: "one string arg; status-checked"},
 	{TS: "path.extname", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_extname", Ret: tString,
 		NodeOut: "string1", Note: "one string arg; status-checked"},
+	{TS: "path.basename", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_basename", Ret: tString,
+		NodeOut: "string2", Note: "path+ext slices; ext required in subset (1-arg refused); status-checked"},
+	// punycode: pure string transforms (IDNA encode/decode), same
+	// string1 shape; no new emitter branch.
+	{TS: "punycode.encode", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_punycode_encode", Ret: tString,
+		NodeOut: "string1", Note: "unicode text in; punycode out; status-checked"},
+	{TS: "punycode.decode", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_punycode_decode", Ret: tString,
+		NodeOut: "string1", Note: "punycode in; unicode text out; status-checked"},
 	// path argv: variadic string parts packed as {ptr,len}[argc]
 	// (16-byte SA slice layout, matching SaSlice on the plugin side).
 	{TS: "path.join", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_join", Ret: tString,

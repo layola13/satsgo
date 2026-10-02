@@ -95,6 +95,9 @@ node_symbols=(
   sa_node_plugin_path_normalize
   sa_node_plugin_path_dirname
   sa_node_plugin_path_extname
+  sa_node_plugin_path_basename
+  sa_node_plugin_punycode_encode
+  sa_node_plugin_punycode_decode
   sa_node_plugin_path_join
   sa_node_plugin_path_resolve
   sa_node_plugin_crypto_random_bytes

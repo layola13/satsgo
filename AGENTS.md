@@ -1026,3 +1026,18 @@
   verifier 条件不触发。JEV blast-radius local_only/safe_to_apply 81%。
   工具链注记：sci 需 `-Dllvm=false` 或 LLVM14 头（已装 `llvm-14-dev`）；
   插件编入 `sa_plugin_react/zig-out/lib/libreact.so`（`SA_PLUGIN_DEV=1` 挂载）。
+- ✅ node `path.basename` + `punycode.encode/decode`（sala 12_node 章 u32 约定，
+  零发射器改动，纯投影表+白名单+契约+单测）：
+  basename 复用 `NodeOut "string2"`（path+ext 双 slice；ext 在子集内必填，
+  1-arg 由既有元数门大声拒）；punycode 双件复用 `string1`；
+  `lowerImport` 白名单加 `punycode`/`node:punycode`；
+  `check_sa_std_projection.sh` node 区 37→40（`all_exported_symbols.txt`
+  精确匹配；`toNamespacedPath` 雖在 `node.sai` 却不在 export 清单，
+  本批不投，另立项）。
+  单测 `TestLowerNodePath` 扩展（2-arg 正形 + 1-arg 拒）+
+  `TestLowerNodePunycode`（双正形 + `node:` 前缀 + 元数拒）；
+  全套件绿（`count=1`）、`go vet` 干净、投影 62 sa_std + 40 node + 13 deno 全过、
+  形状校验通过（发射形与 `node.sai` 逐位对齐：basename 六参/punycode 四参）；
+  node 后端需插件环境，`sa check` 门禁仍为契约+形状（此批 `sa check`
+  止于 `@import "node.sai"` 解析，符合既定口径）。
+  JEV blast-radius local_only/safe_to_apply。

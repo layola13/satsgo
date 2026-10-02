@@ -393,6 +393,40 @@ func TestLowerNodePath(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
 	}
+	base := "import { basename } from \"path\";\nfunction main(): i32 {\n  const b: string = basename(\"/a/b/c.txt\", \".txt\");\n  return b.length;\n}\n"
+	res = mustLower(t, "p4.ts", base)
+	if !strings.Contains(res.SAI, "call @sa_node_plugin_path_basename") {
+		t.Errorf("missing basename call:\n%s", res.SAI)
+	}
+	baseArity := "import { basename } from \"path\";\nfunction main(): i32 {\n  const b: string = basename(\"/a/b/c.txt\");\n  return b.length;\n}\n"
+	r = Lower("p5.ts", baseArity)
+	if !r.Refused {
+		t.Fatalf("expected basename 1-arg refusal (ext required), got:\n%s", r.SAI)
+	}
+}
+
+func TestLowerNodePunycode(t *testing.T) {
+	src := "import { encode, decode } from \"punycode\";\nfunction main(): i32 {\n  const e: string = encode(\"münchen\");\n  const d: string = decode(\"mnchen-3ya\");\n  return e.length + d.length;\n}\n"
+	res := mustLower(t, "pc1.ts", src)
+	for _, want := range []string{
+		"call @sa_node_plugin_punycode_encode",
+		"call @sa_node_plugin_punycode_decode",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	prefixed := "import { encode } from \"node:punycode\";\nfunction main(): i32 {\n  const e: string = encode(\"münchen\");\n  return e.length;\n}\n"
+	res = mustLower(t, "pc2.ts", prefixed)
+	if !strings.Contains(res.SAI, "call @sa_node_plugin_punycode_encode") {
+		t.Errorf("missing node:punycode encode call:\n%s", res.SAI)
+	}
+	bad := "import { encode } from \"punycode\";\nfunction main(): i32 {\n  const e: string = encode();\n  return e.length;\n}\n"
+	r := Lower("pc3.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected punycode arity refusal, got:\n%s", r.SAI)
+	}
 }
 
 func TestLowerNodeCrypto(t *testing.T) {
