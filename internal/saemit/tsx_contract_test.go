@@ -19,8 +19,11 @@ package saemit
 //   - tags: anything lowercase and non-dangerous (isIntrinsicTag);
 //     attributes: anything but on*/dangerous strings (isSupportedAttr),
 //     className→class mapped (idempotent with the consumer).
-//   - releases (`!`) are absent: integer/boolean state holds no buffers,
-//     so no cleanup lines are owed (string state refuses elsewhere).
+//   - releases (`!v`): every <state> var must be released on its own
+//     line (`!a !b`), unless the component has SLA handlers (satsgo
+//     never emits those). The consumer refuses unreleased state with
+//     SaxStateLeak (sa_plugin_react/src/plugin.zig findValidationFailure),
+//     proven live by `sa react check`.
 import (
 	"regexp"
 	"strings"
@@ -125,7 +128,7 @@ func checkSAXContract(sax string) []string {
 // interpolation check can skip prop/event references (caller-scope names,
 // not callee state reads).
 var contractAttrValue = regexp.MustCompile(`=\{[^}]*\}|="[^"]*"`)
-
+var contractRelease = regexp.MustCompile(`![A-Za-z_][A-Za-z0-9_]*`)
 // checkSAXComponentChunk validates one <Component> block: state entries
 // unique/sorted, template interpolations referencing its own state, and
 // @onMount shape when present.
@@ -158,6 +161,19 @@ func checkSAXComponentChunk(chunk string) []string {
 	for _, m := range contractInterp.FindAllStringSubmatch(stripped, -1) {
 		if !seen[m[1]] {
 			bad = append(bad, "interpolation of undeclared state {"+m[1]+"}")
+		}
+	}
+	// Release coverage: every state var must be released (`!v`), the
+	// consumer's SaxStateLeak rule (stateless components owe nothing).
+	if len(vars) > 0 {
+		rel := map[string]bool{}
+		for _, m := range contractRelease.FindAllString(stripped, -1) {
+			rel[m[1:]] = true
+		}
+		for _, v := range vars {
+			if !rel[v] {
+				bad = append(bad, "state var without release {"+v+"}")
+			}
 		}
 	}
 	if strings.Contains(chunk, "@onMount:") {

@@ -15,8 +15,14 @@
 
 1. [x] tsgo 解析 tsx（ScriptKindTSX，JSX AST 直读）（JSX 节点现成），新 emitter 把 JSX 脱糖成 `.sax` 组件源。
 2. [x] 语义子集：静态模板切片落地（`tsx.go` + `LowerTSX`）；动态（hooks/处理器/表达式/组合/spread）大声拒props/state 初始化、条件渲染、列表渲染；其余（spread props、复杂 children 透传）逐个关或拒。
-3. [ ] 复用整条 `sa react build`（待：插件 .so 未构建，先结构单测）（airlock、事件桥、lifecycle）。
-4. [ ] 交付：counter 级组件 `sa react build` 跑通（含 Chromium verifier，若有）。
+3. [x] 复用整条 `sa react build`（sci 源码编 + `libreact.so` 自建，真机闭环）：
+   satsgo counter（`useState(0)` + `{count}` + `setCount(count±1)` 双钮）→
+   `react check` 通过 → `react build` 出 `app.wasm + airlock.js + index.html + app.sa`。
+   途中修真缺口：有 state 组件须 `!var` 释放行（消费者 SaxStateLeak 规则，
+   fixture `!count !last` 即范式），发射器已补、契约已锁（前注记“释放行缺席”系
+   无真机时的误判，已勘误）。fixture `react_counter.sax` 同链复建通过；
+   Chromium verifier 容器无浏览器，条件不触发。
+4. [x] 交付：counter 级组件 `sa react build` 跑通（check + build + 全产物；见上）。
 
 ### 路二：hooks / DOM（子集推进）
 

@@ -911,3 +911,12 @@
   残留皆转译体习语（顶层状态、无注解 JS 体、CJS 互操作、`arguments`/`isNaN`/
   方法调用），d.ts 配对救签名救不了 body → 远低于 30% 线，**收缩生效**：
   停投 B 转译特性，保留聚合报错（`Unresolved` 按包聚合本次即验证）；A/C 不动。
+- ✅ stage4 路一 counter e2e 打通（todo/04#3+4，sci 源码编 + `libreact.so` 自建）：
+  satsgo counter tsx（`useState(0)` + `{count}` + `setCount(count±1)`）→ `.sax` →
+  `sa react check` 通过 → `sa react build` 出 `app.wasm + airlock.js + index.html`；
+  修真缺口：有 state 组件补 `!var` 释放行（SaxStateLeak 规则，fixture 范式），
+  契约同步锁覆盖（旧“释放行缺席”注记系无真机误判，已勘误）。
+  全套件绿、286 `sa check` + 形状全过；fixture 同链复建通过；容器无 Chromium，
+  verifier 条件不触发。JEV blast-radius local_only/safe_to_apply 81%。
+  工具链注记：sci 需 `-Dllvm=false` 或 LLVM14 头（已装 `llvm-14-dev`）；
+  插件编入 `sa_plugin_react/zig-out/lib/libreact.so`（`SA_PLUGIN_DEV=1` 挂载）。

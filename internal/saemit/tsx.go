@@ -230,6 +230,13 @@ func (x *tsxEmitter) lowerComponent(name string, fn *ast.Node) {
 	for _, h := range x.handlers {
 		b.WriteString(h)
 	}
+	// State release line (consumer: every <state> var must be released
+	// unless the component has SLA handlers, which satsgo never emits;
+	// see react_counter.sax `!count !last`). Without it `sa react check`
+	// fails the component with SaxStateLeak.
+	if len(names) > 0 {
+		b.WriteString("  !" + strings.Join(names, " !") + "\n")
+	}
 	b.WriteString("</Component>\n")
 	x.out.WriteString(b.String())
 }
