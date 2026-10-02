@@ -901,6 +901,7 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	name = e.entryMainName(name)
 	params := fn.Parameters()
 	sig := []string{}
+	pendingParams := []destructurePending{}
 	e.pushScope()
 	savedRet := e.retType
 	savedInFunc := e.inFunc
@@ -919,7 +920,17 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	for _, p := range params {
 		pname, ok := bindingNameText(p.AsNode())
 		if !ok {
-			e.refuse(p.AsNode(), "destructured parameters are not in the SA-lowerable subset")
+			// Binding-pattern parameter: hidden handle param plus a
+			// body-top destructure (declaration shapes, same refusals).
+			hid, pat, annot, ok := e.hiddenDestructuredParam(p, params)
+			if !ok {
+				e.refuse(p.AsNode(), "destructured parameters are not in the SA-lowerable subset")
+				continue
+			}
+			sig = append(sig, fmt.Sprintf("%s: ptr", hid))
+			e.declareOwned(hid)
+			e.trackBindingAt(hid, annot, nil, p.AsNode(), tArray)
+			pendingParams = append(pendingParams, destructurePending{hid: hid, pat: pat, annot: annot})
 			continue
 		}
 		ptype := tI32
@@ -951,6 +962,12 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	}
 	e.emitRaw("@%s(%s)%s:", e.fnDef(name), strings.Join(sig, ", "), ret)
 	e.terminated = false
+	// Pattern parameters expand here, in the body scope above params.
+	// Guarded, never an early return: diagnostics accumulate across
+	// the file (a prior refuse must not hide later statements).
+	if !e.refused {
+		e.drainDestructuredParams(pendingParams)
+	}
 	body := fn.BodyData().Body
 	if body == nil {
 		e.refuse(fn, "function %s has no body (overload signatures are not lowerable)", name)
@@ -1043,11 +1060,20 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 	pnames := make([]string, 0, len(params))
 	psig := make([]string, 0, len(params))
 	ptypes := make([]saType, 0, len(params))
+	pendingArrow := []destructurePending{}
 	for _, p := range params {
 		pname, ok := bindingNameText(p.AsNode())
 		if !ok {
-			e.refuse(p.AsNode(), "destructured parameters are not in the SA-lowerable subset")
-			return
+			hid, pat, annot, ok := e.hiddenDestructuredParam(p, params)
+			if !ok {
+				e.refuse(p.AsNode(), "destructured parameters are not in the SA-lowerable subset")
+				return
+			}
+			pnames = append(pnames, hid)
+			ptypes = append(ptypes, tArray)
+			psig = append(psig, fmt.Sprintf("%s: ptr", hid))
+			pendingArrow = append(pendingArrow, destructurePending{hid: hid, pat: pat, annot: annot})
+			continue
 		}
 		pt := tI32
 		if pd := p.AsParameterDeclaration(); pd.Type != nil {
@@ -1175,6 +1201,13 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 		e.declareOwned(c)
 	}
 	e.pushScope()
+	// Pattern parameters expand here, in the body scope above params.
+	// Guarded, never an early return: the out-of-line body below must
+	// still drain so diagnostics accumulate (and the builder swap
+	// below must always restore).
+	if !e.refused {
+		e.drainDestructuredParams(pendingArrow)
+	}
 	bd := arrow.Body()
 	if bd.Kind == ast.KindBlock {
 		for _, s := range bd.Statements() {
@@ -5037,6 +5070,83 @@ func (e *emitter) destructureArray(pat *ast.Node, arr string, pos *ast.Node) {
 			return
 		}
 		idx++
+	}
+}
+
+// destructurePending records one binding-pattern parameter: the hidden
+// handle param plus the pattern to expand at the top of the body.
+type destructurePending struct {
+	hid   string
+	pat   *ast.Node
+	annot *ast.Node
+}
+
+// hiddenDestructuredParam synthesizes a hidden handle parameter for a
+// binding-pattern parameter (`{x, y}` / `[a, b]`). Bare patterns only:
+// rest/default/optional pattern params stay loudly refused. The hidden
+// name is unique against sibling parameter names.
+func (e *emitter) hiddenDestructuredParam(p *ast.Node, params []*ast.Node) (string, *ast.Node, *ast.Node, bool) {
+	pd := p.AsParameterDeclaration()
+	if pd.DotDotDotToken != nil || pd.Initializer != nil || pd.QuestionToken != nil {
+		return "", nil, nil, false
+	}
+	var pat *ast.Node
+	if nm := pd.Name(); nm != nil {
+		pat = nm.AsNode()
+	}
+	if pat == nil || (pat.Kind != ast.KindObjectBindingPattern && pat.Kind != ast.KindArrayBindingPattern) {
+		return "", nil, nil, false
+	}
+	taken := map[string]bool{}
+	for _, q := range params {
+		if s, ok := bindingNameText(q.AsNode()); ok {
+			taken[s] = true
+		}
+	}
+	hid := "__darg"
+	for taken[hid] {
+		hid += "_"
+	}
+	taken[hid] = true
+	return hid, pat, pd.Type, true
+}
+
+// drainDestructuredParams expands pending pattern parameters field-wise at
+// the top of the body (same helpers as destructuring declarations, so
+// shapes and refusals agree exactly).
+func (e *emitter) drainDestructuredParams(pending []destructurePending) {
+	for _, q := range pending {
+		switch q.pat.Kind {
+		case ast.KindArrayBindingPattern:
+			if e.arrVars == nil {
+				e.arrVars = map[string]bool{}
+			}
+			if e.arrElems == nil {
+				e.arrElems = map[string]string{}
+			}
+			e.arrVars[q.hid] = true
+			if _, ok := e.arrElems[q.hid]; !ok {
+				e.arrElems[q.hid] = "i32"
+			}
+			e.destructureArray(q.pat, q.hid, q.pat)
+		case ast.KindObjectBindingPattern:
+			if q.annot != nil {
+				if _, ok := e.varLayouts[q.hid]; !ok {
+					if l := e.layoutOfAnnotation(q.annot); l != nil {
+						if e.varLayouts == nil {
+							e.varLayouts = map[string]*layout{}
+						}
+						e.varLayouts[q.hid] = l
+					}
+				}
+			}
+			e.destructureObject(q.pat, q.hid, q.pat)
+		default:
+			e.refuse(q.pat, "binding pattern %s is not lowerable", q.pat.Kind.String())
+		}
+		if e.refused {
+			return
+		}
 	}
 }
 

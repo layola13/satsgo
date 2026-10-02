@@ -1069,3 +1069,15 @@
   单测 `TestLowerProgramOverload`（跨文件双签名一实现单定义 + 链接调用）；
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   链接产物真机 `sa check` 过 + `sa run` exit 1 与 node 差分一致。
+- ✅ 解构形参（纯语法点，隐藏 handle 形参 `__darg: ptr` + 体顶复用
+  `destructureObject`/`destructureArray`，与声明侧逐位同形同拒；
+  rest/默认/可选形参仍大声拒；drain 守卫式不清退，保持 accumulate 诊断）。
+  函数声明 + 箭头函数双侧；单测 `TestLowerDestructuredParams`
+  （对象 + 数组 + 箭头正形 + rest 拒形）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过；对象形参 `sa run` exit 7 与 node 差分一致。
+  观察项（非本刀，基线同现，sci 侧待查）：计算地址 load
+  （`lowerCheckedIndex` 经 `add` 的地址）在当前 `sa run` 下读回 1，
+  `arr[0]`/`const [a,b] = arr` 皆然，而 `arr.length` 正确；
+  复现：`const arr: i32[] = [10,20]; return arr[0];` → exit 1（期望 10）。
+  JEV blast-radius local_only/needs_regression_tests（回归已补：全套件 + sweep + 形状 + check + run）。

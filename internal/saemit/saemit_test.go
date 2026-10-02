@@ -475,6 +475,31 @@ func TestLowerUninitDecl(t *testing.T) {
 	}
 }
 
+func TestLowerDestructuredParams(t *testing.T) {
+	src := "interface Point {\n  x: i32;\n  y: i32;\n}\nfunction dsum({x, y}: Point): i32 {\n  return x + y;\n}\nfunction asum([a, b]: i32[]): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  const pt: Point = { x: 3, y: 4 };\n  const arr: i32[] = [10, 20];\n  return dsum(pt) + asum(arr);\n}\n"
+	res := mustLower(t, "dp1.ts", src)
+	for _, want := range []string{
+		"@dsum(__darg: ptr)",
+		"@asum(__darg: ptr)",
+		"call @dsum(",
+		"call @asum(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	arrow := "interface Point {\n  x: i32;\n  y: i32;\n}\nconst f = ({x, y}: Point): i32 => {\n  return x + y;\n};\nfunction main(): i32 {\n  const pt: Point = { x: 5, y: 6 };\n  return f(pt);\n}\n"
+	res = mustLower(t, "dp2.ts", arrow)
+	if !strings.Contains(res.SAI, "call @f(") {
+		t.Errorf("missing arrow call:\n%s", res.SAI)
+	}
+	rest := "function f({x, ...r}: any): i32 {\n  return x;\n}\nfunction main(): i32 {\n  return 0;\n}\n"
+	r := Lower("dp3.ts", rest)
+	if !r.Refused {
+		t.Fatalf("expected rest-pattern refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerNodePunycode(t *testing.T) {
 	src := "import { encode, decode } from \"punycode\";\nfunction main(): i32 {\n  const e: string = encode(\"münchen\");\n  const d: string = decode(\"mnchen-3ya\");\n  return e.length + d.length;\n}\n"
 	res := mustLower(t, "pc1.ts", src)
