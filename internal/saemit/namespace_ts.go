@@ -610,9 +610,11 @@ func (e *emitter) registerNsFuncSig(m *ast.Node, q string) {
 		e.funcParams[q] = len(params)
 	}
 	defs := make([]bool, len(params))
+	dexprs := make([]*ast.Node, len(params))
 	for i, p := range params {
 		if pd := p.AsParameterDeclaration(); pd.Initializer != nil {
 			defs[i] = true
+			dexprs[i] = pd.Initializer
 		}
 	}
 	if e.funcDefaults == nil {
@@ -620,6 +622,12 @@ func (e *emitter) registerNsFuncSig(m *ast.Node, q string) {
 	}
 	if _, ok := e.funcDefaults[q]; !ok {
 		e.funcDefaults[q] = defs
+	}
+	if e.funcDefaultExpr == nil {
+		e.funcDefaultExpr = map[string][]*ast.Node{}
+	}
+	if _, ok := e.funcDefaultExpr[q]; !ok {
+		e.funcDefaultExpr[q] = dexprs
 	}
 	if len(params) > 0 {
 		if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
@@ -1036,6 +1044,12 @@ func (e *emitter) lowerNamespaceCall(ns, method string, args []string, argNodes 
 		if !e.checkArity(q, args, pos) {
 			return "0", tUnknown, true
 		}
+		var padOk bool
+		var padded []string
+		if padded, _, padOk = e.padDefaultArgs(q, args, nil, pos); !padOk {
+			return "0", tUnknown, true
+		}
+		args = padded
 		ret := e.funcSigs[q]
 		if ai, ok := e.arrowAliases[q]; ok {
 			full := append(append([]string{}, args...), ai.captures...)

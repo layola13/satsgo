@@ -1091,3 +1091,13 @@
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   真机 `sa check` 过 + `sa run` exit 42（单文件/跨文件）与 node 差分一致。
   JEV blast-radius local_only/safe_to_apply 60%。
+- ✅ 缺省短调补齐（静默误编译修复：`checkArity` 放行短调却无补齐，
+  `call @g(1)` 对 2 参 callee 当场 `CapabilityMismatch`；
+  `funcDefaultExpr` 三 prescan + program 链接播种，
+  `padDefaultArgs` 在 5 处调用点回放纯字面量缺省，非字面量大声拒）：
+  单测 `TestLowerDefaultReplay`（字面量/全参/字符串正形 + 非字面量拒 + 无缺省拒）+
+  `TestLowerProgramDefaultReplay`（跨文件回放）；
+  `TestLowerArity/ar3` 旧误编译形状期望更新为补齐形状；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run`（单文件 3、跨文件 3、命名空间 5）与 node 差分一致。
+  JEV blast-radius local_only/safe_to_apply 59%。

@@ -45,6 +45,17 @@ func TestLowerProgramOverload(t *testing.T) {
 	}
 }
 
+func TestLowerProgramDefaultReplay(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { g } from \"./util\";\nfunction main(): i32 {\n  return g(1);\n}\n",
+		"util.ts": "export function g(a: i32, b: i32 = 2): i32 {\n  return a + b;\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if !strings.Contains(res.SAI, "call @util__g(1, 2)") {
+		t.Errorf("missing replayed cross-file default call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerProgramUnresolvedDeps(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { x } from \"lodash-es\";\nimport { y } from \"./u\";\nfunction main(): i32 { return y(1); }\n",

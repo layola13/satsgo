@@ -345,6 +345,10 @@ type emitter struct {
 	// funcDefaults records per-parameter defaults (missing args are only
 	// tolerable when every omitted parameter declares one).
 	funcDefaults map[string][]bool
+	// funcDefaultExpr records the default Initializer node per parameter
+	// (nil when none) so short calls replay literal defaults at the call
+	// site; non-literal defaults refuse loudly instead of miscompiling.
+	funcDefaultExpr map[string][]*ast.Node
 	// inlineRet intercepts callback returns (higher-order inlining).
 	inlineRet *inlineRetState
 	// classDefs records class shapes; varClass maps instance variables to
@@ -670,15 +674,21 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 			params := st.Parameters()
 			e.funcParams[regName] = len(params)
 			defs := make([]bool, len(params))
+			dexprs := make([]*ast.Node, len(params))
 			for i, p := range params {
 				if pd := p.AsParameterDeclaration(); pd.Initializer != nil {
 					defs[i] = true
+					dexprs[i] = pd.Initializer
 				}
 			}
 			if e.funcDefaults == nil {
 				e.funcDefaults = map[string][]bool{}
 			}
 			e.funcDefaults[regName] = defs
+			if e.funcDefaultExpr == nil {
+				e.funcDefaultExpr = map[string][]*ast.Node{}
+			}
+			e.funcDefaultExpr[regName] = dexprs
 			if len(params) > 0 {
 				if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
 					e.funcHasRest[regName] = true
@@ -1250,9 +1260,8 @@ func (e *emitter) lowerArrowBinding(name string, arrow *ast.Node, topLevel bool)
 
 // checkArity enforces call arity loudly: rest callees take any count;
 // fixed callees take exactly arity, except trailing parameters with
-// defaults may be omitted (their replay is a known gap: omitted values
-// arrive as caller-passed zeros only when the caller pads; short calls
-// otherwise refuse rather than miscompile).
+// defaults may be omitted (padDefaultArgs replays them at the call site;
+// non-literal defaults refuse there instead of miscompiling).
 func (e *emitter) checkArity(fname string, args []string, pos *ast.Node) bool {
 	if e.funcHasRest[fname] {
 		return true
@@ -1276,6 +1285,52 @@ func (e *emitter) checkArity(fname string, args []string, pos *ast.Node) bool {
 		}
 	}
 	return true
+}
+
+// padDefaultArgs replays omitted trailing default arguments at a short
+// call site (JS per-call evaluation). Only pure literal Initializers
+// replay (numbers, strings, booleans, null/undefined); anything else
+// (identifiers, calls, templates with holes) refuses loudly: replaying
+// those would rebind caller-scope names or duplicate side effects.
+// Callers run this after checkArity passes.
+func (e *emitter) padDefaultArgs(fname string, args []string, argTypes []saType, pos *ast.Node) ([]string, []saType, bool) {
+	arity, ok := e.funcParams[fname]
+	if !ok || e.funcHasRest[fname] || len(args) >= arity {
+		return args, argTypes, true
+	}
+	defs := e.funcDefaults[fname]
+	exprs := e.funcDefaultExpr[fname]
+	// Copy-on-write: callers may alias args (desugar `full := args`).
+	out := append([]string{}, args...)
+	ot := append([]saType{}, argTypes...)
+	for i := len(args); i < arity; i++ {
+		if i >= len(defs) || !defs[i] {
+			return args, argTypes, true
+		}
+		var init *ast.Node
+		if i < len(exprs) {
+			init = exprs[i]
+		}
+		if init == nil {
+			e.refuse(pos, "omitted default argument %d of %s has no recorded default (short calls need a literal default)", i+1, fname)
+			return args, argTypes, false
+		}
+		switch init.Kind {
+		case ast.KindNumericLiteral, ast.KindStringLiteral,
+			ast.KindNoSubstitutionTemplateLiteral, ast.KindTrueKeyword,
+			ast.KindFalseKeyword, ast.KindNullKeyword, ast.KindUndefinedKeyword:
+			v, t := e.lowerExpr(init)
+			if e.refused {
+				return args, argTypes, false
+			}
+			out = append(out, v)
+			ot = append(ot, t)
+		default:
+			e.refuse(pos, "omitted default argument %d of %s is not a literal (non-literal defaults do not replay at short calls)", i+1, fname)
+			return args, argTypes, false
+		}
+	}
+	return out, ot, true
 }
 
 // captureSig renders captured outer names as trailing i32 params. Slice
@@ -3777,6 +3832,10 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 			if !e.checkArity(q, args, n) {
 				return "0", tUnknown
 			}
+			var padOk bool
+			if args, argTypes, padOk = e.padDefaultArgs(q, args, argTypes, n); !padOk {
+				return "0", tUnknown
+			}
 			if ret == tVoid {
 				e.emit("call @%s(%s)", q, strings.Join(args, ", "))
 				return "0", tVoid
@@ -3807,6 +3866,10 @@ func (e *emitter) lowerCall(n *ast.Node) (string, saType) {
 				return "0", tUnknown
 			}
 			if !e.checkArity(fname, args, n) {
+				return "0", tUnknown
+			}
+			var padOk bool
+			if args, argTypes, padOk = e.padDefaultArgs(fname, args, argTypes, n); !padOk {
 				return "0", tUnknown
 			}
 			if ret == tVoid {
@@ -4304,6 +4367,11 @@ func (e *emitter) lowerCallDesugar(recv string, args []string, types []saType, a
 		if !e.checkArity(q, full, pos) {
 			return "0", tUnknown, true
 		}
+		fullTypes := types
+		var padOk bool
+		if full, fullTypes, padOk = e.padDefaultArgs(q, full, fullTypes, pos); !padOk {
+			return "0", tUnknown, true
+		}
 		if ret == tVoid {
 			e.emit("call @%s(%s)", q, strings.Join(full, ", "))
 			return "0", tVoid, true
@@ -4319,6 +4387,11 @@ func (e *emitter) lowerCallDesugar(recv string, args []string, types []saType, a
 		}
 		full := args
 		if !e.checkArity(recv, full, pos) {
+			return "0", tUnknown, true
+		}
+		fullTypes := types
+		var padOk bool
+		if full, fullTypes, padOk = e.padDefaultArgs(recv, full, fullTypes, pos); !padOk {
 			return "0", tUnknown, true
 		}
 		if ret == tVoid {

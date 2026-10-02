@@ -166,6 +166,30 @@ func TestLowerClassStaticCall(t *testing.T) {
 	}
 }
 
+func TestLowerDefaultReplay(t *testing.T) {
+	src := "function g(a: i32, b: i32 = 2): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return g(1) + g(10, 20);\n}\n"
+	res := mustLower(t, "dr1.ts", src)
+	if !strings.Contains(res.SAI, "call @g(1, 2)") {
+		t.Errorf("missing replayed default call:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "call @g(10, 20)") {
+		t.Errorf("missing full call:\n%s", res.SAI)
+	}
+	nonlit := "const d: i32 = 2;\nfunction g(a: i32, b: i32 = d): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return g(1);\n}\n"
+	if r := Lower("dr2.ts", nonlit); !r.Refused {
+		t.Fatalf("expected non-literal-default refusal, got:\n%s", r.SAI)
+	}
+	nodef := "function f(a: i32, b: i32): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
+	if r := Lower("dr3.ts", nodef); !r.Refused {
+		t.Fatalf("expected too-few refusal, got:\n%s", r.SAI)
+	}
+	str := "function h(a: string, b: string = \"hi\"): i32 {\n  return a.length + b.length;\n}\nfunction main(): i32 {\n  return h(\"ab\");\n}\n"
+	res = mustLower(t, "dr4.ts", str)
+	if !strings.Contains(res.SAI, "call @h(") {
+		t.Errorf("missing padded string call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerOptionalChainGuard(t *testing.T) {
 	src := `interface Box {
   v: i32;
@@ -268,8 +292,8 @@ func TestLowerArity(t *testing.T) {
 	}
 	def := "function f(a: i32, b: i32 = 5): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return f(1);\n}\n"
 	res = mustLower(t, "ar3.ts", def)
-	if !strings.Contains(res.SAI, "call @f(1)") {
-		t.Errorf("missing short call:\n%s", res.SAI)
+	if !strings.Contains(res.SAI, "call @f(1, 5)") {
+		t.Errorf("missing replayed default call:\n%s", res.SAI)
 	}
 }
 

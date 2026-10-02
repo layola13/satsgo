@@ -395,6 +395,10 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	// Pre-pass: exports + shared type environment + global function table.
 	expOf := map[string]*fileExports{}
 	globalDefaults := map[string]map[string][]bool{}
+	// globalDefaultExpr mirrors globalDefaults with the Initializer node
+	// per defaulted parameter (nil when none); short calls replay
+	// literal defaults, non-literals refuse loudly.
+	globalDefaultExpr := map[string]map[string][]*ast.Node{}
 	// Pair co-located x.d.ts with x.js (signatures for unannotated bodies).
 	dtsFor := map[string]string{}
 	for p := range files {
@@ -462,6 +466,7 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		globalArity[p] = map[string]int{}
 		globalRest[p] = map[string]bool{}
 		globalDefaults[p] = map[string][]bool{}
+		globalDefaultExpr[p] = map[string][]*ast.Node{}
 		text := files[p]
 		scratch := &emitter{file: p, src: text, lines: lineOffsets(text)}
 		// Type maps are shared across the prescan (reachable is
@@ -506,12 +511,15 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				params := st.Parameters()
 				globalArity[p][name] = len(params)
 				defs := make([]bool, len(params))
+				dexprs := make([]*ast.Node, len(params))
 				for i, pm := range params {
 					if pd := pm.AsParameterDeclaration(); pd.Initializer != nil {
 						defs[i] = true
+						dexprs[i] = pd.Initializer
 					}
 				}
 				globalDefaults[p][name] = defs
+				globalDefaultExpr[p][name] = dexprs
 				if len(params) > 0 {
 					if pd := params[len(params)-1].AsParameterDeclaration(); pd.DotDotDotToken != nil {
 						globalRest[p][name] = true
@@ -1158,6 +1166,12 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		for name, defs := range globalDefaults[p] {
 			e.funcDefaults[name] = defs
 		}
+		if e.funcDefaultExpr == nil {
+			e.funcDefaultExpr = map[string][]*ast.Node{}
+		}
+		for name, dexprs := range globalDefaultExpr[p] {
+			e.funcDefaultExpr[name] = dexprs
+		}
 		for spec, r := range links[p].resolved {
 			_ = spec
 			for name, ret := range r.rets {
@@ -1171,6 +1185,9 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				}
 				if defs, ok := globalDefaults[r.key][name]; ok {
 					e.funcDefaults[q] = defs
+				}
+				if dexprs, ok := globalDefaultExpr[r.key][name]; ok {
+					e.funcDefaultExpr[q] = dexprs
 				}
 			}
 		}
