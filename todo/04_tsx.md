@@ -34,7 +34,13 @@
 7. [x] DOM 投影表（`createElement/appendChild/setAttribute` → airlock extern），相当于给浏览器环境再做一套投影。
    （p1：三件套 + i64 句柄追踪；query/text/attrs 系与 p3 解构另立项；extern 由构建侧提供；单测 1 项；286 零回退。）
    （p2：createTextNode + textContent/innerHTML 写；读另立项；单测 1 项。）
-8. [ ] JSX → 直接 SA 调用（`createElement` 内联），绕过 `.sax` 中间态（可选优化，不阻塞）。
+8. [x] JSX → 直接 SA 调用（首刀：静态形；动态/组合后切）。
+   `LowerTSXDirect`（新文件 `tsx_direct.go`）：静态元素/文本/串属性直调
+   `sax_dom_create/create_text/append_child/set_attr`（复用 `dom_proj.go`
+   既有发射，`className`→`class` 同映射），按需 `@extern` 声明（签名逐字
+   对 `airlock_gen.zig`），`sa check` 可独立验证；props/插值/hooks/处理器/
+   组件/spread/危险名一律大声拒。单测正形 + 8 拒形；`Lower()` 零改，
+   286 零影响（纯加法）。
 
 ## 交付数字
 

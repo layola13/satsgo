@@ -943,6 +943,13 @@
   全套件绿、286 零翻转零字节差（语料无此形，纯加法）、`sa check` + 形状
   286 绿、投影全过；手跑混合 exit 6（1+3+2）对值。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ 路二首刀（JSX → 直接 SA 调用，静态形）：
+  新入口 `LowerTSXDirect`（`tsx_direct.go`）：静态元素/文本/串属性直调
+  airlock（复用 `dom_proj.go` 发射，`className`→`class` 同映射），按需
+  `@extern`（签名逐字对 airlock 真源），`sa check` 独立通过 + 形状过；
+  props/插值/hooks/处理器/组件/spread/危险名一律大声拒（8 拒形锁定）。
+  `Lower()` 零改 → 286 零影响（纯加法文件）；全套件绿。
+  JEV blast-radius local_only/safe_to_apply 85%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
