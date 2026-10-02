@@ -1118,3 +1118,11 @@
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   真机 `sa check` 过 + `sa run`（41/9/2/1）与 node 差分一致。
   JEV blast-radius local_only/safe_to_apply 86%。
+- ✅ throwing-try前缀扩展（首个顶层throw生效、后语句死码跳过；前缀限直行
+  （顶层return/throw/break/continue与嵌套throw保持大声拒）；try-local泄漏守卫
+  （前缀let/var+函数/类名收集，const折叠豁免，catch/finally经 `valueUsedNames`
+  预扫命中即拒）；try域建、catch/finally嵌套域、try域全路径释放，落空才出endL）：
+  单测扩展（调用+外赋+const前缀正形 + 泄漏拒 + 多throw首胜）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run` exit 47 与 node 差分一致。
+  JEV blast-radius local_only/safe_to_apply 65%。

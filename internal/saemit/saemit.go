@@ -2298,33 +2298,119 @@ func (e *emitter) lowerTry(st *ast.Node) {
 	e.terminated = false
 }
 
-// tryLowerThrowingTry lowers the single-throw slice:
+// tryLowerThrowingTry lowers the throwing-try slice:
 //
-//	try { throw <i32>; } catch (e) { ... } [finally { ... }]
+//	try { <prefix>; throw <i32>; } catch (e) { ... } [finally { ... }]
 //
-// The throw transfers to the catch block (no panic): the thrown value is
-// evaluated once and bound to the catch param (if any), the catch body runs,
-// then finally runs. try/finally without catch runs finally then panics.
-// Anything else with a throw (multi-statement prefix/suffix, nested throw
-// inside if/loop, non-i32 throw values) returns false for the legacy loud
-// refusal. No Result/future convention is invented: the value is a plain
-// i32 local, mirroring the zero-value/uninit-decl plumbing.
+// The prefix runs, then the throw transfers to the catch block (no panic):
+// the thrown value is evaluated once and bound to the catch param (if any),
+// the catch body runs, then finally runs. try/finally without catch runs
+// prefix + finally then panics. Statements after the top-level throw are
+// dead and skipped. Anything else (no top-level throw, nested throw inside
+// if/loop, terminating prefix, try-locals read in handlers, non-i32 throw
+// values) returns false for the legacy loud refusal. No Result/future
+// convention is invented: the value is a plain i32 local, mirroring the
+// zero-value/uninit-decl plumbing.
 func (e *emitter) tryLowerThrowingTry(st *ast.Node, ts *ast.TryStatement) bool {
 	tryStmts := ts.TryBlock.Statements()
-	if len(tryStmts) != 1 || tryStmts[0].Kind != ast.KindThrowStatement {
+	throwIdx := -1
+	for i, s := range tryStmts {
+		if s.Kind == ast.KindThrowStatement {
+			throwIdx = i
+			break
+		}
+	}
+	if throwIdx < 0 {
 		return false
 	}
-	throwSt := tryStmts[0]
+	// Prefix must be straight-line (no top-level terminator) and free of
+	// nested throws; anything else keeps the legacy loud refusal.
+	for _, s := range tryStmts[:throwIdx] {
+		switch s.Kind {
+		case ast.KindReturnStatement, ast.KindThrowStatement,
+			ast.KindBreakStatement, ast.KindContinueStatement:
+			return false
+		}
+		if containsThrow(s) {
+			return false
+		}
+	}
+	// Try-locals must not leak into the handlers (the catch scope nests
+	// inside the try scope during binding): collect prefix let/var and
+	// function/class names; any catch/finally use refuses. Consts fold by
+	// value (immutable) and stay visible.
+	blocked := map[string]bool{}
+	for _, s := range tryStmts[:throwIdx] {
+		switch s.Kind {
+		case ast.KindVariableStatement:
+			dl := s.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+			if dl.Flags&ast.NodeFlagsConst != 0 {
+				continue
+			}
+			for _, d := range dl.Declarations.Nodes {
+				nm := d.Name()
+				if nm == nil || nm.Kind != ast.KindIdentifier {
+					return false
+				}
+				blocked[nm.Text()] = true
+			}
+		case ast.KindFunctionDeclaration, ast.KindClassDeclaration:
+			if nm := s.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+				blocked[nm.Text()] = true
+			}
+		}
+	}
+	if len(blocked) > 0 {
+		uses := map[string]bool{}
+		if ts.CatchClause != nil {
+			for n := range valueUsedNames(ts.CatchClause.AsCatchClause().Block.Statements()) {
+				uses[n] = true
+			}
+		}
+		if ts.FinallyBlock != nil {
+			for n := range valueUsedNames(ts.FinallyBlock.Statements()) {
+				uses[n] = true
+			}
+		}
+		for n := range uses {
+			if blocked[n] {
+				return false
+			}
+		}
+	}
+	endL := e.freshLabel("endtry")
+	e.pushScope()
+	e.terminated = false
+	for _, s := range tryStmts[:throwIdx] {
+		e.lowerBlockStatement(s)
+	}
+	if e.refused {
+		e.releaseScope()
+		e.popScope()
+		return true
+	}
+	if e.terminated {
+		// Prefix terminated through nested control (both-arms return):
+		// the throw is dead; stay loud instead of inventing continuation.
+		e.refuse(st, "throw inside try is not lowerable (catch cannot resume after panic)")
+		e.releaseScope()
+		e.popScope()
+		return true
+	}
+	throwSt := tryStmts[throwIdx]
 	throwExpr := throwSt.AsThrowStatement().Expression
 	val, vtype := e.lowerExpr(throwExpr)
 	if e.refused {
+		e.releaseScope()
+		e.popScope()
 		return true
 	}
 	if vtype != tI32 && vtype != tBool {
 		e.refuse(throwSt, "throw value type is not lowerable (catch params carry i32 only)")
+		e.releaseScope()
+		e.popScope()
 		return true
 	}
-	endL := e.freshLabel("endtry")
 	if ts.CatchClause == nil {
 		if ts.FinallyBlock != nil {
 			e.pushScope()
@@ -2336,6 +2422,8 @@ func (e *emitter) tryLowerThrowingTry(st *ast.Node, ts *ast.TryStatement) bool {
 			e.popScope()
 		}
 		e.releaseIfOwnedTemp(val)
+		e.releaseScope()
+		e.popScope()
 		e.emit("panic(%d)", panicThrow)
 		e.terminated = true
 		return true
@@ -2346,6 +2434,8 @@ func (e *emitter) tryLowerThrowingTry(st *ast.Node, ts *ast.TryStatement) bool {
 		name, ok := bindingNameText(cc.VariableDeclaration)
 		if !ok {
 			e.refuse(cc.VariableDeclaration, "destructured catch params are not in the SA-lowerable subset")
+			e.popScope()
+			e.releaseScope()
 			e.popScope()
 			return true
 		}
@@ -2371,6 +2461,8 @@ func (e *emitter) tryLowerThrowingTry(st *ast.Node, ts *ast.TryStatement) bool {
 		e.popScope()
 		e.terminated = e.terminated || catchTerm
 	}
+	e.releaseScope()
+	e.popScope()
 	if !e.terminated {
 		e.emitRaw("%s:", endL)
 	}

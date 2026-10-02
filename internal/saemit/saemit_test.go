@@ -1231,6 +1231,20 @@ func TestLowerTryThrowCatch(t *testing.T) {
 	if !strings.Contains(res.SAI, "return e") {
 		t.Errorf("identifier throw should bind the catch param, got:\n%s", res.SAI)
 	}
+	prefix := "function log(x: i32): void {\n}\nfunction main(): i32 {\n  let x: i32 = 0;\n  try {\n    log(1);\n    x = 5;\n    const k: i32 = 40;\n    throw k + 2;\n  } catch (e) {\n    return x + e;\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "try_prefix.ts", prefix)
+	if !strings.Contains(res.SAI, "return") {
+		t.Errorf("prefix throw should lower prefix then catch, got:\n%s", res.SAI)
+	}
+	leakPrefix := "function main(): i32 {\n  try {\n    let t: i32 = 1;\n    throw 2;\n  } catch (e) {\n    return t;\n  }\n  return 0;\n}\n"
+	if r := Lower("try_leak.ts", leakPrefix); !r.Refused {
+		t.Fatalf("expected try-local leak refusal, got:\n%s", r.SAI)
+	}
+	multiThrow := "function main(): i32 {\n  try {\n    throw 1;\n    throw 2;\n  } catch (e) {\n    return e;\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "try_multi.ts", multiThrow)
+	if !strings.Contains(res.SAI, "e = 1") {
+		t.Errorf("first throw should win, got:\n%s", res.SAI)
+	}
 }
 
 func TestAsyncSyncUnwrapHonest(t *testing.T) {
