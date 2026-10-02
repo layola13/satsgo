@@ -2192,12 +2192,105 @@ func containsThrow(n *ast.Node) bool {
 	return found
 }
 
+// tryLowerSwitchMacro lowers 2- and 3-arm switches through the upstream
+// control.sal SWITCH_2 / SWITCH_3 dispatch macros. Body, break, default,
+// scope and termination discipline mirrors lowerSwitch exactly; only the
+// test chain (eq + br per case) moves into the macro. Anything else (1 or
+// 4+ arms, multiple defaults, unknown clause kinds) returns false for the
+// exact legacy path. Reports whether it emitted (a refusal mid-way still
+// claims the statement: refused files are discarded either way, and
+// falling through would double-emit).
+func (e *emitter) tryLowerSwitchMacro(st *ast.Node) bool {
+	sw := st.AsSwitchStatement()
+	clauses := sw.CaseBlock.AsCaseBlock().Clauses.Nodes
+	type casePart struct {
+		node *ast.Node
+	}
+	parts := []casePart{}
+	var defaultNode *ast.Node
+	for _, cl := range clauses {
+		switch cl.Kind {
+		case ast.KindCaseClause:
+			parts = append(parts, casePart{node: cl})
+		case ast.KindDefaultClause:
+			if defaultNode != nil {
+				e.refuse(cl, "multiple default clauses are not lowerable")
+				return true
+			}
+			defaultNode = cl
+		default:
+			e.refuse(cl, "switch clause %s is not lowerable", cl.Kind.String())
+			return true
+		}
+	}
+	if len(parts) != 2 && len(parts) != 3 {
+		return false
+	}
+	disc, _ := e.lowerExpr(sw.Expression)
+	endL := e.freshLabel("endswitch")
+	e.pushBreakTarget(endL)
+	// Case values lower up front in order (legacy interleaves them with
+	// bodies, but evaluation order at runtime is fixed by labels; both
+	// arms evaluate exactly once either way).
+	vals := make([]string, len(parts))
+	for i, p := range parts {
+		expr := p.node.AsCaseOrDefaultClause().Expression
+		val, _ := e.lowerExpr(expr)
+		vals[i] = val
+		if e.refused {
+			return true
+		}
+	}
+	bodyLabels := make([]string, len(parts))
+	for i := range parts {
+		bodyLabels[i] = e.freshLabel("case_b")
+	}
+	defaultL := e.freshLabel("case_default")
+	e.needImport("sa_std/control.sal")
+	if len(parts) == 2 {
+		e.emit("EXPAND SWITCH_2 %s, %s, %s, %s, %s, %s", disc, vals[0], bodyLabels[0], vals[1], bodyLabels[1], defaultL)
+	} else {
+		e.emit("EXPAND SWITCH_3 %s, %s, %s, %s, %s, %s, %s, %s", disc, vals[0], bodyLabels[0], vals[1], bodyLabels[1], vals[2], bodyLabels[2], defaultL)
+	}
+	lowerBody := func(cl *ast.Node) {
+		e.pushScope()
+		e.terminated = false
+		for _, s := range cl.AsCaseOrDefaultClause().Statements.Nodes {
+			e.lowerBlockStatement(s)
+		}
+		e.releaseScope()
+		e.popScope()
+		if !e.terminated {
+			e.emit("jmp %s", endL)
+		}
+	}
+	for i, p := range parts {
+		e.emitRaw("%s:", bodyLabels[i])
+		lowerBody(p.node)
+	}
+	e.emitRaw("%s:", defaultL)
+	if defaultNode != nil {
+		lowerBody(defaultNode)
+	} else {
+		e.emit("jmp %s", endL)
+	}
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+	e.breaks = e.breaks[:len(e.breaks)-1]
+	return true
+}
+
 // lowerSwitch emits the guarded case-test chain, mirroring sa_plugin_ts
 // parseSwitch: each case gets a test label (eq scrutinee/case -> body/next
 // test) and a body label; bodies run sequentially so fallthrough is natural;
 // break targets the end label via the breaks stack; an unmatched scrutinee
 // lands on the default body or exits.
 func (e *emitter) lowerSwitch(st *ast.Node) {
+	// 2- and 3-arm switches dispatch through the upstream SWITCH_2/3
+	// macros; everything else keeps the exact legacy chain.
+	if e.tryLowerSwitchMacro(st) {
+		return
+	}
 	sw := st.AsSwitchStatement()
 	disc, _ := e.lowerExpr(sw.Expression)
 	endL := e.freshLabel("endswitch")

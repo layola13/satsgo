@@ -922,6 +922,14 @@
   `TestTernarySelectMacro`（正形 + f64/string 反形）；手跑 pick exit 12 对
   node 一致；`sa check` + 形状 286 绿、投影全过。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ 宏采用第三刀（switch → `EXPAND SWITCH_2/3`，2/3 arms）：
+  判别式 + case 值预求值一次（各一次，与旧路同求值次数）；body/scope/break/
+  default/终止 discipline 镜像旧路；无 default 以 endL 为宏 default 臂；
+  1/4+ arms、重复 default、未知子句逐字走旧路/拒。
+  单测 `TestSwitchMacroDispatch`（2/3 臂正形 + 无 default + 4 臂反形 +
+  多 default 拒文）；286 零翻转（17 switch 文件字节变）；e2e 259/27 同集；
+  `sa check` + 形状 286 绿、投影全过；手跑 sw exit 30。
+  JEV blast-radius local_only/safe_to_apply 82%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
