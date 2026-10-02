@@ -930,6 +930,12 @@
   多 default 拒文）；286 零翻转（17 switch 文件字节变）；e2e 259/27 同集；
   `sa check` + 形状 286 绿、投影全过；手跑 sw exit 30。
   JEV blast-radius local_only/safe_to_apply 82%。
+- ➖ TRY_QMARK/CATCH_CODE 不采用（边界结论，JEV 99%）：
+  该宏需 Result 指针输入；TS 子集无 Result 惯例（`throw`→panic 不可恢复，
+  catch 恒为死代码）、std 投影无 Option/Result 返回，上游头注亦明示真
+  catch-all 需编译器支持。强行采用等于发明 Result 调用惯例（设计变更，
+  不做）。复访条件：子集引入 Result 返回调用惯例之日。
+  control.sal 宏采用至此收官：FOR 三件套 + SELECT + SWITCH_2/3。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
