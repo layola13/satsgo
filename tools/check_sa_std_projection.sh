@@ -96,6 +96,8 @@ node_symbols=(
   sa_node_plugin_path_dirname
   sa_node_plugin_path_extname
   sa_node_plugin_path_basename
+  sa_node_plugin_path_is_absolute
+  sa_node_plugin_fs_exists
   sa_node_plugin_punycode_encode
   sa_node_plugin_punycode_decode
   sa_node_plugin_path_join

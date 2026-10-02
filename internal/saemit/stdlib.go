@@ -60,8 +60,9 @@ type StdProjection struct {
 	// requested size (e.g. randomBytes); "string2"/"string3" expand
 	// two/three leading string slices ahead of the outs; "fire" passes
 	// all string args by value with no outs; "fireF64" adds one f64 out;
-	// "u64out" expands one slice ahead of one u64 out slot; "nullable"
-	// wraps string outs with status 1 mapping to null "0".
+	// "u64out" expands one slice ahead of one u64 out slot; "boolout"
+	// expands one slice ahead of one bool out slot (i32 0/1, status-checked);
+	// "nullable" wraps string outs with status 1 mapping to null "0".
 	// Nonzero status panics (loud; nullable exempts status 1).
 	NodeOut string
 	// Note documents arity/shape adaptation (e.g. string arg expansion).
@@ -260,6 +261,10 @@ var StdProjectionTable = []StdProjection{
 		NodeOut: "string1", Note: "one string arg; status-checked"},
 	{TS: "path.basename", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_basename", Ret: tString,
 		NodeOut: "string2", Note: "path+ext slices; ext required in subset (1-arg refused); status-checked"},
+	{TS: "path.isAbsolute", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_path_is_absolute", Ret: tI32,
+		NodeOut: "boolout", Note: "one path slice; bool out 0/1; status-checked"},
+	{TS: "fs.existsSync", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_fs_exists", Ret: tI32,
+		NodeOut: "boolout", Note: "one path slice; bool out 0/1; status-checked"},
 	// punycode: pure string transforms (IDNA encode/decode), same
 	// string1 shape; no new emitter branch.
 	{TS: "punycode.encode", Module: "node.sai", Backend: "node", Symbol: "sa_node_plugin_punycode_encode", Ret: tString,

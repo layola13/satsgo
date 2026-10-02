@@ -635,6 +635,12 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 	for _, st := range stmts {
 		if st.Kind == ast.KindFunctionDeclaration && st.Name() != nil &&
 			st.Name().Kind == ast.KindIdentifier {
+			// Overload signatures carry no body; the implementation
+			// (with body) registers the signature. Skipping here keeps
+			// funcSigs/params/defaults from the bodiless decl.
+			if st.BodyData().Body == nil {
+				continue
+			}
 			// Entry synthesis renames a colliding user `main`
 			// (definition, signatures and call sites move together).
 			fname := st.Name().Text()
@@ -739,6 +745,12 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 		e.recordClass(st)
 		return
 	case ast.KindFunctionDeclaration:
+		// Overload signatures erase (implementation lowers the body;
+		// mirrors lowerNamespaceMember; lone signatures define nothing
+		// so uses refuse as unknown functions).
+		if st.BodyData().Body == nil {
+			return
+		}
 		e.lowerFunction(st)
 	case ast.KindVariableStatement:
 		// `using`/`await using` dispose at scope exit; even top-level
@@ -9947,8 +9959,9 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 	// one/two/three string slices expanded to (&ptr, len) in-params
 	// ahead of the outs; "fire" passes slices by value with no outs;
 	// "fireF64" adds one f64 out slot; "u64out" adds one u64 out slot;
+	// "boolout" adds one bool out slot (i32 0/1);
 	// "nullable" wraps string outs with status 1 mapping to null "0".
-	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64" || proj.NodeOut == "u64out" || proj.NodeOut == "nullable") {
+	if isPluginBackend(proj) && (proj.NodeOut == "string" || proj.NodeOut == "string1" || proj.NodeOut == "string2" || proj.NodeOut == "string3" || proj.NodeOut == "argv" || proj.NodeOut == "sized" || proj.NodeOut == "fire" || proj.NodeOut == "fireF64" || proj.NodeOut == "u64out" || proj.NodeOut == "boolout" || proj.NodeOut == "nullable") {
 		if proj.NodeOut == "nullable" {
 			// One slice in, string out; status 1 maps to null "0"
 			// (subset null mapping), other nonzero panics. Both arms
@@ -10031,6 +10044,37 @@ func (e *emitter) emitProjCall(proj StdProjection, args []string, pos *ast.Node)
 			e.emit("%s = load %s + 0 as u64", uout, uslot)
 			e.releaseIfOwnedTemp(uslot)
 			return uout, tU64
+		}
+		if proj.NodeOut == "boolout" {
+			// One slice in, bool out (path.isAbsolute/fs.existsSync shape:
+			// plugin writes 0/1 into an out slot, u32 status checked).
+			// Slot is 8 bytes; backends write u32 or u64 0/1, so the low
+			// 4 bytes load as i32 is exact on little-endian.
+			if len(args) != 1 {
+				e.refuse(pos, "%s takes exactly 1 argument", proj.TS)
+				return "0", tUnknown
+			}
+			bp, bl := e.expandSlice(args[0])
+			bslot := e.freshTmp()
+			e.emit("%s = alloc 8", bslot)
+			e.ownTemp(bslot)
+			bst := e.freshTmp()
+			e.emit("%s = call @%s(&%s, %s, &%s)", bst, proj.Symbol, bp, bl, bslot)
+			e.ownTemp(bst)
+			bbadL := e.freshLabel("node_bad")
+			bokL := e.freshLabel("node_ok")
+			bbad := e.freshTmp()
+			e.emit("%s = ne %s, 0", bbad, bst)
+			e.emit("br %s -> %s, %s", bbad, bbadL, bokL)
+			e.emitRaw("%s:", bbadL)
+			e.emit("panic(%d)", panicBackendStatus)
+			e.terminated = true
+			e.emitRaw("%s:", bokL)
+			e.terminated = false
+			bout := e.freshTmp()
+			e.emit("%s = load %s + 0 as i32", bout, bslot)
+			e.releaseIfOwnedTemp(bslot)
+			return bout, tI32
 		}
 		if proj.NodeOut == "fire" || proj.NodeOut == "fireF64" {
 			if proj.NodeOut == "fireF64" && len(args) != 1 {

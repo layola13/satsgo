@@ -403,6 +403,55 @@ func TestLowerNodePath(t *testing.T) {
 	if !r.Refused {
 		t.Fatalf("expected basename 1-arg refusal (ext required), got:\n%s", r.SAI)
 	}
+	abs := "import { isAbsolute } from \"path\";\nfunction main(): i32 {\n  const b: boolean = isAbsolute(\"/a/b\");\n  if (b) { return 1; }\n  return 0;\n}\n"
+	res = mustLower(t, "p6.ts", abs)
+	for _, want := range []string{
+		"call @sa_node_plugin_path_is_absolute",
+		"load ",
+		" as i32",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	absArity := "import { isAbsolute } from \"path\";\nfunction main(): i32 {\n  const b: boolean = isAbsolute();\n  return 0;\n}\n"
+	r = Lower("p7.ts", absArity)
+	if !r.Refused {
+		t.Fatalf("expected isAbsolute arity refusal, got:\n%s", r.SAI)
+	}
+	exists := "import { existsSync } from \"fs\";\nfunction main(): i32 {\n  const b: boolean = existsSync(\"/tmp/x\");\n  if (b) { return 1; }\n  return 0;\n}\n"
+	res = mustLower(t, "p8.ts", exists)
+	for _, want := range []string{
+		"call @sa_node_plugin_fs_exists",
+		" as i32",
+		`@import "node.sai"`,
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	existsArity := "import { existsSync } from \"fs\";\nfunction main(): i32 {\n  const b: boolean = existsSync();\n  return 0;\n}\n"
+	r = Lower("p9.ts", existsArity)
+	if !r.Refused {
+		t.Fatalf("expected existsSync arity refusal, got:\n%s", r.SAI)
+	}
+}
+
+func TestLowerOverloadErasure(t *testing.T) {
+	src := "function add(x: string): i32;\nfunction add(x: number): i32;\nfunction add(x: any): i32 {\n  return 1;\n}\nfunction main(): i32 {\n  return add(1);\n}\n"
+	res := mustLower(t, "ov1.ts", src)
+	if !strings.Contains(res.SAI, "call @add(1)") {
+		t.Errorf("missing implementation call:\n%s", res.SAI)
+	}
+	if strings.Count(res.SAI, "@add(x:") != 1 {
+		t.Errorf("overload signatures must erase to one definition:\n%s", res.SAI)
+	}
+	lone := "function lone(x: string): i32;\nfunction main(): i32 {\n  return lone(1);\n}\n"
+	r := Lower("ov2.ts", lone)
+	if !r.Refused {
+		t.Fatalf("expected lone-signature refusal, got:\n%s", r.SAI)
+	}
 }
 
 func TestLowerNodePunycode(t *testing.T) {

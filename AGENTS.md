@@ -1041,3 +1041,19 @@
   node 后端需插件环境，`sa check` 门禁仍为契约+形状（此批 `sa check`
   止于 `@import "node.sai"` 解析，符合既定口径）。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ node `boolout` 单 slice 布尔扇出（`path.isAbsolute` + `fs.existsSync`，sala 12_node 章 u32 约定；
+  发射器新分支 + 投影表 + 白名单复用 + 契约 + 单测）：
+  `NodeOut "boolout"`（一进一出：`&ptr+len` 进参 + u32 状态检查 + 8 字节槽低 4 字节 `load as i32`；
+  后端写 u32（fs_exists）或 u64（path_is_absolute）0/1，小端低位精确）；
+  `check_sa_std_projection.sh` node 区 40→42（`all_exported_symbols.txt` 精确匹配）；
+  单测 `TestLowerNodePath` 扩展（双正形 + 双元数拒）；
+  全套件绿、`go vet` 干净、投影 62 sa_std + 42 node + 13 deno 全过、
+  形状校验通过；node 后端 `sa check` 门禁仍为契约+形状（既定口径）。
+  JEV blast-radius local_only/safe_to_apply 78%。
+- ✅ 函数重载签名擦除（纯语法点，`lowerSourceFile` 预扫 + `lowerStatement` 双侧跳过无体声明，
+  镜像 `lowerNamespaceMember` 既有范式；实现体唯一注册/发射，孤签名定义无名故调用点诚实拒）：
+  单测 `TestLowerOverloadErasure`（双签名一实现单定义 + 孤签名拒）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run` exit 1 与 node 差分一致。
+  注：无 bun 插件（仓库仅 node/deno），`Bun.*` 投影无后端，待插件先行；std 已全投影到既有后端，语法点优先。
+  JEV blast-radius local_only/safe_to_apply 78%。
