@@ -7930,6 +7930,16 @@ func (e *emitter) lowerTernary(n *ast.Node) (string, saType) {
 	} else if tt == tString || tt == tArray {
 		saname = "ptr"
 	}
+	// Integer arms go through the upstream SELECT macro (value copy via
+	// add; immediates and registers are both legal operands, booleans
+	// arrive as 1/0). f64/ptr arms keep the slot join (SELECT has no
+	// fadd/ptr copy).
+	if tt == tI32 {
+		e.needImport("sa_std/control.sal")
+		out := e.freshTmp()
+		e.emit("EXPAND SELECT %s, %s, %s, %s", out, cond, tv, fv)
+		return out, tt
+	}
 	slot := e.freshTmp()
 	e.emit("%s = alloc 8", slot)
 	e.ownTemp(slot)

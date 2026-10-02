@@ -915,6 +915,13 @@
   单测 `TestForMacroCanonical/LegacyShapes`（三反形锁定）；全套件绿、
   286 无状态翻转（42 循环文件字节变）、e2e 259/27 与基线同集、形状 286 绿、
   投影全过、046 手跑 exit 10。JEV blast-radius local_only/safe_to_apply。
+- ✅ 宏采用第二刀（三元 → `EXPAND SELECT`，整数双臂）：
+  `tt==tI32` 双臂直走 SELECT（freshTmp 直返，无 slot alloc；布尔字面量本就是
+  1/0，立即数经 fixture 实证合法）；f64/ptr/混合晋升/拒保持 slot 旧路。
+  语料零三元（仅 `?.`，不走此路）→ 286 零字节差零翻转；单测
+  `TestTernarySelectMacro`（正形 + f64/string 反形）；手跑 pick exit 12 对
+  node 一致；`sa check` + 形状 286 绿、投影全过。
+  JEV blast-radius local_only/safe_to_apply。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
