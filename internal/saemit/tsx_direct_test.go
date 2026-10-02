@@ -246,3 +246,50 @@ func TestTSXDirectCompose(t *testing.T) {
 		}
 	}
 }
+
+func TestTSXDirectSlot(t *testing.T) {
+	// <Slot /> outlet: callee takes a trailing slot param fed by the
+	// caller's single child; outlet appends it in position.
+	src := "function Box() {\n  return <section>\n    <Slot />\n  </section>;\n}\nfunction Card() {\n  return <div>\n    <Box><b>hi</b></Box>\n  </div>;\n}\n"
+	res := mustLowerDirect(t, "slot.tsx", src)
+	for _, want := range []string{
+		"@render_Box(slot: i64) -> i64:",
+		"call @render_Box(",
+		"call @sax_dom_append_child(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"twokids", "function B() {\n  return <section>\n    <Slot />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>a<b />b</B>\n  </div>;\n}\n", "exactly one child"},
+		{"nooutlet", "function B() {\n  return <span>x</span>;\n}\nfunction C() {\n  return <div>\n    <B>kid</B>\n  </div>;\n}\n", "no <Slot /> outlet"},
+		{"twooutlets", "function B() {\n  return <section>\n    <Slot />\n    <Slot />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>x</B>\n  </div>;\n}\n", "single <Slot /> outlet"},
+		{"slotroot", "function B() {\n  return <Slot />;\n}\n", "cannot be the render root"},
+		{"slotattrs", "function B() {\n  return <section>\n    <Slot id=\"x\" />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>y</B>\n  </div>;\n}\n", "bare <Slot /> only"},
+	}
+	for _, c := range cases {
+		r := LowerTSXDirect("slot_"+c.name+".tsx", c.src)
+		if !r.Refused {
+			t.Errorf("%s: expected refusal, got:\n%s", c.name, r.SAI)
+			continue
+		}
+		found := false
+		for _, d := range r.Diagnostics {
+			if strings.Contains(d.Error(), c.want) {
+				found = true
+			}
+		}
+		if !found {
+			msgs := []string{}
+			for _, d := range r.Diagnostics {
+				msgs = append(msgs, d.Error())
+			}
+			t.Errorf("%s: missing %q, got:\n%s", c.name, c.want, strings.Join(msgs, "\n"))
+		}
+	}
+}

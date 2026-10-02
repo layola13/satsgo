@@ -69,6 +69,13 @@ type tsxDirect struct {
 	// compProps records every same-file component's declared prop names
 	// in order (pre-pass), so parents pass positionally by callee order.
 	compProps map[string][]string
+	// compSlots marks components declaring a bare <Slot /> outlet
+	// (pre-pass). slotParam/slotSeen track the outlet being lowered:
+	// the callee takes one extra `slot: i64` param fed by the caller's
+	// single child.
+	compSlots map[string]bool
+	slotParam string
+	slotSeen  bool
 }
 
 // directHandler is one onClick handler: an @export function taking the
@@ -148,6 +155,7 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 	// parents pass positionally by callee order (lenient: shape errors
 	// refuse precisely during body lowering).
 	x.compProps = map[string][]string{}
+	x.compSlots = map[string]bool{}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
 			continue
@@ -155,7 +163,11 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 		if st.Name() == nil || st.Name().Kind != ast.KindIdentifier {
 			continue
 		}
-		x.compProps[st.Name().Text()] = directPropNames(st)
+		name := st.Name().Text()
+		x.compProps[name] = directPropNames(st)
+		if hasDirectSlot(st) {
+			x.compSlots[name] = true
+		}
 	}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
@@ -170,6 +182,76 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 			return
 		}
 	}
+}
+
+// hasDirectSlot reports whether a component body contains a <Slot />
+// element anywhere (lenient presence for the composition pre-pass;
+// multiplicity and bareness validate during lowering).
+func hasDirectSlot(fn *ast.Node) bool {
+	body := fn.BodyData().Body
+	if body == nil {
+		return false
+	}
+	var walk func(n *ast.Node) bool
+	walk = func(n *ast.Node) bool {
+		switch n.Kind {
+		case ast.KindJsxElement:
+			el := n.AsJsxElement()
+			if isSlotRef(el.OpeningElement) {
+				return true
+			}
+			if el.Children != nil {
+				for _, c := range el.Children.Nodes {
+					if walk(c) {
+						return true
+					}
+				}
+			}
+			return false
+		case ast.KindJsxSelfClosingElement:
+			return isSlotRef(n)
+		case ast.KindJsxFragment:
+			fr := n.AsJsxFragment()
+			if fr.Children != nil {
+				for _, c := range fr.Children.Nodes {
+					if walk(c) {
+						return true
+					}
+				}
+			}
+			return false
+		case ast.KindJsxExpression:
+			return false
+		case ast.KindJsxText:
+			return false
+		}
+		return false
+	}
+	for _, st := range body.Statements() {
+		if st.Kind == ast.KindReturnStatement {
+			if rs := st.AsReturnStatement(); rs.Expression != nil {
+				if walk(rs.Expression) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isSlotRef reports whether open is a <Slot ...> tag reference
+// (bareness validates at the use site).
+func isSlotRef(open *ast.Node) bool {
+	var tagNode *ast.Node
+	switch open.Kind {
+	case ast.KindJsxOpeningElement:
+		tagNode = open.AsJsxOpeningElement().TagName
+	case ast.KindJsxSelfClosingElement:
+		tagNode = open.AsJsxSelfClosingElement().TagName
+	default:
+		return false
+	}
+	return tagNode.Kind == ast.KindIdentifier && tagNode.Text() == "Slot"
 }
 
 // directPropNames extracts declared prop names in order without
@@ -223,6 +305,8 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.handlers = nil
 	x.binds = nil
 	x.handlerSeq = 0
+	x.slotParam = ""
+	x.slotSeen = false
 	psig := ""
 	if len(fn.Parameters()) > 0 {
 		var ok bool
@@ -230,6 +314,19 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 		if !ok {
 			return false
 		}
+		if _, dup := x.params["slot"]; dup {
+			x.refuse(fn, "prop slot is reserved for the <Slot /> outlet param")
+			return false
+		}
+	}
+	// Components declaring a <Slot /> outlet take one extra trailing
+	// `slot: i64` param fed by the caller's single child.
+	if x.compSlots[name] {
+		if psig != "" {
+			psig += ", "
+		}
+		psig += "slot: i64"
+		x.slotParam = "slot"
 	}
 	body := fn.BodyData().Body
 	if body == nil {
@@ -261,9 +358,19 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.e.pushScope()
 	x.e.terminated = false
 	// String params are callee-owned (same convention as normal
-	// functions: the end-of-body release drops them).
+	// functions: the end-of-body release drops them); the slot param
+	// travels the same way.
 	for pname := range x.params {
 		x.e.declareOwned(pname)
+	}
+	if x.slotParam != "" {
+		x.e.declareOwned(x.slotParam)
+		// The slot param is a caller-built DOM handle (like any node
+		// temp), so outlet appends accept it.
+		if x.e.domVars == nil {
+			x.e.domVars = map[string]bool{}
+		}
+		x.e.domVars[x.slotParam] = true
 	}
 	root, ok := x.lowerNode(ret.Expression)
 	if !ok {
@@ -412,6 +519,10 @@ func (x *tsxDirect) lowerDirectUseState(st *ast.Node) bool {
 	ss, ok2 := bindingIdentText(els[1])
 	if !ok1 || !ok2 {
 		x.refuse(st, "component state must be const [x, setX] = useState(\"lit\")")
+		return false
+	}
+	if sv == "slot" {
+		x.refuse(st, "state variable slot is reserved for the <Slot /> outlet param")
 		return false
 	}
 	init := d.Initializer()
@@ -773,8 +884,44 @@ func (x *tsxDirect) lowerHandlerCall(hd directHandler, call *ast.Node) bool {
 	}
 }
 
+// isBareSlot reports whether c is a bare <Slot /> (no attributes, no
+// children).
+func isBareSlot(c *ast.Node) bool {
+	var attrs *ast.Node
+	var kids []*ast.Node
+	switch c.Kind {
+	case ast.KindJsxElement:
+		el := c.AsJsxElement()
+		attrs = el.OpeningElement.AsJsxOpeningElement().Attributes
+		if el.Children != nil {
+			kids = el.Children.Nodes
+		}
+	case ast.KindJsxSelfClosingElement:
+		attrs = c.AsJsxSelfClosingElement().Attributes
+	default:
+		return false
+	}
+	if attrs != nil {
+		empty := true
+		attrs.ForEachChild(func(a *ast.Node) bool {
+			empty = false
+			return true
+		})
+		if !empty {
+			return false
+		}
+	}
+	return len(directNonWhitespace(kids)) == 0
+}
+
 // lowerNode lowers one JSX node to a DOM handle temp.
 func (x *tsxDirect) lowerNode(n *ast.Node) (string, bool) {
+	// <Slot /> only resolves against an enclosing element (handled in
+	// the children loop); as a render root it has no parent.
+	if isSlotKid(n) {
+		x.refuse(n, "<Slot /> cannot be the render root in the direct slice")
+		return "", false
+	}
 	switch n.Kind {
 	case ast.KindJsxElement, ast.KindJsxSelfClosingElement:
 		return x.lowerElement(n)
@@ -786,12 +933,19 @@ func (x *tsxDirect) lowerNode(n *ast.Node) (string, bool) {
 
 // lowerCustomElement lowers <Tag .../> to a direct @render_Tag call
 // with props passed positionally by callee declaration order
-// (exact-match: every declared prop exactly once). Children need a
-// <Slot /> outlet (later slice); onX on components is a prop, and
-// handlers are not strings, so both refuse here.
+// (exact-match: every declared prop exactly once). A callee declaring a
+// <Slot /> outlet takes exactly one child, appended as the trailing
+// `slot` argument; callees without one take none. onX on components is
+// a prop, and handlers are not strings, so both refuse here.
 func (x *tsxDirect) lowerCustomElement(tag string, open, attrs *ast.Node, children []*ast.Node, pos *ast.Node) (string, bool) {
 	e := x.e
-	if len(children) != 0 {
+	kids := directNonWhitespace(children)
+	if x.compSlots[tag] {
+		if len(kids) != 1 {
+			x.refuse(pos, "component <%s> declares <Slot />: pass exactly one child in the direct slice", tag)
+			return "", false
+		}
+	} else if len(kids) != 0 {
 		x.refuse(pos, "component <%s> has no <Slot /> outlet for children in the direct slice", tag)
 		return "", false
 	}
@@ -892,6 +1046,13 @@ func (x *tsxDirect) lowerCustomElement(tag string, open, attrs *ast.Node, childr
 		}
 	}
 	t := e.freshTmp()
+	if x.compSlots[tag] {
+		kh, ok := x.lowerKidNode(kids[0])
+		if !ok {
+			return "", false
+		}
+		args = append(args, kh)
+	}
 	e.emit("%s = call @render_%s(%s)", t, tag, strings.Join(args, ", "))
 	e.ownTemp(t)
 	if e.domTemps == nil {
@@ -899,6 +1060,74 @@ func (x *tsxDirect) lowerCustomElement(tag string, open, attrs *ast.Node, childr
 	}
 	e.domTemps[t] = true
 	return t, true
+}
+
+// directNonWhitespace drops whitespace-only JsxText children (layout
+// whitespace carries no nodes, mirroring the text arm below).
+func directNonWhitespace(children []*ast.Node) []*ast.Node {
+	var out []*ast.Node
+	for _, c := range children {
+		if c.Kind == ast.KindJsxText && strings.TrimSpace(c.AsJsxText().Text) == "" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// makeTextNode builds (not appends) a static single-line text handle.
+func (x *tsxDirect) makeTextNode(s string, pos *ast.Node) (string, bool) {
+	e := x.e
+	ts := e.lowerStringLiteral(s)
+	th, _ := e.lowerDocumentCreate("createTextNode", []string{ts}, []saType{tString}, pos)
+	if e.refused {
+		return "", false
+	}
+	x.useExtern("sax_dom_create_text")
+	return th, true
+}
+
+// lowerKidNode lowers one slot child to a handle: elements recurse,
+// single-line static text builds a node, whole-node {ident}
+// interpolates. Multi-line text would be several nodes (later slice).
+func (x *tsxDirect) lowerKidNode(c *ast.Node) (string, bool) {
+	if isSlotKid(c) {
+		x.refuse(c, "cannot pass <Slot /> as a child in the direct slice")
+		return "", false
+	}
+	switch c.Kind {
+	case ast.KindJsxElement, ast.KindJsxSelfClosingElement:
+		return x.lowerNode(c)
+	case ast.KindJsxText:
+		t := c.AsJsxText().Text
+		if strings.TrimSpace(t) == "" || strings.Contains(strings.TrimSpace(t), "\n") {
+			x.refuse(c, "slot child text must be a single static line in the direct slice")
+			return "", false
+		}
+		return x.makeTextNode(strings.TrimSpace(t), c)
+	case ast.KindJsxExpression:
+		ex := c.AsJsxExpression().Expression
+		if ex == nil || ex.Kind != ast.KindIdentifier {
+			x.refuse(c, "dynamic slot child is not in the direct slice (whole-node {ident} only)")
+			return "", false
+		}
+		return x.interpText(ex.Text(), c)
+	default:
+		x.refuse(c, "dynamic slot child %s is not in the direct slice", c.Kind.String())
+		return "", false
+	}
+}
+
+// isSlotKid reports whether c is a <Slot ...> element reference.
+func isSlotKid(c *ast.Node) bool {
+	switch c.Kind {
+	case ast.KindJsxElement:
+		return isSlotRef(c.AsJsxElement().OpeningElement)
+	case ast.KindJsxSelfClosingElement:
+		return isSlotRef(c)
+	default:
+		return false
+	}
 }
 
 func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
@@ -1050,6 +1279,29 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 		}
 	}
 	for _, c := range children {
+		// <Slot /> appends the caller's kid at the outlet position (at
+		// most one outlet per component; bare only).
+		if isSlotKid(c) {
+			if x.slotParam == "" {
+				x.refuse(c, "Slot outlet without a declared <Slot /> is impossible (internal)")
+				return "", false
+			}
+			if x.slotSeen {
+				x.refuse(c, "single <Slot /> outlet in the direct slice (second outlet)")
+				return "", false
+			}
+			if !isBareSlot(c) {
+				x.refuse(c, "Slot takes no children or attributes (bare <Slot /> only)")
+				return "", false
+			}
+			x.slotSeen = true
+			if _, _, claimed := e.lowerDomMethod(h, "appendChild", []string{x.slotParam}, nil, c); !claimed {
+				x.refuse(c, "appendChild rejected slot node")
+				return "", false
+			}
+			x.useExtern("sax_dom_append_child")
+			continue
+		}
 		var ch string
 		switch c.Kind {
 		case ast.KindJsxElement, ast.KindJsxSelfClosingElement:
@@ -1068,12 +1320,10 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 				if s == "" {
 					continue
 				}
-				ts := e.lowerStringLiteral(s)
-				th, _ := e.lowerDocumentCreate("createTextNode", []string{ts}, []saType{tString}, c)
-				if e.refused {
+				th, ok := x.makeTextNode(s, c)
+				if !ok {
 					return "", false
 				}
-				x.useExtern("sax_dom_create_text")
 				if _, _, claimed := e.lowerDomMethod(h, "appendChild", []string{th}, nil, c); !claimed {
 					x.refuse(c, "appendChild rejected text node")
 					return "", false

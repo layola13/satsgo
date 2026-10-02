@@ -991,6 +991,13 @@
   单测正形 + 5 拒形；`compose.sai` 经 `sa check` 独立通过 + 形状过。
   `Lower()` 零改 → 286 零影响；全套件绿（`count=1`）。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ 路二 Slot 刀（单出口单 kid 透传）：
+  声明 `<Slot />` 的 callee 取尾参 `slot: i64`（名冲突拒），出口处直挂；
+  调用方单 kid（元素/单行文本/`{ident}`）作尾实参；多出口/attrs/根 Slot/
+  传 Slot/零 kid/多 kid 一律大声拒。单测正形 + 5 拒形；
+  `slot.sai` 经 `sa check` 独立通过 + 形状过。
+  `Lower()` 零改 → 286 零影响；全套件绿（`count=1`）。
+  JEV blast-radius local_only/safe_to_apply 80%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
