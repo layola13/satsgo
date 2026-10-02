@@ -2267,6 +2267,9 @@ func (e *emitter) lowerDoWhile(st *ast.Node) {
 func (e *emitter) lowerTry(st *ast.Node) {
 	ts := st.AsTryStatement()
 	if containsThrow(ts.TryBlock) {
+		if e.tryLowerThrowingTry(st, ts) {
+			return
+		}
 		e.refuse(st, "throw inside try is not lowerable (catch cannot resume after panic)")
 		return
 	}
@@ -2293,6 +2296,85 @@ func (e *emitter) lowerTry(st *ast.Node) {
 	}
 	e.emitRaw("%s:", endL)
 	e.terminated = false
+}
+
+// tryLowerThrowingTry lowers the single-throw slice:
+//
+//	try { throw <i32>; } catch (e) { ... } [finally { ... }]
+//
+// The throw transfers to the catch block (no panic): the thrown value is
+// evaluated once and bound to the catch param (if any), the catch body runs,
+// then finally runs. try/finally without catch runs finally then panics.
+// Anything else with a throw (multi-statement prefix/suffix, nested throw
+// inside if/loop, non-i32 throw values) returns false for the legacy loud
+// refusal. No Result/future convention is invented: the value is a plain
+// i32 local, mirroring the zero-value/uninit-decl plumbing.
+func (e *emitter) tryLowerThrowingTry(st *ast.Node, ts *ast.TryStatement) bool {
+	tryStmts := ts.TryBlock.Statements()
+	if len(tryStmts) != 1 || tryStmts[0].Kind != ast.KindThrowStatement {
+		return false
+	}
+	throwSt := tryStmts[0]
+	throwExpr := throwSt.AsThrowStatement().Expression
+	val, vtype := e.lowerExpr(throwExpr)
+	if e.refused {
+		return true
+	}
+	if vtype != tI32 && vtype != tBool {
+		e.refuse(throwSt, "throw value type is not lowerable (catch params carry i32 only)")
+		return true
+	}
+	endL := e.freshLabel("endtry")
+	if ts.CatchClause == nil {
+		if ts.FinallyBlock != nil {
+			e.pushScope()
+			e.terminated = false
+			for _, s := range ts.FinallyBlock.Statements() {
+				e.lowerBlockStatement(s)
+			}
+			e.releaseScope()
+			e.popScope()
+		}
+		e.releaseIfOwnedTemp(val)
+		e.emit("panic(%d)", panicThrow)
+		e.terminated = true
+		return true
+	}
+	cc := ts.CatchClause.AsCatchClause()
+	e.pushScope()
+	if cc.VariableDeclaration != nil {
+		name, ok := bindingNameText(cc.VariableDeclaration)
+		if !ok {
+			e.refuse(cc.VariableDeclaration, "destructured catch params are not in the SA-lowerable subset")
+			e.popScope()
+			return true
+		}
+		e.assignLocal(name, val, operandKind(val, throwExpr), vtype, cc.VariableDeclaration)
+		e.trackBindingAt(name, nil, nil, cc.VariableDeclaration, vtype)
+	} else {
+		e.releaseIfOwnedTemp(val)
+	}
+	e.terminated = false
+	for _, s := range cc.Block.Statements() {
+		e.lowerBlockStatement(s)
+	}
+	e.releaseScope()
+	e.popScope()
+	catchTerm := e.terminated
+	if ts.FinallyBlock != nil {
+		e.pushScope()
+		e.terminated = false
+		for _, s := range ts.FinallyBlock.Statements() {
+			e.lowerBlockStatement(s)
+		}
+		e.releaseScope()
+		e.popScope()
+		e.terminated = e.terminated || catchTerm
+	}
+	if !e.terminated {
+		e.emitRaw("%s:", endL)
+	}
+	return true
 }
 
 // containsThrow reports whether a try body itself can throw (then catch is

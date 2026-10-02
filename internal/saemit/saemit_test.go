@@ -1178,7 +1178,8 @@ func TestCodedPanics(t *testing.T) {
 // gap has no silent counterpart here).
 // Try precision: a throw nested inside a function declared in the try body
 // fires on call, not while the body runs, so the try still lowers (catch
-// dead, finally runs); a direct throw in the body still refuses loudly.
+// dead, finally runs); a single direct `throw <i32>` transfers to catch
+// (value bound to the catch param); other throwing shapes still refuse.
 // SLA parity: neither frontend has exception edges (SLA has no try at all).
 func TestTryNestedFunctionThrow(t *testing.T) {
 	ok := "function main(): i32 {\n  try {\n    const bomb = (): void => {\n      throw \"boom\";\n    };\n  } catch (e) {\n  } finally {\n  }\n  return 7;\n}\n"
@@ -1189,10 +1190,46 @@ func TestTryNestedFunctionThrow(t *testing.T) {
 	bad := "function main(): i32 {\n  try {\n    throw \"boom\";\n  } catch (e) {\n    return 1;\n  }\n  return 7;\n}\n"
 	r := Lower("try_direct.ts", bad)
 	if !r.Refused {
-		t.Fatalf("expected direct-throw-in-try refusal, got:\n%s", r.SAI)
+		t.Fatalf("expected string-throw-in-try refusal, got:\n%s", r.SAI)
+	}
+	if got := diagText(r); !strings.Contains(got, "throw value type is not lowerable (catch params carry i32 only)") {
+		t.Errorf("missing try/throw diagnostic:\n%s", got)
+	}
+	nestedThrow := "function main(): i32 {\n  try {\n    if (1) {\n      throw 1;\n    }\n  } catch (e) {\n    return e;\n  }\n  return 7;\n}\n"
+	r = Lower("try_nested_throw.ts", nestedThrow)
+	if !r.Refused {
+		t.Fatalf("expected nested-throw-in-try refusal, got:\n%s", r.SAI)
 	}
 	if got := diagText(r); !strings.Contains(got, "throw inside try is not lowerable (catch cannot resume after panic)") {
-		t.Errorf("missing try/throw diagnostic:\n%s", got)
+		t.Errorf("missing nested try/throw diagnostic:\n%s", got)
+	}
+}
+
+func TestLowerTryThrowCatch(t *testing.T) {
+	withParam := "function main(): i32 {\n  try {\n    throw 41;\n  } catch (e) {\n    return e;\n  }\n}\n"
+	res := mustLower(t, "try_catch.ts", withParam)
+	if !strings.Contains(res.SAI, "e = 41") || !strings.Contains(res.SAI, "return e") {
+		t.Errorf("throw should bind the catch param, got:\n%s", res.SAI)
+	}
+	bareCatch := "function main(): i32 {\n  let x: i32 = 0;\n  try {\n    throw 7;\n  } catch {\n    x = 9;\n  }\n  return x;\n}\n"
+	res = mustLower(t, "try_bare.ts", bareCatch)
+	if !strings.Contains(res.SAI, "x = 9") {
+		t.Errorf("bare catch should run the handler, got:\n%s", res.SAI)
+	}
+	withFinally := "function main(): i32 {\n  try {\n    throw 1;\n  } catch (e) {\n    return e + 1;\n  } finally {\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "try_finally.ts", withFinally)
+	if !strings.Contains(res.SAI, "return") {
+		t.Errorf("catch+finally should lower, got:\n%s", res.SAI)
+	}
+	noCatch := "function main(): i32 {\n  try {\n    throw 1;\n  } finally {\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "try_nocatch.ts", noCatch)
+	if !strings.Contains(res.SAI, "panic(2501)") {
+		t.Errorf("try/finally throw should panic after finally, got:\n%s", res.SAI)
+	}
+	identThrow := "function main(): i32 {\n  const x: i32 = 1;\n  try {\n    throw x;\n  } catch (e) {\n    return e;\n  }\n  return 0;\n}\n"
+	res = mustLower(t, "try_ident.ts", identThrow)
+	if !strings.Contains(res.SAI, "return e") {
+		t.Errorf("identifier throw should bind the catch param, got:\n%s", res.SAI)
 	}
 }
 

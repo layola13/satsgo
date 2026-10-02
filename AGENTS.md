@@ -1110,3 +1110,11 @@
   全套件绿、286 sweep 286/286 零回退（rc+sha 双口径）、形状校验通过；
   真机 `sa check` 过 + `sa run` exit 41 与 node 差分一致。
   JEV blast-radius local_only/safe_to_apply 89%。
+- ✅ throwing-try单点恢复（`try { throw <i32>; } catch (e)` 纯控制流：throw求值一次绑catch参，
+  裸catch弃值，finally恒跑（catchTerm回填），落空才出endL；try/finally+throw跑完finally后panic；
+  嵌套/多语句/非i32保持大声拒；零Result/future发明）：
+  单测 `TestLowerTryThrowCatch`（具参/裸catch/finally/无catch-panic/标识throw 5形）+
+  `TestTryNestedFunctionThrow` 同步（串throw转新拒文、嵌套throw锁旧拒文）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run`（41/9/2/1）与 node 差分一致。
+  JEV blast-radius local_only/safe_to_apply 86%。
