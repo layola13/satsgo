@@ -454,6 +454,27 @@ func TestLowerOverloadErasure(t *testing.T) {
 	}
 }
 
+func TestLowerUninitDecl(t *testing.T) {
+	src := "function main(): i32 {\n  let x: number;\n  x = 5;\n  return x;\n}\n"
+	res := mustLower(t, "u1.ts", src)
+	if !strings.Contains(res.SAI, "x = 0") {
+		t.Errorf("missing zero placeholder:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "x = 5") {
+		t.Errorf("missing rebind:\n%s", res.SAI)
+	}
+	str := "function main(): i32 {\n  let s: string;\n  s = \"hi\";\n  return s.length;\n}\n"
+	res = mustLower(t, "u2.ts", str)
+	if !strings.Contains(res.SAI, "s = 0") {
+		t.Errorf("missing null placeholder:\n%s", res.SAI)
+	}
+	bad := "function main(): i32 {\n  const c: number;\n  return c;\n}\n"
+	r := Lower("u3.ts", bad)
+	if !r.Refused {
+		t.Fatalf("expected const-no-init refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerNodePunycode(t *testing.T) {
 	src := "import { encode, decode } from \"punycode\";\nfunction main(): i32 {\n  const e: string = encode(\"münchen\");\n  const d: string = decode(\"mnchen-3ya\");\n  return e.length + d.length;\n}\n"
 	res := mustLower(t, "pc1.ts", src)

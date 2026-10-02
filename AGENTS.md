@@ -1057,3 +1057,10 @@
   真机 `sa check` 过 + `sa run` exit 1 与 node 差分一致。
   注：无 bun 插件（仓库仅 node/deno），`Bun.*` 投影无后端，待插件先行；std 已全投影到既有后端，语法点优先。
   JEV blast-radius local_only/safe_to_apply 78%。
+- ✅ 无初始化声明零值化（纯语法点，`lowerVarDeclList` 共路：`let x: T;` 绑定零值，
+  标量 0、f64 0.0、句柄 null "0"，后继 `x = v` 正常 rebind；`const` 无初值仍拒（TS 编译错误），
+  解构无初值仍走解构拒形）：
+  单测 `TestLowerUninitDecl`（number 零占位 + 重绑 + string 空占位 + const 拒）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run` exit 5 对数。
+  JEV blast-radius local_only/needs_regression_tests（回归已补：全套件 + sweep + 形状 + check + run）。

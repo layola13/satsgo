@@ -1315,7 +1315,34 @@ func (e *emitter) lowerVarDeclList(list *ast.Node) {
 		// below via the missing hashAcc entry).
 		e.lastHash = nil
 		if init == nil {
-			e.refuse(d, "declaration without initializer is not lowerable")
+			// `const` without init is a TS compile error (must initialize).
+			if dl.Flags&ast.NodeFlagsConst != 0 {
+				e.refuse(d, "const declarations must be initialized")
+				continue
+			}
+			// Definite-assignment placeholder: `let x: T;` binds the
+			// zero value (scalars 0/0.0, handles null "0") so later
+			// `x = v` rebinds normally; use before assign reads zero.
+			vd := d.AsVariableDeclaration()
+			atype := annotationType(vd.Type)
+			if atype == tUnknown {
+				atype = tI32
+			}
+			zero := "0"
+			if atype == tF64 {
+				zero = "0.0"
+			}
+			if nm := d.Name(); nm != nil && nm.Kind != ast.KindIdentifier {
+				e.refuse(d, "destructuring declarations are not in the SA-lowerable subset")
+				continue
+			}
+			name, ok := bindingNameText(d)
+			if !ok {
+				e.refuse(d, "destructuring declarations are not in the SA-lowerable subset")
+				continue
+			}
+			e.assignLocal(name, zero, "imm", atype, d)
+			e.trackBindingAt(name, vd.Type, nil, d, atype)
 			continue
 		}
 		// Destructuring declarations bind element/field-wise (mirrors
