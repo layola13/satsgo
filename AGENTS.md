@@ -950,6 +950,14 @@
   props/插值/hooks/处理器/组件/spread/危险名一律大声拒（8 拒形锁定）。
   `Lower()` 零改 → 286 零影响（纯加法文件）；全套件绿。
   JEV blast-radius local_only/safe_to_apply 85%。
+- ✅ 路二插值刀（string props + string useState）：
+  解构 string props 进 builder 签名（`name: ptr`，运行时 loads 取对），
+  string `useState` 初值按初挂载常量折叠，整值 `{ident}` 文本/属性插值；
+  整数插值（缺 int→string 原语）、setter 使用、混合文本一律大声拒。
+  `check` 曾报 param `MemoryLeak`，按 callee-owned 惯例补释放后过（`!name`
+  锁定）；`hi.sai` 经 `sa check` 独立通过 + 形状过。
+  `Lower()` 仍零改 → 286 零影响；全套件绿。
+  JEV blast-radius local_only/safe_to_apply 90%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
