@@ -100,6 +100,13 @@ func runBuild(args []string) {
 		os.Exit(2)
 	}
 	dir := fs.Arg(0)
+	// A file argument used to slide through Walk and panic the parser
+	// with a "/." path; fail loudly instead (single files use the
+	// non-build form).
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr, "error: build takes a directory (for single files, drop `build`): %s\n", dir)
+		os.Exit(2)
+	}
 	outDir := *out
 	if outDir == "" {
 		outDir = dir

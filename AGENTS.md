@@ -1004,6 +1004,13 @@
   单测双出口正形 + 数量失配拒；`slots.sai` 经 `sa check` 独立通过 +
   形状过。`Lower()` 零改 → 286 零影响；全套件绿（`count=1`）。
   JEV blast-radius local_only/safe_to_apply 79%。
+- ✅ stage3 收尾刀（CLI 防 panic + #7 勾选 + #6 分批计划）：
+  `tsgo-sa build` 传文件/缺失路径曾直达上游 parser panic（`"/."`），
+  现入口目录校验干净 `exit 2`（三路实测：文件 2/缺失 2/目录正常流）；
+  #7 聚合报错实证可用（`subset-report.txt` 按文件头聚合）予以勾选；
+  #6 注明 pilot 现状并拆 P1 path/url、P2 crypto、P3 http 三批另立项。
+  全套件绿（`count=1`）；`Lower()` 零改。
+  JEV blast-radius local_only/safe_to_apply。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；

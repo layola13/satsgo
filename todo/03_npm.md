@@ -61,7 +61,14 @@ checker 回退在真实 JS 上成立）。
    其次 deno（`Deno.*`→`deno.sai`）、bun（`Bun.*`→`bun.sai`），最后才用 `sa_std` 模拟。
    投影表加 Backend 维度；`@import` 指向插件 `.sai`；u32 状态码 + slot-alloc/load 形状
    与现有 fallible-trio 一致；deno/bun 补投影前先索取 exported-symbols 清单。
-7. [ ] 转译失败的依赖在 `subset-report.txt` 按包聚合报错（不淹没在文件级 diagnostic 里）。
+   现状：pilot 已落（`os.platform/arch/homedir/tmpdir/hostname` → `node.sai`，
+   Backend 维度 + u32 约定 + 37 node 符号门禁全过）；全量分批另立项：
+   P1 path/url/querystring，P2 crypto/hash/uuid，P3 http client/server/websocket，
+   每批按 pilot 模式（映射表 + 单测 + 投影门禁计数递增），deno/bun 待清单。
+7. [x] 转译失败的依赖在 `subset-report.txt` 按包聚合报错（不淹没在文件级 diagnostic 里）。
+   已验证可用（2026-10-02 实测：多文件 program 拒后 `subset-report.txt`
+   按 `lib.ts:`/`main.ts:` 文件头聚合；`Unresolved` 按包聚合见 #6）：
+   拒后只写诊断聚合，`build.sh` 前置 `refused` 门。
 7. [ ] 拉取/审计不管（`sa pkg` 的事），只生成声明。
 
 ### A 通道：SA 原生库（2026-09-29 复用盘点qv）
