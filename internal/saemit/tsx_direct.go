@@ -98,7 +98,7 @@ var airlockExtern = map[string]string{
 	// set_text/remove_attr take temp args (like the other direct calls),
 	// so their decls stay unstarred; bind_event above is the only
 	// starred-const call shape (probed: mixing styles verifies clean).
-	"sax_dom_set_text":   "@extern sax_dom_set_text(node_h: i64, text_ptr: ptr, text_len: u64)",
+	"sax_dom_set_text":    "@extern sax_dom_set_text(node_h: i64, text_ptr: ptr, text_len: u64)",
 	"sax_dom_remove_attr": "@extern sax_dom_remove_attr(node_h: i64, key_ptr: ptr, key_len: u64)",
 }
 
