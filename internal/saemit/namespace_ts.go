@@ -702,12 +702,16 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 			return
 		}
 		// Arrow consts emit callees; pure literals fold (both qualified
-		// via the active prefix inside the shared helpers). Anything
-		// else refuses loudly below.
+		// via the active prefix inside the shared helpers). Mixed
+		// multi-declarator statements split per declarator below.
+		// Anything else refuses loudly at the end.
 		if e.tryTopLevelArrow(m) {
 			return
 		}
 		if e.tryTopLevelConst(m) {
+			return
+		}
+		if e.trySplitMixedConst(m) {
 			return
 		}
 		e.refuse(m, "namespace const initializers must be pure literals or arrows")
@@ -737,6 +741,50 @@ func (e *emitter) lowerNamespaceMember(m *ast.Node) {
 	default:
 		e.refuse(m, "namespace member %s is not lowerable", m.Kind.String())
 	}
+}
+
+// trySplitMixedConst lowers multi-declarator const statements that mix
+// arrow callees with foldable literals (e.g. `export const f = () => 1,
+// K = 2`): arrows emit per declarator through lowerArrowBinding (the
+// same single-shape path tryTopLevelArrow takes), literals are already
+// folded (prescan plus the tryTopLevelConst replay above) and emit
+// nothing. Reports whether the statement was consumed; exotic inits or
+// destructuring return false for the loud refusal at the call site.
+func (e *emitter) trySplitMixedConst(m *ast.Node) bool {
+	dl := m.AsVariableStatement().DeclarationList.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) <= 1 {
+		return false
+	}
+	for _, d := range dl.Declarations.Nodes {
+		nm, ok := bindingNameText(d)
+		if !ok {
+			return false
+		}
+		q := e.nsDefName(nm)
+		init := d.Initializer()
+		if init != nil && (init.Kind == ast.KindArrowFunction || init.Kind == ast.KindFunctionExpression) {
+			continue
+		}
+		if _, ok := e.constVals[q]; ok {
+			continue
+		}
+		if _, ok := e.mathAliases[q]; ok {
+			continue
+		}
+		return false
+	}
+	for _, d := range dl.Declarations.Nodes {
+		nm, _ := bindingNameText(d)
+		init := d.Initializer()
+		if init == nil || (init.Kind != ast.KindArrowFunction && init.Kind != ast.KindFunctionExpression) {
+			continue
+		}
+		e.lowerArrowBinding(e.nsDefName(nm), init, true)
+		if e.refused {
+			return true
+		}
+	}
+	return true
 }
 
 // splitNsQualified splits a flattened "A_B_x" into its longest declared

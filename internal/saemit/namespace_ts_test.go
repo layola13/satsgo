@@ -352,17 +352,34 @@ function main(): i32 {
 	if !strings.Contains(res.SAI, "hi") {
 		t.Errorf("missing folded backtick forward read:\n%s", res.SAI)
 	}
-	// Multi-declarator arrow consts still refuse at the drain (single
-	// arrow consts lower via tryTopLevelArrow, which is single-shape).
+	// Multi-declarator arrow consts split per declarator at the drain:
+	// arrows emit callees (same single-shape path), literals stay folded.
 	mix := `namespace M {
   export const f = () => 1, K = 2;
+  export function g(): i32 {
+    return f() + K;
+  }
+}
+function main(): i32 {
+  return M.f() + M.g() + M.K;
+}
+`
+	res = mustLower(t, "multiconstarrow.ts", mix)
+	if !strings.Contains(res.SAI, "call @M_f()") {
+		t.Errorf("missing mixed-arrow call:\n%s", res.SAI)
+	}
+	// Exotic declarators mixed in still refuse loudly (same diagnostic).
+	badmix := `namespace M {
+  export const f = () => 1, o = { x: 1 };
 }
 function main(): i32 {
   return 0;
 }
 `
-	if r := Lower("multiconstarrow.ts", mix); !r.Refused {
-		t.Fatalf("expected multi-arrow refusal, got:\n%s", r.SAI)
+	if r := Lower("multiconstexotic.ts", badmix); !r.Refused {
+		t.Fatalf("expected exotic-mixed refusal, got:\n%s", r.SAI)
+	} else if got := diagText(r); !strings.Contains(got, "namespace const initializers must be pure literals or arrows") {
+		t.Errorf("missing mixed-const diagnostic, got:\n%s", got)
 	}
 }
 

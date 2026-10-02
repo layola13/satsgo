@@ -936,6 +936,13 @@
   catch-all 需编译器支持。强行采用等于发明 Result 调用惯例（设计变更，
   不做）。复访条件：子集引入 Result 返回调用惯例之日。
   control.sal 宏采用至此收官：FOR 三件套 + SELECT + SWITCH_2/3。
+- ✅ 命名空间 multi-arrow-const 转正（drain 逐声明拆分，JEV t1）：
+  `export const f = () => 1, K = 2` 混合形：箭头逐个经单形发射，字面量
+  沿用已折叠值零发射，异形/解构仍原文拒；prescan 本已逐声明登记，签名零改。
+  单测转正向（`M.f()/M.K()` + 成员互调 + 异形混合拒文锁定）；
+  全套件绿、286 零翻转零字节差（语料无此形，纯加法）、`sa check` + 形状
+  286 绿、投影全过；手跑混合 exit 6（1+3+2）对值。
+  JEV blast-radius local_only/safe_to_apply。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
