@@ -21,6 +21,23 @@
 - 禁止跳过上游直接发明调用惯例（前车：TRY_QMARK 需 Result 惯例不采用）；
   凡有上游对齐必在代码注释写明 `internal/` 文件行，单测锁定对齐行为。
 
+## SA 发射位（用户 2026-10-02 收紧：SA 从 tsgo 生成 JS 的同一管线位置发出）
+
+- JS 管线（`internal/compiler/emitter.go:112 getScriptTransformers`）：
+  tstransforms（类型擦除/import 裁剪/运行时语法/装饰器）→ jsx → `estransforms.GetESTransformer`
+  （`definitions.go:23`，按 target 降级）→ useStrict → 模块变换 → inliners，
+  之后 printer 落字。变换框架：`transformers/transformer.go:8 Transformer`
+ （visitor + `EmitContext` 工厂）+ `chain.go:38 Chain` + `TransformOptions`
+ （Context/CompilerOptions/Resolver/EmitResolver）。
+- SA 插入位即该管线末端：跑同一变换链（按 SA 目标画像取子集），末端 printer
+  换成 SA 落字。每个变换的采用 = 独立 commit + 286 零回退门禁，不批量切。
+- 单文件 `Lower` 对齐 `transpile.TranspileModule`（`transpile.go:93`，
+  IsolatedModules/NoResolve/NoLib）：同为单文件语法口径，是对齐第一目标。
+- 已落地 p1（本节下进展）：修饰符查询与外层表达式解包改调上游 `ast` 工具，
+  手写循环删除，286 零回退实证零行为变更。
+- 台账与分片见 `todo/05_deisland.md`（审计：evaluator/checker 字面量、
+  program 模块解析、transformers 逐构件；不迁：SA 线性所有权/前缀链接/拒诊）。
+
 ## saemit 进展（每完成一个特性即更新本节，规则：完成→写 AGENTS.md→commit→push）
 
 - 2026-09-29：单文件 286/286 demo 全过（`56ad4ec8d`）；todo/ 四阶段计划已定。

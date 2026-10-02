@@ -94,7 +94,7 @@ func dottedBaseName(n *ast.Node) (string, bool) {
 // isAmbientModule reports type-only module blocks: `declare`-modified,
 // string-named (`declare module "./x"`), or `declare global`. All erase.
 func isAmbientModule(st *ast.Node) bool {
-	if hasModifier(st, ast.KindDeclareKeyword) {
+	if ast.HasModifier(st, ast.ModifierFlagsAmbient) {
 		return true
 	}
 	md := st.AsModuleDeclaration()
@@ -247,7 +247,7 @@ func (e *emitter) lowerPendingNamespaces() {
 // memberExported reports an `export`-modified member (namespace-private
 // members lower too, but outside access refuses).
 func memberExported(m *ast.Node) bool {
-	return hasModifier(m, ast.KindExportKeyword)
+	return ast.HasModifier(m, ast.ModifierFlagsExport)
 }
 
 // nsPreScan registers member signatures qualified (forward calls resolve;
@@ -643,7 +643,7 @@ func (e *emitter) registerNsFuncSig(m *ast.Node, q string) {
 // active. Body-less functions are overload signatures (the implementation
 // carries the body); declare-marked members are ambient and skipped.
 func (e *emitter) lowerNamespaceMember(m *ast.Node) {
-	if hasModifier(m, ast.KindDeclareKeyword) {
+	if ast.HasModifier(m, ast.ModifierFlagsAmbient) {
 		return
 	}
 	switch m.Kind {

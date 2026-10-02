@@ -9437,47 +9437,34 @@ type staticVal struct {
 	typ  saType
 }
 
-// hasModifier reports a syntactic modifier keyword on a member.
-func hasModifier(m *ast.Node, kind ast.Kind) bool {
-	mods := m.Modifiers()
-	if mods == nil {
-		return false
-	}
-	for _, md := range mods.Nodes {
-		if md.Kind == kind {
-			return true
-		}
-	}
-	return false
-}
-
 // staticLiteralText unwraps as/satisfies/non-null/angle-assert chains
-// to a static literal value (text, type, ok). Anything else is not foldable.
+// (upstream ast.SkipOuterExpressions with OEKAssertions: identical kind
+// set) to a static literal value (text, type, ok). Anything else is not
+// foldable. Parens intentionally stay opaque, matching upstream call shape.
 func staticLiteralText(n *ast.Node) (string, saType, bool) {
-	for n != nil {
-		switch n.Kind {
-		case ast.KindAsExpression, ast.KindSatisfiesExpression, ast.KindNonNullExpression, ast.KindTypeAssertionExpression:
-			n = n.Expression()
-		case ast.KindNumericLiteral:
-			return n.Text(), tI32, true
-		case ast.KindStringLiteral:
-			if s, ok := stringLiteralText(n); ok {
-				return s, tString, true
-			}
-			return "", tUnknown, false
-		case ast.KindNoSubstitutionTemplateLiteral:
-			// Pure backtick literal: same cooked text the value-position
-			// lowering feeds to lowerStringLiteral (probed identical).
-			return n.Text(), tString, true
-		case ast.KindTrueKeyword:
-			return "1", tBool, true
-		case ast.KindFalseKeyword:
-			return "0", tBool, true
-		default:
-			return "", tUnknown, false
-		}
+	if n == nil {
+		return "", tUnknown, false
 	}
-	return "", tUnknown, false
+	n = ast.SkipOuterExpressions(n, ast.OEKAssertions)
+	switch n.Kind {
+	case ast.KindNumericLiteral:
+		return n.Text(), tI32, true
+	case ast.KindStringLiteral:
+		if s, ok := stringLiteralText(n); ok {
+			return s, tString, true
+		}
+		return "", tUnknown, false
+	case ast.KindNoSubstitutionTemplateLiteral:
+		// Pure backtick literal: same cooked text the value-position
+		// lowering feeds to lowerStringLiteral (probed identical).
+		return n.Text(), tString, true
+	case ast.KindTrueKeyword:
+		return "1", tBool, true
+	case ast.KindFalseKeyword:
+		return "0", tBool, true
+	default:
+		return "", tUnknown, false
+	}
 }
 
 // classDefOf resolves a base name to its class definition through
@@ -9652,7 +9639,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 		if m.Name() == nil || (m.Name().Kind != ast.KindIdentifier && m.Name().Kind != ast.KindPrivateIdentifier) {
 			continue
 		}
-		if !hasModifier(m, ast.KindStaticKeyword) {
+		if !ast.HasModifier(m, ast.ModifierFlagsStatic) {
 			continue
 		}
 		if text, typ, ok := staticLiteralText(pd.Initializer); ok {
@@ -9696,7 +9683,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			l.size = off
 		}
 	}
-	if hasModifier(st, ast.KindAbstractKeyword) {
+	if ast.HasModifier(st, ast.ModifierFlagsAbstract) {
 		def.isAbstract = true
 	}
 	for _, m := range members {
@@ -9714,7 +9701,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			// shadowing owners keep distinct slots); name is final.
 			fname := privFieldKey(name, raw)
 			// Static literal members fold (never instance slots).
-			if hasModifier(m, ast.KindStaticKeyword) {
+			if ast.HasModifier(m, ast.ModifierFlagsStatic) {
 				if text, typ, ok := staticLiteralText(pd.Initializer); ok {
 					if def.statics == nil {
 						def.statics = map[string]staticVal{}
@@ -9762,7 +9749,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 				// instance methods (same-named statics would
 				// shadow/arity-clash the instance entry; static calls
 				// route through lowerClassStaticCall).
-				if hasModifier(m, ast.KindStaticKeyword) {
+				if ast.HasModifier(m, ast.ModifierFlagsStatic) {
 					if def.staticMethods == nil {
 						def.staticMethods = map[string]*ast.Node{}
 					}
@@ -9789,7 +9776,7 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			// reads/writes) and class-name dispatch (static accessors);
 			// super-anchored access stays loud (base dispatch is unowned).
 			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
-				isStatic := hasModifier(m, ast.KindStaticKeyword)
+				isStatic := ast.HasModifier(m, ast.ModifierFlagsStatic)
 				if m.Kind == ast.KindGetAccessor {
 					if isStatic {
 						if def.staticGetters == nil {
