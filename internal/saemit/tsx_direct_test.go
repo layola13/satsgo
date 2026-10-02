@@ -50,7 +50,7 @@ func TestTSXDirectRefuses(t *testing.T) {
 		{"params", "function C({ a }: { a: string }, { b }: { b: string }) {\n  return <div />;\n}\n", "at most one parameter"},
 		{"nonstrprop", "function C({ n }: { n: i32 }) {\n  return <div />;\n}\n", "must be a string in the direct slice"},
 		{"interp", "function C() {\n  return <div>{count}</div>;\n}\n", "not in the direct slice"},
-		{"hook", "function C() {\n  const [n, setN] = useState(0);\n  return <div />;\n}\n", "integers need int→string"},
+		{"hook", "function C() {\n  const [n, setN] = useState(1.5);\n  return <div />;\n}\n", "float"},
 		{"effect", "function C() {\n  useEffect(() => {}, []);\n  return <div />;\n}\n", "must be string useState declarations"},
 		{"handler", "function C() {\n  return <button onClick={() => {}}>x</button>;\n}\n", "handlers slice"},
 		{"custom", "function C() {\n  return <Widget />;\n}\n", "composition slice"},
@@ -103,10 +103,24 @@ func TestTSXDirectInterp(t *testing.T) {
 	if !r.Refused {
 		t.Fatalf("expected setter-use refusal, got:\n%s", r.SAI)
 	}
-	// Integer interpolation refuses (no int→string primitive yet).
-	noint := "function C() {\n  const [c, setC] = useState(0);\n  return <div>{c}</div>;\n}\n"
-	r = LowerTSXDirect("noint.tsx", noint)
+	// Integer/boolean useState initials render through @sa_fmt_i64_into
+	// (sext first, so true/false stay "1"/"0").
+	num := "function C() {\n  const [c, setC] = useState(0);\n  const [b, setB] = useState(true);\n  return <div>{c}{b}</div>;\n}\n"
+	res = mustLowerDirect(t, "num.tsx", num)
+	for _, want := range []string{
+		"@import \"sa_std/fmt.sai\"",
+		"sext ",
+		"call @sa_fmt_i64_into(",
+		"call @sax_dom_create_text(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Float initializers still refuse (no ftoa precision policy yet).
+	fl := "function C() {\n  const [f, setF] = useState(1.5);\n  return <div />;\n}\n"
+	r = LowerTSXDirect("fl.tsx", fl)
 	if !r.Refused {
-		t.Fatalf("expected integer-interp refusal, got:\n%s", r.SAI)
+		t.Fatalf("expected float refusal, got:\n%s", r.SAI)
 	}
 }

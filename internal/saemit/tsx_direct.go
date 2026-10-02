@@ -49,10 +49,13 @@ type tsxDirect struct {
 	used  map[string]bool
 	// params holds string prop names (builder parameters, ptr slices);
 	// strConsts maps useState vars with string-literal initials to their
-	// text (initial-render constants; setters have no render shape);
+	// text (initial-render constants); intConsts maps useState vars with
+	// integer/boolean literal initials to their text (rendered through
+	// renderInterpValue: sext + @sa_fmt_i64_into, so 0/1 stay "0"/"1");
 	// setters marks setter names for loud refusal on use.
 	params    map[string]bool
 	strConsts map[string]string
+	intConsts map[string]string
 	setters   map[string]bool
 }
 
@@ -104,6 +107,7 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.params = map[string]bool{}
 	x.strConsts = map[string]string{}
+	x.intConsts = map[string]string{}
 	x.setters = map[string]bool{}
 	psig := ""
 	if len(fn.Parameters()) > 0 {
@@ -268,71 +272,88 @@ func (x *tsxDirect) lowerDirectUseState(st *ast.Node) bool {
 		return false
 	}
 	arg := ce.Arguments.Nodes[0]
-	if arg.Kind != ast.KindStringLiteral {
-		x.refuse(arg, "only string useState initializers render in the direct slice (integers need int→string)")
-		return false
+	// String initials fold to literals; integer/boolean literals render
+	// through renderInterpValue (sext + @sa_fmt_i64_into, so true/false
+	// stay "1"/"0"); floats need ftoa precision policy (later slice).
+	if arg.Kind == ast.KindStringLiteral {
+		s, ok := stringLiteralText(arg)
+		if !ok {
+			x.refuse(arg, "useState string initializer is not lowerable")
+			return false
+		}
+		if _, dup := x.strConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		if _, dup := x.intConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		x.strConsts[sv] = s
+		x.setters[ss] = true
+		return true
 	}
-	s, ok := stringLiteralText(arg)
-	if !ok {
-		x.refuse(arg, "useState string initializer is not lowerable")
-		return false
+	if arg.Kind == ast.KindNumericLiteral && !isFloatLiteral(arg.Text()) ||
+		arg.Kind == ast.KindTrueKeyword || arg.Kind == ast.KindFalseKeyword {
+		t := "1"
+		if arg.Kind == ast.KindNumericLiteral {
+			t = arg.Text()
+		} else if arg.Kind == ast.KindFalseKeyword {
+			t = "0"
+		}
+		if _, dup := x.intConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		if _, dup := x.strConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		x.intConsts[sv] = t
+		x.setters[ss] = true
+		return true
 	}
-	if _, dup := x.strConsts[sv]; dup {
-		x.refuse(st, "duplicate state variable %s", sv)
-		return false
-	}
-	x.strConsts[sv] = s
-	x.setters[ss] = true
-	return true
+	x.refuse(arg, "only string/integer/boolean useState initializers render in the direct slice (floats need ftoa policy)")
+	return false
 }
 
-// interpValue resolves a whole-node {ident} interpolation to either a
-// string param (dynamic) or a useState literal (constant). Anything else
-// refuses loudly (setters have no render shape; integers need int→string).
-func (x *tsxDirect) interpValue(ident string, n *ast.Node) (param string, lit string, ok bool) {
+// interpSlice resolves a whole-node {ident} interpolation to a string
+// slice handle: string params pass through (ptr to {ptr,len}), string
+// useState literals fold, integer/boolean useState literals render
+// through renderInterpValue (sext + @sa_fmt_i64_into). Anything else
+// refuses loudly (setters have no render shape; floats need ftoa).
+func (x *tsxDirect) interpSlice(ident string, n *ast.Node) (string, bool) {
+	e := x.e
 	if x.params[ident] {
-		return ident, "", true
+		return ident, true
 	}
-	if s, ok2 := x.strConsts[ident]; ok2 {
-		return "", s, true
+	if s, ok := x.strConsts[ident]; ok {
+		return e.lowerStringLiteral(s), true
+	}
+	if t, ok := x.intConsts[ident]; ok {
+		e.needImport("sa_std/fmt.sai")
+		v, ok := e.renderInterpValue(t, tI32, n)
+		if !ok {
+			return "", false
+		}
+		return v, true
 	}
 	if x.setters[ident] {
 		x.refuse(n, "setter %s has no render shape in the direct slice", ident)
-		return "", "", false
+		return "", false
 	}
-	x.refuse(n, "dynamic interpolation {%s} is not in the direct slice (string props and string useState only)", ident)
-	return "", "", false
+	x.refuse(n, "dynamic interpolation {%s} is not in the direct slice (string props and string/integer useState only)", ident)
+	return "", false
 }
 
-// paramSlice loads a string param's (ptr, len) pair (string params arrive
-// as ptr to the {ptr,len} slice struct, mirroring the document path).
-func (x *tsxDirect) paramSlice(p string) (string, string) {
-	e := x.e
-	pp := e.freshTmp()
-	e.emit("%s = load %s + 0 as ptr", pp, p)
-	pl := e.freshTmp()
-	e.emit("%s = load %s + 8 as u64", pl, p)
-	return pp, pl
-}
-
-// interpText builds a text handle for {ident}: params read at runtime,
-// useState literals reuse the static text path.
+// interpText builds a text handle for {ident}.
 func (x *tsxDirect) interpText(ident string, n *ast.Node) (string, bool) {
-	param, lit, ok := x.interpValue(ident, n)
+	e := x.e
+	h, ok := x.interpSlice(ident, n)
 	if !ok {
 		return "", false
 	}
-	e := x.e
-	if param == "" {
-		ts := e.lowerStringLiteral(lit)
-		th, _ := e.lowerDocumentCreate("createTextNode", []string{ts}, []saType{tString}, n)
-		if e.refused {
-			return "", false
-		}
-		x.useExtern("sax_dom_create_text")
-		return th, true
-	}
-	tp, tl := x.paramSlice(param)
+	tp, tl := e.expandSlice(h)
 	t := e.freshTmp()
 	e.emit("%s = call @sax_dom_create_text(%s, %s)", t, tp, tl)
 	e.ownTemp(t)
@@ -439,7 +460,8 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 				return true
 			}
 			// Whole-value {ident} interpolates (params read at runtime,
-			// useState literals fold); other shapes refuse loudly.
+			// useState literals fold, integers render); other shapes
+			// refuse loudly.
 			if at.Initializer.Kind == ast.KindJsxExpression {
 				ex := at.Initializer.AsJsxExpression().Expression
 				if ex == nil || ex.Kind != ast.KindIdentifier {
@@ -447,20 +469,14 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 					done = false
 					return true
 				}
-				param, lit, ok := x.interpValue(ex.Text(), a)
+				vh, ok := x.interpSlice(ex.Text(), a)
 				if !ok {
 					done = false
 					return true
 				}
 				ks := e.lowerStringLiteral(aname)
 				kp, kl := e.expandSlice(ks)
-				var vp, vl string
-				if param != "" {
-					vp, vl = x.paramSlice(param)
-				} else {
-					vs := e.lowerStringLiteral(lit)
-					vp, vl = e.expandSlice(vs)
-				}
+				vp, vl := e.expandSlice(vh)
 				e.emit("call @sax_dom_set_attr(%s, %s, %s, %s, %s)", h, kp, kl, vp, vl)
 				x.useExtern("sax_dom_set_attr")
 				return false

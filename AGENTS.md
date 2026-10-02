@@ -958,6 +958,12 @@
   锁定）；`hi.sai` 经 `sa check` 独立通过 + 形状过。
   `Lower()` 仍零改 → 286 零影响；全套件绿。
   JEV blast-radius local_only/safe_to_apply 90%。
+- ✅ 路二整数插值刀（int/bool useState 经 sa_std `fmt`）：
+  复用既有 `renderInterpValue`（`sext` + `@sa_fmt_i64_into`，`fmt.sai`
+  import），未走 airlock `itoa`（免浏览器即可验）；bool 按 0/1 文本；
+  float 仍拒（缺 ftoa 精度策略）。`int.sai` 经 `sa check` + 形状过。
+  途中修 `true` 节点无 `Text()` 恐慌。`Lower()` 零改 → 286 零影响。
+  JEV blast-radius local_only/safe_to_apply。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
