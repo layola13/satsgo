@@ -1076,8 +1076,10 @@
   （对象 + 数组 + 箭头正形 + rest 拒形）；
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   真机 `sa check` 过；对象形参 `sa run` exit 7 与 node 差分一致。
-  观察项（非本刀，基线同现，sci 侧待查）：计算地址 load
-  （`lowerCheckedIndex` 经 `add` 的地址）在当前 `sa run` 下读回 1，
-  `arr[0]`/`const [a,b] = arr` 皆然，而 `arr.length` 正确；
-  复现：`const arr: i32[] = [10,20]; return arr[0];` → exit 1（期望 10）。
-  JEV blast-radius local_only/needs_regression_tests（回归已补：全套件 + sweep + 形状 + check + run）。
+  观察项（非本刀，基线同现，待独立切片）：数组 backing-store 生命周期——
+  字面量 `store h+0, buf` 后 `!buf` 释放仍被头引用的缓冲（后继索引 load
+  `InvalidAddress`），删之则泄漏检查报 buf 存活（`!` 为浅释放、无 move 语义）；
+  rest 打包、spread 字面量同病（基线二进制对照确认）；
+  `arr.length` 正常而经 `add` 的计算地址 load 全陷；
+  复现：`const arr: i32[] = [10,20]; return arr[0];` → trap（期望 10）。
+  JEV blast-radius local_only/safe_to_apply。
