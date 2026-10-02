@@ -7,6 +7,20 @@
 
 ---
 
+## 上游优先方法论（用户 2026-10-02 立项，satsgo 立足 tsgo 不得自造语义）
+
+- 做特性/修特性前，先读上游 tsgo（同仓 `internal/`）对应实现，再结合 sci 实际
+  （SA 无异常边/无栈展开、子集只认 i32 值）改进：结构沿上游，运行时边自己搭。
+- 三处必查：`binder`（控制流/绑定语义）→ `checker`（类型/窄化）→ `printer`
+  （JS 发射形状即语义基准）。satsgo 的 lowering 必须与三者一致，不一致即 bug。
+- 范例（try/throw）：上游 `binder.go:1997 bindTryStatement` 用 `currentExceptionTarget`
+  标签栈（try 体以异常目标绑定、catch 为异常续体），`bindThrowStatement:1953`
+  求值后流转不可达；`printer.go:3664 emitTryStatement` 结构直通（JS 运行时兜底
+  展开）。sci 侧无展开，故 satsgo 以 `throwTargets` 复刻异常目标栈
+  （求值→绑 catch 参→`releaseForJump`→`jmp catchL`），panic 仅留无 catch 形。
+- 禁止跳过上游直接发明调用惯例（前车：TRY_QMARK 需 Result 惯例不采用）；
+  凡有上游对齐必在代码注释写明 `internal/` 文件行，单测锁定对齐行为。
+
 ## saemit 进展（每完成一个特性即更新本节，规则：完成→写 AGENTS.md→commit→push）
 
 - 2026-09-29：单文件 286/286 demo 全过（`56ad4ec8d`）；todo/ 四阶段计划已定。
