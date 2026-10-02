@@ -187,6 +187,33 @@ func TestLowerClassAccessor(t *testing.T) {
 	}
 }
 
+// Parameter properties follow upstream RuntimeSyntaxTransformer (class member
+// per ident param + this.p = p after super()): accessibility erases to plain
+// slots; explicit wirings win; missing annotations refuse.
+func TestLowerParamProps(t *testing.T) {
+	basic := "class C {\n  constructor(private x: i32) {\n  }\n  get(): i32 {\n    return this.x;\n  }\n}\nfunction main(): i32 {\n  const c = new C(41);\n  return c.get();\n}\n"
+	res := mustLower(t, "pp1.ts", basic)
+	if !strings.Contains(res.SAI, "store") || !strings.Contains(res.SAI, "return") {
+		t.Errorf("param prop should wire the field store, got:\n%s", res.SAI)
+	}
+	mixed := "class B {\n  constructor(private b: i32) {\n  }\n  getB(): i32 {\n    return this.b;\n  }\n}\nclass D extends B {\n  constructor(b: i32, public d: i32) {\n    super(b);\n  }\n  sum(): i32 {\n    return this.getB() + this.d;\n  }\n}\nfunction main(): i32 {\n  const x = new D(40, 1);\n  return x.sum();\n}\n"
+	res = mustLower(t, "pp2.ts", mixed)
+	if !strings.Contains(res.SAI, "return") {
+		t.Errorf("inherited + derived param props should lower, got:\n%s", res.SAI)
+	}
+	explicitWins := "class C {\n  constructor(private x: i32, y: i32) {\n    this.x = y;\n  }\n  get(): i32 {\n    return this.x;\n  }\n}\nfunction main(): i32 {\n  const c = new C(1, 43);\n  return c.get();\n}\n"
+	res = mustLower(t, "pp3.ts", explicitWins)
+	if !strings.Contains(res.SAI, "store") {
+		t.Errorf("explicit wiring should win, got:\n%s", res.SAI)
+	}
+	noAnn := "class C {\n  constructor(private x) {\n  }\n}\nfunction main(): i32 {\n  const c = new C(1);\n  return 0;\n}\n"
+	if r := Lower("pp4.ts", noAnn); !r.Refused {
+		t.Fatalf("expected missing-annotation refusal, got:\n%s", r.SAI)
+	} else if got := diagText(r); !strings.Contains(got, "needs a type annotation") {
+		t.Errorf("missing annotation diagnostic:\n%s", got)
+	}
+}
+
 func TestLowerDefaultReplay(t *testing.T) {
 	src := "function g(a: i32, b: i32 = 2): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return g(1) + g(10, 20);\n}\n"
 	res := mustLower(t, "dr1.ts", src)

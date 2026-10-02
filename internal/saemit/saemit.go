@@ -9809,6 +9809,11 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			e.refuse(m, "class member %s is not lowerable", m.Kind.String())
 		}
 	}
+	// Parameter properties (upstream RuntimeSyntaxTransformer.visitClassDeclaration
+	// synthesizes a PropertyDeclaration per ident param-prop). Accessibility
+	// erases: private/public/protected/readonly all lower as plain instance
+	// slots, matching the plain-`private x` probe. Explicit member fields win.
+	e.recordParamPropFields(def, l, &off, members)
 	l.size = off
 	def.layout = l
 	// Default derived constructor: a subclass without its own ctor inherits
@@ -9837,6 +9842,55 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 		e.classDefs = map[string]*classDef{}
 	}
 	e.classDefs[name] = def
+}
+
+// recordParamPropFields records constructor parameter properties as instance
+// fields (upstream runtimesyntax visitClassDeclaration synthesizes a
+// PropertyDeclaration per ident param-prop; detection via
+// ast.IsParameterPropertyDeclaration, same predicate). Non-ident names and
+// missing annotations refuse loudly (TS-illegal or unsizable); names already
+// present (explicit member or inherited slot) are skipped — the duplicate is
+// a checker error and the existing slot wins.
+func (e *emitter) recordParamPropFields(def *classDef, l *layout, off *int, members []*ast.Node) {
+	var ctor *ast.Node
+	for _, m := range members {
+		if m.Kind == ast.KindConstructor {
+			ctor = m
+			break
+		}
+	}
+	if ctor == nil {
+		return
+	}
+	for _, p := range ctor.Parameters() {
+		pn := p.AsNode()
+		if !ast.IsParameterPropertyDeclaration(pn, ctor) {
+			continue
+		}
+		nm := pn.Name()
+		if nm == nil || nm.Kind != ast.KindIdentifier {
+			e.refuse(pn, "parameter property names must be identifiers")
+			continue
+		}
+		fname := privFieldKey(def.name, nm.Text())
+		if _, dup := l.offsets[fname]; dup {
+			continue
+		}
+		tn := pn.Type()
+		if tn == nil {
+			e.refuse(pn, "parameter property %s needs a type annotation (slot width)", nm.Text())
+			continue
+		}
+		saname := saNameOfType(tn)
+		size, align := widthOf(saname)
+		*off = alignTo(*off, align)
+		l.fields = append(l.fields, fname)
+		l.types[fname] = saname
+		l.ftypes[fname] = rawTypeName(tn)
+		l.fdefs[fname] = tn
+		l.offsets[fname] = *off
+		*off += size
+	}
 }
 
 // lowerNewClass materializes `new Box(...)`: allocates the static layout,
@@ -9900,10 +9954,8 @@ func (e *emitter) lowerNewClass(name string, nw *ast.NewExpression, pos *ast.Nod
 			if def.ctorOwner != "" {
 				owner = def.ctorOwner
 			}
-			for _, s := range body.Statements() {
-				if !e.wireCtorStatement(h, owner, s, paramArg, paramVal, pos) {
-					return h, tArray
-				}
+			if !e.wireCtorBody(h, owner, def.ctor, paramArg, paramVal, pos) {
+				return h, tArray
 			}
 		}
 	}
@@ -9941,24 +9993,31 @@ func (e *emitter) wireCtorStatement(h, className string, s *ast.Node, paramArg m
 		e.refuse(s, "constructor of %s supports only this.f = param wirings", className)
 		return false
 	}
-	def := e.classDefs[className]
-	// Private fields mangle by the constructor's owner (wireCtorStatement
-	// carries it explicitly, like ctorOwner for super).
-	field, ok := e.privResolveOwned(def.layout, pa.Name().Text(), className, s)
-	if !ok {
-		return false
-	}
-	off, ok := def.layout.offsets[field]
-	if !ok {
-		e.refuse(s, "field %s is not in the %s layout", field, className)
-		return false
-	}
-	saname := def.layout.types[field]
 	if bin.Right.Kind != ast.KindIdentifier {
 		e.refuse(s, "constructor wiring right side must be a parameter name")
 		return false
 	}
 	pname := bin.Right.Text()
+	return e.wireCtorFieldStore(h, className, pa.Name().Text(), pname, s, paramArg, paramVal)
+}
+
+// wireCtorFieldStore stores one ctor wiring value (`this.<field> = <param>`)
+// into a fresh instance handle (plus arrow-capture bookkeeping; see
+// lowerNewClass). Reports false after refusing.
+func (e *emitter) wireCtorFieldStore(h, owner, field, pname string, s *ast.Node, paramArg map[string]*ast.Node, paramVal map[string]string) bool {
+	def := e.classDefs[owner]
+	// Private fields mangle by the constructor's owner (wireCtorStatement
+	// carries it explicitly, like ctorOwner for super).
+	rfield, ok := e.privResolveOwned(def.layout, field, owner, s)
+	if !ok {
+		return false
+	}
+	off, ok := def.layout.offsets[rfield]
+	if !ok {
+		e.refuse(s, "field %s is not in the %s layout", rfield, owner)
+		return false
+	}
+	saname := def.layout.types[rfield]
 	if anode, ok := paramArg[pname]; ok && (anode.Kind == ast.KindArrowFunction || anode.Kind == ast.KindFunctionExpression) {
 		// Function-typed field captures the inline arrow per instance.
 		if e.instFnFields == nil {
@@ -9967,7 +10026,7 @@ func (e *emitter) wireCtorStatement(h, className string, s *ast.Node, paramArg m
 		if e.instFnFields[h] == nil {
 			e.instFnFields[h] = map[string]*ast.Node{}
 		}
-		e.instFnFields[h][field] = anode
+		e.instFnFields[h][rfield] = anode
 		zero := e.freshTmp()
 		e.emit("%s = 0", zero)
 		e.emit("store %s + %d, %s as %s", h, off, zero, saname)
@@ -9979,6 +10038,111 @@ func (e *emitter) wireCtorStatement(h, className string, s *ast.Node, paramArg m
 		return false
 	}
 	e.emit("store %s + %d, %s as %s", h, off, v, saname)
+	return true
+}
+
+// paramPropNames lists ident parameter-property names in order (upstream
+// getParameterProperties, ident-only). Non-ident shapes were already refused
+// at record; they are skipped here.
+func paramPropNames(ctor *ast.Node) []string {
+	var out []string
+	for _, p := range ctor.Parameters() {
+		pn := p.AsNode()
+		if !ast.IsParameterPropertyDeclaration(pn, ctor) {
+			continue
+		}
+		if nm := pn.Name(); nm != nil && nm.Kind == ast.KindIdentifier {
+			out = append(out, nm.Text())
+		}
+	}
+	return out
+}
+
+// isSuperCallStatement reports a top-level `super(...)` statement (same shape
+// test as wireSuperCtorStatement).
+func isSuperCallStatement(s *ast.Node) bool {
+	if s.Kind != ast.KindExpressionStatement {
+		return false
+	}
+	ex := s.AsExpressionStatement().Expression
+	if ex.Kind != ast.KindCallExpression {
+		return false
+	}
+	call := ex.AsCallExpression()
+	return call.Expression != nil && call.Expression.Kind == ast.KindSuperKeyword
+}
+
+// wireCtorBody wires ctor body statements in order, injecting parameter-
+// property stores (`this.p = p`) right after the top-level super() statement
+// (or at the top when none) — mirroring upstream visitConstructorBody +
+// transformConstructorBodyWorker. Names the body already wires explicitly
+// (`this.p = ...`) are skipped (explicit wiring wins). Reports false after
+// refusing.
+func (e *emitter) wireCtorBody(h, owner string, ctor *ast.Node, paramArg map[string]*ast.Node, paramVal map[string]string, pos *ast.Node) bool {
+	body := ctor.Body()
+	if body == nil {
+		return true
+	}
+	stmts := body.Statements()
+	wired := map[string]bool{}
+	for _, s := range stmts {
+		if s.Kind != ast.KindExpressionStatement {
+			continue
+		}
+		ex := s.AsExpressionStatement().Expression
+		if ex.Kind != ast.KindBinaryExpression {
+			continue
+		}
+		bin := ex.AsBinaryExpression()
+		if bin.OperatorToken.Kind != ast.KindEqualsToken || bin.Left.Kind != ast.KindPropertyAccessExpression {
+			continue
+		}
+		if pa := bin.Left.AsPropertyAccessExpression(); pa.Expression.Kind == ast.KindThisKeyword && pa.Name() != nil {
+			wired[pa.Name().Text()] = true
+		}
+	}
+	inject := func() bool {
+		if e.refused {
+			// Record already refused (unsizable field): the file is
+			// discarded; skip silently instead of cascading offset noise.
+			return true
+		}
+		for _, pname := range paramPropNames(ctor) {
+			if wired[pname] {
+				continue
+			}
+			if _, ok := paramArg[pname]; !ok {
+				e.refuse(ctor, "parameter property %s has no argument", pname)
+				return false
+			}
+			if !e.wireCtorFieldStore(h, owner, pname, pname, ctor, paramArg, paramVal) {
+				return false
+			}
+		}
+		return true
+	}
+	superIdx := -1
+	for i, s := range stmts {
+		if isSuperCallStatement(s) {
+			superIdx = i
+			break
+		}
+	}
+	if superIdx < 0 {
+		if !inject() {
+			return false
+		}
+	}
+	for i, s := range stmts {
+		if !e.wireCtorStatement(h, owner, s, paramArg, paramVal, pos) {
+			return false
+		}
+		if i == superIdx {
+			if !inject() {
+				return false
+			}
+		}
+	}
 	return true
 }
 

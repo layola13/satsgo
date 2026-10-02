@@ -1157,3 +1157,11 @@
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   真机 `sa check` 过 + `sa run` exit 47 与 node 差分一致。
   JEV blast-radius local_only/safe_to_apply 65%。
+- ✅ 参数属性（读上游 `runtimesyntax.go:657 visitClassDeclaration/Body/Worker` 后改进：
+  字段按成员声明追加（显式/继承槽位优先）、`this.p = p` 注在 `super()` 后
+  （无 super 置顶）、显式 wiring 跳过、可访问性抹平、无标注/非标识拒；
+  `wireCtorFieldStore` 原样抽出，`new` 与 super 委派共走 `wireCtorBody`）：
+  单测 `TestLowerParamProps`（基础/继承/显式优先/无标注拒）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run`（41/42/43）与 node 差分一致。
+  JEV blast-radius local_only/safe_to_apply 95%。

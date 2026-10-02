@@ -5,6 +5,9 @@
 
 ## 已落地
 
+- p1b（参数属性，方法论示范）：读 `runtimesyntax.go:657-760`（成员合成 +
+  构造体首部赋值 + super 后插入）后改进，语义逐项对齐；`IsParameterPropertyDeclaration
+  + HasSyntacticModifier` 直接复用上游判定。
 - p1（`1852a57ea` 后续）：`hasModifier` 手写循环（8 处）→
   `ast.HasModifier` 位掩码（`internal/ast/utilities.go:4147`，
   `modifierflags.go:6-15`，declare→Ambient）；`staticLiteralText` 手写解包链 →

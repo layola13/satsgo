@@ -461,18 +461,11 @@ func (e *emitter) wireSuperCtorStatement(h, className string, s *ast.Node, outer
 	}
 	body := bdef.ctor.Body()
 	if body != nil {
-		for _, bs := range body.Statements() {
-			// Nested super() in the base ctor targets the grandparent;
-			// recurse through the same path with the base as owner.
-			if done, ok := e.wireSuperCtorStatement(h, base, bs, paramVal, pos); done {
-				if !ok {
-					return true, false
-				}
-				continue
-			}
-			if !e.wireCtorStatement(h, base, bs, paramArg, paramVal, pos) {
-				return true, false
-			}
+		// Nested super() in the base ctor targets the grandparent;
+		// the shared body wirer keeps post-super parameter-property
+		// injection aligned for every chain level.
+		if !e.wireCtorBody(h, base, bdef.ctor, paramArg, paramVal, pos) {
+			return true, false
 		}
 	}
 	return true, true
