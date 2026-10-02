@@ -381,6 +381,25 @@ function main(): i32 {
 	} else if got := diagText(r); !strings.Contains(got, "namespace const initializers must be pure literals or arrows") {
 		t.Errorf("missing mixed-const diagnostic, got:\n%s", got)
 	}
+	// File-scope same shape promotes identically (shared helper,
+	// identity outside namespaces).
+	filemix := `const f = () => 3, K = 2;
+function main(): i32 {
+  return f() + K;
+}
+`
+	res = mustLower(t, "filemix.ts", filemix)
+	if !strings.Contains(res.SAI, "call @f()") {
+		t.Errorf("missing file-scope mixed-arrow call:\n%s", res.SAI)
+	}
+	badfile := `const f = () => 3, o = { x: 1 };
+function main(): i32 {
+  return 0;
+}
+`
+	if r := Lower("filemixexotic.ts", badfile); !r.Refused {
+		t.Fatalf("expected file-scope exotic-mixed refusal, got:\n%s", r.SAI)
+	}
 }
 
 func TestLowerNamespaceRefusals(t *testing.T) {

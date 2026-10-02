@@ -943,6 +943,12 @@
   全套件绿、286 零翻转零字节差（语料无此形，纯加法）、`sa check` + 形状
   286 绿、投影全过；手跑混合 exit 6（1+3+2）对值。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ 文件域 multiconst 同形转正（顶层链路复用，零新逻辑）：
+  顶层 `const f = () => 3, K = 2` 经同一 `trySplitMixedConst`
+ （`nsDefName` 域外恒等）；单测加文件域正形 + 异形拒；
+  全套件绿（`count=1`）、286 零翻转零字节差、`sa check` + 形状 286 绿、
+  投影全过；手跑 exit 5（3+2）对值。
+  JEV blast-radius local_only/safe_to_apply。
 - ✅ 路二首刀（JSX → 直接 SA 调用，静态形）：
   新入口 `LowerTSXDirect`（`tsx_direct.go`）：静态元素/文本/串属性直调
   airlock（复用 `dom_proj.go` 发射，`className`→`class` 同映射），按需

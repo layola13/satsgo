@@ -770,6 +770,12 @@ func (e *emitter) lowerStatement(st *ast.Node, topLevel bool) {
 			if e.tryTopLevelConst(st) {
 				return
 			}
+			// Mixed multi-declarator consts (arrows + foldables) split
+			// per declarator (same helper as the namespace drain;
+			// identity outside namespaces).
+			if e.trySplitMixedConst(st) {
+				return
+			}
 			e.refuse(st, "top-level variable statements are not lowerable; move state into function scope")
 			return
 		}
