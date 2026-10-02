@@ -197,3 +197,52 @@ func TestTSXDirectClick(t *testing.T) {
 		}
 	}
 }
+
+func TestTSXDirectCompose(t *testing.T) {
+	// Same-file composition: parent calls the child builder with props
+	// passed positionally by callee order (exact-match); the child root
+	// appends like any node.
+	src := "function Badge({ label }: { label: string }) {\n  return <span>{label}</span>;\n}\nfunction Card({ title }: { title: string }) {\n  return <section>\n    <Badge label={title} />\n    <Badge label=\"hi\" />\n  </section>;\n}\n"
+	res := mustLowerDirect(t, "compose.tsx", src)
+	for _, want := range []string{
+		"@render_Badge(label: ptr) -> i64:",
+		"@render_Card(title: ptr) -> i64:",
+		"call @render_Badge(",
+		"call @sax_dom_append_child(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"missing", "function B({ a }: { a: string }) {\n  return <span>{a}</span>;\n}\nfunction C() {\n  return <div>\n    <B />\n  </div>;\n}\n", "is missing from <B>"},
+		{"unknownprop", "function B({ a }: { a: string }) {\n  return <span>{a}</span>;\n}\nfunction C() {\n  return <div>\n    <B a=\"x\" b=\"y\" />\n  </div>;\n}\n", "unknown prop b"},
+		{"children", "function B() {\n  return <span>x</span>;\n}\nfunction C() {\n  return <div>\n    <B>kid</B>\n  </div>;\n}\n", "no <Slot /> outlet"},
+		{"unknowncomp", "function C() {\n  return <div>\n    <Widget />\n  </div>;\n}\n", "needs the composition slice"},
+		{"handlerprop", "function B({ a }: { a: string }) {\n  return <span>{a}</span>;\n}\nfunction C() {\n  return <div>\n    <B a=\"x\" onClick={(r) => r.setAttribute(\"i\", \"v\")} />\n  </div>;\n}\n", "not a string prop"},
+	}
+	for _, c := range cases {
+		r := LowerTSXDirect("cmp_"+c.name+".tsx", c.src)
+		if !r.Refused {
+			t.Errorf("%s: expected refusal, got:\n%s", c.name, r.SAI)
+			continue
+		}
+		found := false
+		for _, d := range r.Diagnostics {
+			if strings.Contains(d.Error(), c.want) {
+				found = true
+			}
+		}
+		if !found {
+			msgs := []string{}
+			for _, d := range r.Diagnostics {
+				msgs = append(msgs, d.Error())
+			}
+			t.Errorf("%s: missing %q, got:\n%s", c.name, c.want, strings.Join(msgs, "\n"))
+		}
+	}
+}

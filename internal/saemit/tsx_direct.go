@@ -66,6 +66,9 @@ type tsxDirect struct {
 	binds      []directBind
 	handlerSeq int
 	constRefs  map[string]string
+	// compProps records every same-file component's declared prop names
+	// in order (pre-pass), so parents pass positionally by callee order.
+	compProps map[string][]string
 }
 
 // directHandler is one onClick handler: an @export function taking the
@@ -141,6 +144,19 @@ func (x *tsxDirect) refuse(n *ast.Node, format string, args ...any) {
 }
 
 func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
+	// Pre-pass: record every component's declared prop names in order so
+	// parents pass positionally by callee order (lenient: shape errors
+	// refuse precisely during body lowering).
+	x.compProps = map[string][]string{}
+	for _, st := range sf.AsSourceFile().Statements.Nodes {
+		if st.Kind != ast.KindFunctionDeclaration {
+			continue
+		}
+		if st.Name() == nil || st.Name().Kind != ast.KindIdentifier {
+			continue
+		}
+		x.compProps[st.Name().Text()] = directPropNames(st)
+	}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
 			x.refuse(st, "only function components lower (got %s)", st.Kind.String())
@@ -154,6 +170,44 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 			return
 		}
 	}
+}
+
+// directPropNames extracts declared prop names in order without
+// refusing (best-effort for the composition pre-pass; body lowering
+// validates precisely).
+func directPropNames(fn *ast.Node) []string {
+	var out []string
+	params := fn.Parameters()
+	if len(params) != 1 {
+		return out
+	}
+	pd := params[0].AsParameterDeclaration()
+	nm := pd.Name()
+	if nm == nil || nm.Kind != ast.KindObjectBindingPattern {
+		return out
+	}
+	ty := pd.Type
+	if ty == nil || ty.Kind != ast.KindTypeLiteral {
+		return out
+	}
+	tyOf := map[string]bool{}
+	for _, m := range ty.AsTypeLiteralNode().Members.Nodes {
+		if m.Kind != ast.KindPropertySignature {
+			continue
+		}
+		if fname, ok := bindingNameText(m); ok {
+			tyOf[fname] = true
+		}
+	}
+	for _, el := range nm.AsNode().AsBindingPattern().Elements.Nodes {
+		if el.Kind != ast.KindBindingElement {
+			continue
+		}
+		if pname, ok := bindingIdentText(el); ok && tyOf[pname] {
+			out = append(out, pname)
+		}
+	}
+	return out
 }
 
 // lowerComponent lowers one component to a @render_Name builder.
@@ -730,6 +784,123 @@ func (x *tsxDirect) lowerNode(n *ast.Node) (string, bool) {
 	}
 }
 
+// lowerCustomElement lowers <Tag .../> to a direct @render_Tag call
+// with props passed positionally by callee declaration order
+// (exact-match: every declared prop exactly once). Children need a
+// <Slot /> outlet (later slice); onX on components is a prop, and
+// handlers are not strings, so both refuse here.
+func (x *tsxDirect) lowerCustomElement(tag string, open, attrs *ast.Node, children []*ast.Node, pos *ast.Node) (string, bool) {
+	e := x.e
+	if len(children) != 0 {
+		x.refuse(pos, "component <%s> has no <Slot /> outlet for children in the direct slice", tag)
+		return "", false
+	}
+	want := x.compProps[tag]
+	got := map[string]string{}
+	if attrs != nil {
+		done := true
+		attrs.ForEachChild(func(a *ast.Node) bool {
+			if !done {
+				return true
+			}
+			if a.Kind == ast.KindJsxSpreadAttribute {
+				x.refuse(a, "spread props are not in the direct slice")
+				done = false
+				return true
+			}
+			if a.Kind != ast.KindJsxAttribute {
+				return false
+			}
+			at := a.AsJsxAttribute()
+			aname := at.Name().Text()
+			if len(aname) > 2 && aname[0] == 'o' && aname[1] == 'n' && 'A' <= aname[2] && aname[2] <= 'Z' {
+				x.refuse(a, "handler prop %s is not a string prop in the direct slice", aname)
+				done = false
+				return true
+			}
+			// NOTE: no className mapping here (that is a DOM attribute
+			// rule); prop names pass verbatim for exact-match.
+			if _, dup := got[aname]; dup {
+				x.refuse(a, "duplicate prop %s", aname)
+				done = false
+				return true
+			}
+			var h string
+			if at.Initializer == nil {
+				x.refuse(a, "bare prop %s needs a value in the direct slice", aname)
+				done = false
+				return true
+			}
+			switch at.Initializer.Kind {
+			case ast.KindStringLiteral:
+				s, ok := stringLiteralText(at.Initializer)
+				if !ok {
+					x.refuse(a, "prop %s value is not lowerable", aname)
+					done = false
+					return true
+				}
+				h = e.lowerStringLiteral(s)
+			case ast.KindJsxExpression:
+				ex := at.Initializer.AsJsxExpression().Expression
+				if ex == nil || ex.Kind != ast.KindIdentifier {
+					x.refuse(a, "dynamic prop %s is not in the direct slice (whole-value {ident} only)", aname)
+					done = false
+					return true
+				}
+				var ok bool
+				h, ok = x.interpSlice(ex.Text(), a)
+				if !ok {
+					done = false
+					return true
+				}
+			default:
+				x.refuse(a, "non-string prop %s is not in the direct slice", aname)
+				done = false
+				return true
+			}
+			got[aname] = h
+			return false
+		})
+		if !done {
+			return "", false
+		}
+	}
+	// Exact-match against the callee declaration order; unknown or
+	// missing props refuse (mirrors the .sax pass-every-prop rule).
+	args := make([]string, 0, len(want))
+	for _, pname := range want {
+		h, ok := got[pname]
+		if !ok {
+			x.refuse(pos, "prop %s is missing from <%s> (pass every prop)", pname, tag)
+			return "", false
+		}
+		args = append(args, h)
+	}
+	if len(got) != len(want) {
+		for aname := range got {
+			found := false
+			for _, pname := range want {
+				if pname == aname {
+					found = true
+					break
+				}
+			}
+			if !found {
+				x.refuse(pos, "unknown prop %s for <%s>", aname, tag)
+				return "", false
+			}
+		}
+	}
+	t := e.freshTmp()
+	e.emit("%s = call @render_%s(%s)", t, tag, strings.Join(args, ", "))
+	e.ownTemp(t)
+	if e.domTemps == nil {
+		e.domTemps = map[string]bool{}
+	}
+	e.domTemps[t] = true
+	return t, true
+}
+
 func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 	var open *ast.Node
 	var children []*ast.Node
@@ -761,6 +932,15 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 	}
 	tag := tagNode.Text()
 	if tag == "" || (tag[0] >= 'A' && tag[0] <= 'Z') {
+		// Same-file composition: parent calls the child builder with
+		// props passed positionally by callee order (exact-match, like
+		// the .sax consumer). Children need <Slot /> (later slice);
+		// onX on components is a prop, and handlers are not strings.
+		if tag != "" {
+			if _, ok := x.compProps[tag]; ok {
+				return x.lowerCustomElement(tag, open, attrs, children, tagNode)
+			}
+		}
 		x.refuse(tagNode, "custom component <%s> needs the composition slice", tag)
 		return "", false
 	}

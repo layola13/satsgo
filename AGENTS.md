@@ -984,6 +984,13 @@
   float `useState` 初值进 `fltConsts`，沿既有 f64 臂渲染；
   `flt.sai` 经 `sa check` + 形状过。`Lower()` 零改 → 286 零影响。
   JEV blast-radius local_only/safe_to_apply 90%。
+- ✅ 路二组合刀（同文件组件直调，exact-match 传参）：
+  预扫 `compProps` 记各组件 prop 序，父按 callee 序调 `@render_Tag`，
+  prop 值复用插值管线（字面量 + string/int/float 皆通）；children（Slot）、
+  onX 作 prop、未知组件一律大声拒（prop 名逐字传，无 className 映射）。
+  单测正形 + 5 拒形；`compose.sai` 经 `sa check` 独立通过 + 形状过。
+  `Lower()` 零改 → 286 零影响；全套件绿（`count=1`）。
+  JEV blast-radius local_only/safe_to_apply。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
