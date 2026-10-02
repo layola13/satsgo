@@ -150,6 +150,29 @@ func (t *typeCtx) inferredReturnType(fn *ast.Node) (saType, bool) {
 	return out, true
 }
 
+// prescanRet resolves one function declaration's SA return signature
+// with the fixed priority: explicit annotation > co-located .d.ts >
+// checker-inferred concrete scalar > void (todo/02#6). Every signature
+// table (single-file prescan, namespace members, program links) must use
+// it so call sites agree with the emitted definition; a bare
+// annotation-only table against an inferred definition drops call values
+// silently. Nil-tcx safe (scratch prescans keep legacy void).
+func (e *emitter) prescanRet(fn *ast.Node, dts saType, hasDts bool) saType {
+	if fd := fn.AsFunctionDeclaration(); fd.Type != nil {
+		if ret := annotationType(fd.Type); ret != tUnknown {
+			return ret
+		}
+		return tI32
+	}
+	if hasDts {
+		return dts
+	}
+	if rt, ok := e.tcx.inferredReturnType(fn); ok {
+		return rt
+	}
+	return tVoid
+}
+
 // scalarReturnKind maps one checker type to its SA scalar (mirror of
 // annotationType's keyword table: `number` reads i32). any/unknown and
 // all exotic shapes fail.

@@ -492,13 +492,10 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				if hasDefaultModifier(st) {
 					expOf[p].defLocal = name
 				}
-				ret := tVoid
-				if fd := st.AsFunctionDeclaration(); fd.Type != nil {
-					ret = annotationType(fd.Type)
-					if ret == tUnknown {
-						ret = tI32
-					}
-				}
+				// Signature tables share prescanRet so call sites agree with
+				// definitions; the scratch prescan has no tcx yet (legacy
+				// void), the post-swap upgrade below fills checker scalars.
+				ret := scratch.prescanRet(st, tVoid, false)
 				expOf[p].rets[name] = ret
 				globalRets[p][name] = ret
 				params := st.Parameters()
@@ -885,6 +882,111 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 	// Lower in dependency order (leaves first; reachable is post-order).
 	order := append([]string{}, reachable...)
 	res.Files = order
+	// Checker return upgrade helpers (todo/02#6): fill concrete scalar
+	// returns for unannotated functions once checker trees are swapped
+	// in. Annotated and .d.ts contracts never upgrade; re-exported
+	// inferred returns refuse (their copies snapshotted void).
+	seenUpRefuse := map[string]bool{}
+	var upgradeOneRet func(tc *typeCtx, m *ast.Node, prefix, p string)
+	upgradeOneRet = func(tc *typeCtx, m *ast.Node, prefix, p string) {
+		if m.Name() == nil || m.Name().Kind != ast.KindIdentifier {
+			return
+		}
+		if m.AsFunctionDeclaration().Type != nil {
+			return
+		}
+		raw := m.Name().Text()
+		qname := raw
+		if prefix != "" {
+			qname = prefix + "_" + raw
+		}
+		if _, ok := dtsSigs[p][raw]; ok {
+			return
+		}
+		if _, ok := dtsSigs[p][qname]; ok {
+			return
+		}
+		if cur, ok := globalRets[p][qname]; !ok || cur != tVoid {
+			return
+		}
+		rt, ok := tc.inferredReturnType(m)
+		if !ok {
+			return
+		}
+		globalRets[p][qname] = rt
+		if ex, ok := expOf[p]; ok && ex.rets != nil {
+			if _, ok := ex.rets[qname]; ok {
+				ex.rets[qname] = rt
+			}
+		}
+		disp := p + "." + raw
+		if prefix != "" {
+			disp = p + "." + qname
+		}
+		refuseUp := func(edge string) {
+			if seenUpRefuse[edge] {
+				return
+			}
+			seenUpRefuse[edge] = true
+			res.Refused = true
+			res.Diagnostics = append(res.Diagnostics, fmt.Sprintf("%s: re-export of function %s with checker-inferred return type needs an explicit `-> T` return annotation", edge, disp))
+		}
+		for _, q2 := range reachable {
+			if q2 == p {
+				continue
+			}
+			ex2 := expOf[q2]
+			if ex2 == nil {
+				continue
+			}
+			for local, edge := range ex2.reexp {
+				parts := strings.SplitN(edge, "\x00", 2)
+				if len(parts) != 2 || parts[0] != p {
+					continue
+				}
+				if parts[1] != raw && parts[1] != qname {
+					continue
+				}
+				// Own definitions shadow (no copy is taken); note the
+				// check must use linkKindTmp, not globalRets: the
+				// pre-upgrade resolution already copied void into
+				// downstream rets maps, which would masquerade as own.
+				if linkKindTmp[q2][local] == "function" {
+					continue
+				}
+				refuseUp(q2)
+			}
+			for _, tgt := range ex2.starFrom {
+				if tgt != p {
+					continue
+				}
+				if linkKindTmp[q2][qname] == "function" {
+					continue
+				}
+				refuseUp(q2 + " *")
+			}
+		}
+	}
+	var upgradeNsRets func(tc *typeCtx, members []*ast.Node, prefix, p string)
+	upgradeNsRets = func(tc *typeCtx, members []*ast.Node, prefix, p string) {
+		for _, m := range members {
+			switch m.Kind {
+			case ast.KindModuleDeclaration:
+				if isAmbientModule(m) {
+					continue
+				}
+				if nm, ok := moduleDeclName(m); ok {
+					sub := nm
+					if prefix != "" {
+						sub = prefix + "_" + nm
+					}
+					upgradeNsRets(tc, moduleMemberStmts(m), sub, p)
+				}
+			case ast.KindFunctionDeclaration:
+				upgradeOneRet(tc, m, prefix, p)
+			}
+		}
+	}
 	// Shared binder/checker over the reachable set (nil-safe fallback).
 	// Type-reached files join the set so cross-file types resolve, even
 	// though their bodies never lower.
@@ -898,6 +1000,24 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 		}
 		return m
 	}())
+	upgradeFileTopRets := func(tc *typeCtx, sf *ast.SourceFile, p string) {
+		if sf == nil {
+			return
+		}
+		for _, st := range sf.AsSourceFile().Statements.Nodes {
+			switch st.Kind {
+			case ast.KindFunctionDeclaration:
+				upgradeOneRet(tc, st, "", p)
+			case ast.KindModuleDeclaration:
+				if isAmbientModule(st) {
+					continue
+				}
+				if nm, ok := moduleDeclName(st); ok {
+					upgradeNsRets(tc, moduleMemberStmts(st), nm, p)
+				}
+			}
+		}
+	}
 	if tcx != nil {
 		defer tcx.close()
 		// Prefer the checker's trees for node-identity type queries.
@@ -905,6 +1025,24 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 			if psf := tcx.prog.GetSourceFile("/" + strings.TrimPrefix(p, "/")); psf != nil {
 				parsed[p] = psf
 			}
+		}
+		// Checker return upgrade (todo/02#6): the scratch prescan ran
+		// without a checker, so unannotated functions seeded void. Fill
+		// concrete scalars now so call sites agree with definitions.
+		// Priority mirrors prescanRet: annotated and .d.ts contracts are
+		// never clobbered (only void seeds upgrade). Re-exported
+		// inferred returns refuse loudly: their propagated copies were
+		// already snapshotted void, so importers would drop values
+		// silently; an explicit `-> T` annotation is the fix (pre-feature
+		// these programs refused at definition lowering, so no
+		// previously-passing program changes outcome).
+		for _, p := range reachable {
+			upgradeFileTopRets(tcx, parsed[p], p)
+		}
+		// Re-exported inferred returns refuse before any lowering emits
+		// definition/call pairs that would disagree (see upgradeOneRet).
+		if res.Refused {
+			return res
 		}
 	}
 	// Every linked top-level name for the "import it first" diagnostic.

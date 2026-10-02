@@ -883,16 +883,25 @@
   形状 286 全过、投影 62 sa_std + 37 node + 13 deno 全过；
   本容器无 `sa` 二进制，真机 e2e 以结构校验代替（既定口径）。
   JEV blast-radius local_only/needs_regression_tests（回归已补）。
-- ✅ 返回类型 checker 推断第五刀（todo/02#6，`inferredReturnType` + `scalarReturnKind`）：
+- ✅ 返回类型 checker 推断第五刀（todo/02#6，`inferredReturnType` + `scalarReturnKind` + `prescanRet` 五处同源）：
   无注解函数经签名返回类型定 `-> T`（`number→i32` 与注解同形，`boolean` 按 `true|false`
   全体一致折叠，`any`/分歧联合/异形恒大声拒，方言注解盲区诚实回退）；
   途中修出两潜伏：`tUnknown` 字面即 `"i32"` 致哨兵恒假（改独立 bool 哨兵）、
   `string` 签名渲染为 `ptr`（断言按实际）。
+  真机 e2e 抓出真 bug 并修：定义已 `-> i32` 但预扫 `funcSigs` 仍 void 致调用点丢值
+  （`return add(1,2)` 下沉为 `return 0`）；现五处签名表（函数入口/单文件预扫/
+  命名空间成员/程序预扫/箭头）同源 `prescanRet`，程序侧 post-swap 升级直链，
+  re-export/star 边对推断名诚实拒（显式 `-> T` 即解，status-quo 前本就整程序拒）。
   聚类依据：npm 单文件重测 lodash-es 35/609、date-fns 262/1912 与基线一致（零 panic），
   Top 簇（无注解返回 247/顶层变量/跨文件调用）皆 program 通道 artifacts，非 Kind 可杀，
   故本刀只收有类型 TS 形，JS-any 形保持诚实拒。
-  单测 `TestInferredReturnScalar/Refuses`（4 过形 + any/union 拒形，原拒文逐字锁）；
-  全套件绿、286 sweep 双二进制零 diff、形状 286 全过、投影 62+37+13 全过。
-  JEV blast-radius local_only/needs_regression_tests（回归已补）。
+  单测 `TestInferredReturnScalar/Refuses/Program`（4 过形 + any/union 拒形 + 跨文件绑定 +
+  re-export 拒文，原拒文逐字锁）；全套件绿、286 sweep 双二进制零 diff、形状 286 全过、
+  投影 62+37+13 全过；真机（`npm i -g @salang/sa` + libllvm14t64 + Zig 0.14.1）：
+  `sa check` 286 全过，build-exe+node 对数 259 通过，27 失败 = 18 fs/net 环境项 +
+  9 基线逐字节一致预存，feat 对 add/isPos 得 exit 3/7 与 node 一致。
+  JEV blast-radius local_only（回归已补）；edge-screen 空缺省维度 40% 存疑——
+  空/缺省参数本质 `any|undefined`，checker 路径恒拒，已有 any/union 拒测覆盖。
 - 特权备忘（用户 2026-10-02 授予）：sci 难啃特性可用宏降级（如 try/for）；
   候选：try 异常边、async 状态机、数组内存模型（待 sci 侧先定模型后启用）。
+  另：本容器已装 `sa 0.1.3`（npm）+ libllvm14t64 + Zig 0.14.1，真机 e2e 门禁不再用结构校验代替。

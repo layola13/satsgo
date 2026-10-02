@@ -652,16 +652,8 @@ func (e *emitter) lowerSourceFile(sf *ast.SourceFile) {
 				}
 				e.localDefs[regName] = true
 			}
-			ret := tVoid
-			if fd := st.AsFunctionDeclaration(); fd.Type != nil {
-				ret = annotationType(fd.Type)
-				if ret == tUnknown {
-					ret = tI32
-				}
-			} else if r, ok := e.dtsRet[regName]; ok {
-				ret = r
-			}
-			e.funcSigs[regName] = ret
+			dts, hasDts := e.dtsRet[regName]
+			e.funcSigs[regName] = e.prescanRet(st, dts, hasDts)
 			// Direct top-level definitions (vs link-seeded signatures):
 			// namespace prescan refuses genuine @label collisions but
 			// exempts seeded member signatures (same entity).
@@ -897,24 +889,14 @@ func (e *emitter) lowerFunction(fn *ast.Node) {
 	e.inFunc = true
 	// Missing annotation means void (mirrors the `-> T` rule: a
 	// value-returning function must declare it). The pre-scan agrees.
-	// Top-level unannotated bodies take co-located .d.ts returns.
-	// Otherwise the checker decides concrete scalar returns (todo/02#6:
-	// `number` reads i32 exactly like its keyword annotation; anything
-	// exotic keeps the legacy loud refusal in lowerReturn).
+	// Top-level unannotated bodies take co-located .d.ts returns;
+	// otherwise the checker decides concrete scalar returns (todo/02#6).
 	e.retType = tVoid
-	if fd := fn.AsFunctionDeclaration(); fd.Type != nil {
-		e.retType = annotationType(fd.Type)
-		if e.retType == tUnknown {
-			e.retType = tI32
-		}
-	} else if !savedInFunc {
-		if r, ok := e.dtsRet[name]; ok {
-			e.retType = r
-		} else if rt, ok := e.tcx.inferredReturnType(fn); ok {
-			e.retType = rt
-		}
-	} else if rt, ok := e.tcx.inferredReturnType(fn); ok {
-		e.retType = rt
+	if !savedInFunc {
+		dts, hasDts := e.dtsRet[name]
+		e.retType = e.prescanRet(fn, dts, hasDts)
+	} else {
+		e.retType = e.prescanRet(fn, tVoid, false)
 	}
 	for _, p := range params {
 		pname, ok := bindingNameText(p.AsNode())

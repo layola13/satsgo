@@ -594,13 +594,7 @@ func (e *emitter) nsNameTaken(q string) bool {
 // registerNsFuncSig pre-registers one qualified function signature
 // (mirrors the lowerSourceFile pre-scan: ret, arity, defaults, rest).
 func (e *emitter) registerNsFuncSig(m *ast.Node, q string) {
-	ret := tVoid
-	if fd := m.AsFunctionDeclaration(); fd.Type != nil {
-		ret = annotationType(fd.Type)
-		if ret == tUnknown {
-			ret = tI32
-		}
-	}
+	ret := e.prescanRet(m, tVoid, false)
 	if e.funcSigs == nil {
 		e.funcSigs = map[string]saType{}
 	}
