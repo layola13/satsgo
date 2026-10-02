@@ -905,6 +905,16 @@
 - 特权备忘（用户 2026-10-02 授予）：sci 难啃特性可用宏降级（如 try/for）；
   候选：try 异常边、async 状态机、数组内存模型（待 sci 侧先定模型后启用）。
   另：本容器已装 `sa 0.1.3`（npm）+ libllvm14t64 + Zig 0.14.1，真机 e2e 门禁不再用结构校验代替。
+  sci 源码全 LLVM 构建并装入 `/usr/local/bin/sa`（上游已是最新 `c6d27892`，零 behind）。
+- ✅ 上游 control.sal 宏采用首刀（C-for → `EXPAND FOR_INIT/CHECK/NEXT`）：
+  仅规范形（`let i=L0; i<L1; i++/+=K`，非负整数字面 bound/step；`ult` vs `slt`
+  等价域外一律 legacy，标识符 bound/负值/`<=`/递减/零步长逐字保留）；
+  作用域/标号/break-continue/终止 discipline 与 legacy 同序，释放行必在
+  `FOR_NEXT` 自带回跳之前（e2e 抓出并修一次死代码错序，067 exit 6 复绿）。
+  附 `check_sai_shape.py` 放行 `EXPAND`（展开由 `sa check` 权威验）。
+  单测 `TestForMacroCanonical/LegacyShapes`（三反形锁定）；全套件绿、
+  286 无状态翻转（42 循环文件字节变）、e2e 259/27 与基线同集、形状 286 绿、
+  投影全过、046 手跑 exit 10。JEV blast-radius local_only/safe_to_apply。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；

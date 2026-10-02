@@ -42,6 +42,11 @@ def check(path):
         line = raw.strip()
         if not line or line.startswith("//") or line.startswith("@import") or line.startswith("@const") or line.startswith("@extern"):
             continue
+        # EXPAND lines are compiler directives (macro bodies verify
+        # post-expansion under `sa check`, the authority here); they are
+        # transparent to block-shape tracking like @import.
+        if line.startswith("EXPAND "):
+            continue
         if line.startswith("@"):
             m = SIG.match(line)
             if not m:

@@ -1697,7 +1697,218 @@ func (e *emitter) lowerWhile(st *ast.Node) {
 	e.conts = e.conts[:len(e.conts)-1]
 }
 
+// nonNegIntLiteral reports whether n is a non-negative integer literal
+// (decimal digits only: floats, hex and negatives stay legacy).
+func nonNegIntLiteral(n *ast.Node) (string, bool) {
+	if n == nil || n.Kind != ast.KindNumericLiteral {
+		return "", false
+	}
+	t := n.Text()
+	if t == "" || isFloatLiteral(t) {
+		return "", false
+	}
+	for i := 0; i < len(t); i++ {
+		if t[i] < '0' || t[i] > '9' {
+			return "", false
+		}
+	}
+	return t, true
+}
+
+// canonicalForStep matches i++ / ++i / i += K / i = i + K (either order)
+// with a literal step K >= 1, reporting the step text.
+func canonicalForStep(ctr string, incr *ast.Node) (string, bool) {
+	if incr == nil {
+		return "", false
+	}
+	isCtr := func(n *ast.Node) bool {
+		return n != nil && n.Kind == ast.KindIdentifier && n.Text() == ctr
+	}
+	switch incr.Kind {
+	case ast.KindPostfixUnaryExpression:
+		un := incr.AsPostfixUnaryExpression()
+		if un.Operator == ast.KindPlusPlusToken && isCtr(un.Operand) {
+			return "1", true
+		}
+	case ast.KindPrefixUnaryExpression:
+		un := incr.AsPrefixUnaryExpression()
+		if un.Operator == ast.KindPlusPlusToken && isCtr(un.Operand) {
+			return "1", true
+		}
+	case ast.KindBinaryExpression:
+		bin := incr.AsBinaryExpression()
+		switch bin.OperatorToken.Kind {
+		case ast.KindPlusEqualsToken:
+			if isCtr(bin.Left) {
+				if k, ok := nonNegIntLiteral(bin.Right); ok && k != "0" {
+					return k, true
+				}
+			}
+		case ast.KindEqualsToken:
+			if !isCtr(bin.Left) || bin.Right == nil || bin.Right.Kind != ast.KindBinaryExpression {
+				return "", false
+			}
+			add := bin.Right.AsBinaryExpression()
+			if add.OperatorToken.Kind != ast.KindPlusToken {
+				return "", false
+			}
+			if isCtr(add.Left) {
+				if k, ok := nonNegIntLiteral(add.Right); ok && k != "0" {
+					return k, true
+				}
+			} else if isCtr(add.Right) {
+				if k, ok := nonNegIntLiteral(add.Left); ok && k != "0" {
+					return k, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// canonicalForShape matches for (let i = L0; i < L1; step) with
+// non-negative integer literal bounds and a positive literal step,
+// reporting the counter and operand texts. Anything else (<=, calls,
+// identifier bounds, floats, zero step) returns false for the legacy
+// path.
+//
+// Bound note: the FOR_CHECK macro compares with ult (unsigned) while
+// the legacy condition lowers to slt (signed); the shapes agree exactly
+// when the counter never goes negative (non-negative L0, positive
+// step) and the bound is a non-negative literal. An identifier bound
+// stays legacy: a negative value in the register would iterate ~2^64
+// times under ult while slt exits immediately.
+func canonicalForShape(fs *ast.ForStatement) (ctr, lo, hi, step string, ok bool) {
+	init := fs.Initializer
+	if init != nil && init.Kind == ast.KindVariableStatement {
+		init = init.AsVariableStatement().DeclarationList
+	}
+	if init == nil || init.Kind != ast.KindVariableDeclarationList {
+		return "", "", "", "", false
+	}
+	dl := init.AsVariableDeclarationList()
+	if len(dl.Declarations.Nodes) != 1 {
+		return "", "", "", "", false
+	}
+	d := dl.Declarations.Nodes[0]
+	nm, good := bindingNameText(d)
+	if !good {
+		return "", "", "", "", false
+	}
+	lo, good = nonNegIntLiteral(d.Initializer())
+	if !good {
+		return "", "", "", "", false
+	}
+	cond := fs.Condition
+	if cond == nil || cond.Kind != ast.KindBinaryExpression {
+		return "", "", "", "", false
+	}
+	bin := cond.AsBinaryExpression()
+	if bin.OperatorToken.Kind != ast.KindLessThanToken {
+		return "", "", "", "", false
+	}
+	if bin.Left == nil || bin.Left.Kind != ast.KindIdentifier || bin.Left.Text() != nm {
+		return "", "", "", "", false
+	}
+	hi, good = nonNegIntLiteral(bin.Right)
+	if !good {
+		return "", "", "", "", false
+	}
+	step, good = canonicalForStep(nm, fs.Incrementor)
+	if !good {
+		return "", "", "", "", false
+	}
+	return nm, lo, hi, step, true
+}
+
+// tryLowerForMacro lowers canonical counted loops through the upstream
+// control.sal macros (EXPAND FOR_INIT / FOR_CHECK / FOR_NEXT) instead of
+// hand-rolled br sequences. Scope, label, break/continue and termination
+// discipline mirrors lowerFor exactly; the never-taken elision matches
+// too. Reports whether it emitted (anything else falls to legacy).
+func (e *emitter) tryLowerForMacro(st *ast.Node) bool {
+	fs := st.AsForStatement()
+	ctr, lo, hi, step, ok := canonicalForShape(fs)
+	if !ok {
+		return false
+	}
+	e.pushScope()
+	if fs.Initializer != nil {
+		switch fs.Initializer.Kind {
+		case ast.KindVariableStatement:
+			e.lowerVarStatement(fs.Initializer)
+		case ast.KindVariableDeclarationList:
+			e.lowerVarDeclList(fs.Initializer)
+		default:
+			e.lowerExpr(fs.Initializer)
+		}
+	}
+	// Never-taken C loops emit the init only (same dead-code rule).
+	if fs.Condition != nil && e.isFalseConst(fs.Condition) {
+		e.releaseScope()
+		e.popScope()
+		e.terminated = false
+		return true
+	}
+	e.needImport("sa_std/control.sal")
+	topL := e.freshLabel("for_top")
+	bodyL := e.freshLabel("for_body")
+	endL := e.freshLabel("for_end")
+	// `continue` lands before the increment (execution order, mirroring
+	// the legacy cont label); continue-free loops keep no dead label.
+	contL := ""
+	contTgt := topL
+	needCont := fs.Incrementor != nil && bodyHasContinue(fs.Statement)
+	if needCont {
+		contL = e.freshLabel("for_cont")
+		contTgt = contL
+	}
+	e.pushLoopTargets(endL, contTgt)
+	e.emit("EXPAND FOR_INIT %s, %s", ctr, lo)
+	e.emitRaw("%s:", topL)
+	e.emit("EXPAND FOR_CHECK %s, %s, %s, %s", ctr, hi, bodyL, endL)
+	e.emitRaw("%s:", bodyL)
+	e.pushScope()
+	e.terminated = false
+	seenCont := e.contJumps
+	e.lowerBranchBody(fs.Statement)
+	// Increment runs past the loop body (execution order, not parse
+	// order). FOR_NEXT carries its own back-jump, unlike the legacy
+	// incrementor which needs an explicit jmp after it. Body-scope
+	// releases go BEFORE it: anything after its jump would be dead
+	// code (FallthroughForbidden). Order mirrors the legacy tail
+	// (releases, then back-edge); releaseScope itself stays silent on
+	// terminated bodies exactly as before.
+	if needCont {
+		e.emitRaw("%s:", contL)
+	}
+	doIncr := !e.terminated || (needCont && e.contJumps > seenCont)
+	if doIncr {
+		e.terminated = false
+	}
+	e.releaseScope()
+	if doIncr {
+		e.emit("EXPAND FOR_NEXT %s, %s, %s", ctr, step, topL)
+	}
+	e.popScope()
+	// No trailing jmp: FOR_NEXT carries its own back-jump when emitted,
+	// and when it wasn't (terminated body, no continue used it) control
+	// falls through to endL exactly like the legacy tail.
+	e.emitRaw("%s:", endL)
+	e.terminated = false
+	e.releaseScope()
+	e.popScope()
+	e.breaks = e.breaks[:len(e.breaks)-1]
+	e.conts = e.conts[:len(e.conts)-1]
+	return true
+}
+
 func (e *emitter) lowerFor(st *ast.Node) {
+	// Canonical counted loops go through the upstream control.sal
+	// macros; everything else keeps the exact legacy shape.
+	if e.tryLowerForMacro(st) {
+		return
+	}
 	fs := st.AsForStatement()
 	e.pushScope()
 	if fs.Initializer != nil {
