@@ -50,7 +50,7 @@ func TestTSXDirectRefuses(t *testing.T) {
 		{"params", "function C({ a }: { a: string }, { b }: { b: string }) {\n  return <div />;\n}\n", "at most one parameter"},
 		{"nonstrprop", "function C({ n }: { n: i32 }) {\n  return <div />;\n}\n", "must be a string in the direct slice"},
 		{"interp", "function C() {\n  return <div>{count}</div>;\n}\n", "not in the direct slice"},
-		{"hook", "function C() {\n  const [n, setN] = useState(1.5);\n  return <div />;\n}\n", "float"},
+		{"hook", "function C() {\n  const x = 1;\n  return <div />;\n}\n", "useState"},
 		{"effect", "function C() {\n  useEffect(() => {}, []);\n  return <div />;\n}\n", "must be string useState declarations"},
 		{"handler", "function C() {\n  return <button onClick={() => {}}>x</button>;\n}\n", "handlers slice"},
 		{"custom", "function C() {\n  return <Widget />;\n}\n", "composition slice"},
@@ -117,11 +117,17 @@ func TestTSXDirectInterp(t *testing.T) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
 		}
 	}
-	// Float initializers still refuse (no ftoa precision policy yet).
-	fl := "function C() {\n  const [f, setF] = useState(1.5);\n  return <div />;\n}\n"
-	r = LowerTSXDirect("fl.tsx", fl)
-	if !r.Refused {
-		t.Fatalf("expected float refusal, got:\n%s", r.SAI)
+	// Float initials render through @sa_fmt_f64_into at precision 6
+	// (the template-interpolation policy).
+	fl := "function C() {\n  const [f, setF] = useState(1.5);\n  return <div>{f}</div>;\n}\n"
+	res = mustLowerDirect(t, "fl.tsx", fl)
+	for _, want := range []string{
+		"call @sa_fmt_f64_into(",
+		"call @sax_dom_create_text(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
 	}
 }
 

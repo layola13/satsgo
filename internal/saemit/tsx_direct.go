@@ -56,6 +56,7 @@ type tsxDirect struct {
 	params    map[string]bool
 	strConsts map[string]string
 	intConsts map[string]string
+	fltConsts map[string]string
 	setters   map[string]bool
 	// handlers accumulates onClick handlers (emitted as @export fns
 	// after the builder); binds pairs element handles with handlers
@@ -163,6 +164,7 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.params = map[string]bool{}
 	x.strConsts = map[string]string{}
 	x.intConsts = map[string]string{}
+	x.fltConsts = map[string]string{}
 	x.setters = map[string]bool{}
 	x.handlers = nil
 	x.binds = nil
@@ -375,7 +377,8 @@ func (x *tsxDirect) lowerDirectUseState(st *ast.Node) bool {
 	arg := ce.Arguments.Nodes[0]
 	// String initials fold to literals; integer/boolean literals render
 	// through renderInterpValue (sext + @sa_fmt_i64_into, so true/false
-	// stay "1"/"0"); floats need ftoa precision policy (later slice).
+	// stay "1"/"0"); floats render through @sa_fmt_f64_into at precision
+	// 6 (the established template-interpolation policy).
 	if arg.Kind == ast.KindStringLiteral {
 		s, ok := stringLiteralText(arg)
 		if !ok {
@@ -387,6 +390,10 @@ func (x *tsxDirect) lowerDirectUseState(st *ast.Node) bool {
 			return false
 		}
 		if _, dup := x.intConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		if _, dup := x.fltConsts[sv]; dup {
 			x.refuse(st, "duplicate state variable %s", sv)
 			return false
 		}
@@ -410,19 +417,41 @@ func (x *tsxDirect) lowerDirectUseState(st *ast.Node) bool {
 			x.refuse(st, "duplicate state variable %s", sv)
 			return false
 		}
+		if _, dup := x.fltConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
 		x.intConsts[sv] = t
 		x.setters[ss] = true
 		return true
 	}
-	x.refuse(arg, "only string/integer/boolean useState initializers render in the direct slice (floats need ftoa policy)")
+	if arg.Kind == ast.KindNumericLiteral && isFloatLiteral(arg.Text()) {
+		if _, dup := x.strConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		if _, dup := x.intConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		if _, dup := x.fltConsts[sv]; dup {
+			x.refuse(st, "duplicate state variable %s", sv)
+			return false
+		}
+		x.fltConsts[sv] = arg.Text()
+		x.setters[ss] = true
+		return true
+	}
+	x.refuse(arg, "only string/integer/boolean/float useState initializers render in the direct slice")
 	return false
 }
 
 // interpSlice resolves a whole-node {ident} interpolation to a string
 // slice handle: string params pass through (ptr to {ptr,len}), string
 // useState literals fold, integer/boolean useState literals render
-// through renderInterpValue (sext + @sa_fmt_i64_into). Anything else
-// refuses loudly (setters have no render shape; floats need ftoa).
+// through renderInterpValue (sext + @sa_fmt_i64_into), floats through
+// @sa_fmt_f64_into at precision 6. Anything else refuses loudly
+// (setters have no render shape).
 func (x *tsxDirect) interpSlice(ident string, n *ast.Node) (string, bool) {
 	e := x.e
 	if x.params[ident] {
@@ -439,11 +468,19 @@ func (x *tsxDirect) interpSlice(ident string, n *ast.Node) (string, bool) {
 		}
 		return v, true
 	}
+	if t, ok := x.fltConsts[ident]; ok {
+		e.needImport("sa_std/fmt.sai")
+		v, ok := e.renderInterpValue(t, tF64, n)
+		if !ok {
+			return "", false
+		}
+		return v, true
+	}
 	if x.setters[ident] {
 		x.refuse(n, "setter %s has no render shape in the direct slice", ident)
 		return "", false
 	}
-	x.refuse(n, "dynamic interpolation {%s} is not in the direct slice (string props and string/integer useState only)", ident)
+	x.refuse(n, "dynamic interpolation {%s} is not in the direct slice (string props and string/integer/float useState only)", ident)
 	return "", false
 }
 

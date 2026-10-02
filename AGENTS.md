@@ -979,6 +979,10 @@
   `click.sai` 经 `sa check` 独立通过 + 形状过（形状工具 SIG 认 `@export`）。
   `Lower()` 零改 → 286 零影响；全套件绿。
   JEV blast-radius local_only/safe_to_apply 75%。
+- ✅ 路二 float 插值刀（`@sa_fmt_f64_into` 精度 6，模板既有策略）：
+  float `useState` 初值进 `fltConsts`，沿既有 f64 臂渲染；
+  `flt.sai` 经 `sa check` + 形状过。`Lower()` 零改 → 286 零影响。
+  JEV blast-radius local_only/safe_to_apply 90%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
