@@ -180,6 +180,22 @@ func (e *emitter) inheritClass(name, base string, def *classDef, l *layout, st *
 			def.setters[k] = v
 		}
 	}
+	if def.staticGetters == nil {
+		def.staticGetters = map[string]*ast.Node{}
+	}
+	for k, v := range bdef.staticGetters {
+		if _, ok := def.staticGetters[k]; !ok {
+			def.staticGetters[k] = v
+		}
+	}
+	if def.staticSetters == nil {
+		def.staticSetters = map[string]*ast.Node{}
+	}
+	for k, v := range bdef.staticSetters {
+		if _, ok := def.staticSetters[k]; !ok {
+			def.staticSetters[k] = v
+		}
+	}
 	if def.statics == nil {
 		def.statics = map[string]staticVal{}
 	}

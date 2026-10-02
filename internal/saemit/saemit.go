@@ -7923,15 +7923,43 @@ func (e *emitter) lowerPropertyAccessInner(n *ast.Node) (string, saType) {
 		v, t := e.emitModLoadField(ms, mf, n)
 		return v, t
 	}
-	// Accessor reads refuse precisely (inlining with `this` binding and
-	// side-effect ordering is a later slice: no same-class inline
-	// machinery exists to reuse for super either — demand probe 2026-10-01
-	// zero across 286, first real use case triggers; jev_thinking).
-	if pa.Expression.Kind == ast.KindIdentifier {
-		if cd := e.classDefOf(pa.Expression.Text()); cd != nil {
-			if _, ok := cd.getters[pa.Name().Text()]; ok {
-				e.refuse(n, "getter %s.%s needs inline support (not yet)", pa.Expression.Text(), pa.Name().Text())
-				return "0", tUnknown
+	// Accessor reads inline the getter body with `this` bound (instance
+	// reads; static reads dispatch on the class name with empty this).
+	// Anything else (super anchors, unknown members) stays loud below.
+	// (Previous shape refused here unconditionally: "needs inline
+	// support (not yet)".)
+	if pa.Expression.Kind == ast.KindIdentifier || (pa.Expression.Kind == ast.KindThisKeyword && e.thisSelf != "") {
+		recv := e.thisSelf
+		bareClass := false
+		if pa.Expression.Kind == ast.KindIdentifier {
+			recv = pa.Expression.Text()
+			if _, isClass := e.classDefs[recv]; isClass {
+				if _, isInst := e.varClass[recv]; !isInst {
+					bareClass = true
+				}
+			}
+		}
+		if cd := e.classDefOf(recv); cd != nil {
+			if bareClass {
+				if gn, ok := cd.staticGetters[pa.Name().Text()]; ok {
+					owner := cd.name
+					if o, ok := cd.methodOwner[pa.Name().Text()]; ok {
+						owner = o
+					}
+					v, t, _ := e.inlineClassMethod("", cd.name, owner, pa.Name().Text(), gn, []string{}, nil, n)
+					return v, t
+				}
+				if _, ok := cd.getters[pa.Name().Text()]; ok {
+					e.refuse(n, "getter %s.%s is an instance getter (static reads need a static getter)", pa.Expression.Text(), pa.Name().Text())
+					return "0", tUnknown
+				}
+			} else if gn, ok := cd.getters[pa.Name().Text()]; ok {
+				owner := cd.name
+				if o, ok := cd.methodOwner[pa.Name().Text()]; ok {
+					owner = o
+				}
+				v, t, _ := e.inlineClassMethod(recv, cd.name, owner, pa.Name().Text(), gn, []string{}, nil, n)
+				return v, t
 			}
 		}
 	}
@@ -8132,12 +8160,32 @@ func (e *emitter) lowerFieldStore(target *ast.Node, rhs string) bool {
 	} else {
 		segs = append([]string{cur.Text()}, segs...)
 	}
-	// Accessor writes refuse precisely (same inline-support reason:
-	// no inline machinery exists; first real use case triggers —
-	// demand probe 2026-10-01 zero; jev_thinking t2).
-	if cd := e.classDefOf(segs[0]); cd != nil {
-		if _, ok := cd.setters[segs[len(segs)-1]]; ok {
-			e.refuse(cur, "setter %s.%s needs inline support (not yet)", segs[0], segs[len(segs)-1])
+	// Accessor writes inline the setter body with the RHS bound (instance
+	// writes; static writes dispatch on the class name with empty this).
+	// Super-anchored access stays loud (base dispatch is unowned).
+	if cd := e.classDefOf(segs[0]); cd != nil && cur.Kind != ast.KindSuperKeyword {
+		last := segs[len(segs)-1]
+		bareClass := false
+		if _, isClass := e.classDefs[segs[0]]; isClass {
+			if _, isInst := e.varClass[segs[0]]; !isInst {
+				bareClass = true
+			}
+		}
+		owner := cd.name
+		if o, ok := cd.methodOwner[last]; ok {
+			owner = o
+		}
+		if bareClass {
+			if sn, ok := cd.staticSetters[last]; ok {
+				e.inlineClassMethod("", cd.name, owner, last, sn, []string{rhs}, nil, cur)
+				return true
+			}
+			if _, ok := cd.setters[last]; ok {
+				e.refuse(cur, "setter %s.%s is an instance setter (static writes need a static setter)", segs[0], last)
+				return true
+			}
+		} else if sn, ok := cd.setters[last]; ok {
+			e.inlineClassMethod(segs[0], cd.name, owner, last, sn, []string{rhs}, nil, cur)
 			return true
 		}
 	}
@@ -9200,6 +9248,10 @@ type classDef struct {
 	// precisely until inline support lands; the class itself lowers).
 	getters map[string]*ast.Node
 	setters map[string]*ast.Node
+	// staticGetters/staticSetters record `static get/set` apart (class-name
+	// dispatch inlines them with empty this, mirroring staticMethods).
+	staticGetters map[string]*ast.Node
+	staticSetters map[string]*ast.Node
 	// statics folds `static X = <literal>` (methods/getters excluded;
 	// non-literal statics keep the legacy instance-layout path).
 	statics map[string]staticVal
@@ -9559,19 +9611,35 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 				def.methodOwner[m.Name().Text()] = name
 			}
 		case ast.KindGetAccessor, ast.KindSetAccessor:
-			// Accessors record bodies for precise read/write refusal;
-			// inlining them is a later slice (side effects live inside).
+			// Accessors record bodies for call-site inlining (instance
+			// reads/writes) and class-name dispatch (static accessors);
+			// super-anchored access stays loud (base dispatch is unowned).
 			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
+				isStatic := hasModifier(m, ast.KindStaticKeyword)
 				if m.Kind == ast.KindGetAccessor {
-					if def.getters == nil {
-						def.getters = map[string]*ast.Node{}
+					if isStatic {
+						if def.staticGetters == nil {
+							def.staticGetters = map[string]*ast.Node{}
+						}
+						def.staticGetters[m.Name().Text()] = m
+					} else {
+						if def.getters == nil {
+							def.getters = map[string]*ast.Node{}
+						}
+						def.getters[m.Name().Text()] = m
 					}
-					def.getters[m.Name().Text()] = m
 				} else {
-					if def.setters == nil {
-						def.setters = map[string]*ast.Node{}
+					if isStatic {
+						if def.staticSetters == nil {
+							def.staticSetters = map[string]*ast.Node{}
+						}
+						def.staticSetters[m.Name().Text()] = m
+					} else {
+						if def.setters == nil {
+							def.setters = map[string]*ast.Node{}
+						}
+						def.setters[m.Name().Text()] = m
 					}
-					def.setters[m.Name().Text()] = m
 				}
 			}
 		case ast.KindSemicolonClassElement:
@@ -9794,14 +9862,20 @@ func (e *emitter) lowerClassStaticCall(className, method string, args []string, 
 // body joins through a value slot.
 func (e *emitter) inlineClassMethod(thisSelf, className, owner, method string, mn *ast.Node, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
 	def := e.classDefs[className]
+	if mn.Body() == nil {
+		e.refuse(pos, "%s.%s has no body (overload signatures do not inline)", className, method)
+		return "0", tUnknown, true
+	}
 	params := mn.Parameters()
 	var anodeList []*ast.Node
 	if argNodes != nil {
 		anodeList = argNodes.Nodes
 	}
 	// Arity counts lowered args (arrows arrive as markers with nodes).
+	// Setter inlines pass argNodes == nil (single already-lowered RHS);
+	// the lowered-arg count still enforces exactly one value.
 	nArgs := len(args)
-	if len(anodeList) != len(params) || nArgs != len(params) {
+	if nArgs != len(params) || (argNodes != nil && len(anodeList) != len(params)) {
 		e.refuse(pos, "%s.%s takes %d arguments", className, method, len(params))
 		return "0", tUnknown, true
 	}

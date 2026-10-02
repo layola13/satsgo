@@ -1101,3 +1101,12 @@
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   真机 `sa check` 过 + `sa run`（单文件 3、跨文件 3、命名空间 5）与 node 差分一致。
   JEV blast-radius local_only/safe_to_apply 59%。
+- ✅ 存取器内联（getter/setter 经 `inlineClassMethod` 复用：实例读/写 `this` 绑定，
+  类名静态分发空 this，裸类误用实例存取器/超类锚点大声拒；`staticGetters/Setters`
+  独表 + 继承拷贝 + `recordClassNamed` 静态拆分；无体签名防内联 + setter nil-argNodes
+  元数修正）：
+  单测 `TestLowerClassAccessor`（实例/静态正形 + 裸类误用拒 + 无体拒）+
+  `TestLowerAccessorRefuse` 翻转为内联期望；
+  全套件绿、286 sweep 286/286 零回退（rc+sha 双口径）、形状校验通过；
+  真机 `sa check` 过 + `sa run` exit 41 与 node 差分一致。
+  JEV blast-radius local_only/safe_to_apply 89%。

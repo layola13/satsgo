@@ -166,6 +166,27 @@ func TestLowerClassStaticCall(t *testing.T) {
 	}
 }
 
+func TestLowerClassAccessor(t *testing.T) {
+	src := "class C {\n  _v: i32 = 0;\n  get v(): i32 {\n    return this._v;\n  }\n  set v(n: i32) {\n    this._v = n;\n  }\n}\nfunction main(): i32 {\n  const c = new C();\n  c.v = 41;\n  return c.v;\n}\n"
+	res := mustLower(t, "ac1.ts", src)
+	if !strings.Contains(res.SAI, "L_m_end") {
+		t.Errorf("missing inlined accessor body:\n%s", res.SAI)
+	}
+	sg := "class C {\n  static _w: i32 = 7;\n  static get w(): i32 {\n    return 8;\n  }\n  static set w(n: i32) {\n  }\n}\nfunction main(): i32 {\n  C.w = 1;\n  return C.w;\n}\n"
+	res = mustLower(t, "ac2.ts", sg)
+	if !strings.Contains(res.SAI, "L_m_end") {
+		t.Errorf("missing inlined static accessor body:\n%s", res.SAI)
+	}
+	bareInst := "class C {\n  _v: i32 = 0;\n  get v(): i32 {\n    return this._v;\n  }\n}\nfunction main(): i32 {\n  return C.v;\n}\n"
+	if r := Lower("ac3.ts", bareInst); !r.Refused {
+		t.Fatalf("expected bare-class instance-getter refusal, got:\n%s", r.SAI)
+	}
+	bodiless := "class C {\n  m(x: string): i32;\n  m(x: number): i32;\n}\nfunction main(): i32 {\n  const c = new C();\n  return c.m(1);\n}\n"
+	if r := Lower("ac4.ts", bodiless); !r.Refused {
+		t.Fatalf("expected bodiless-method refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerDefaultReplay(t *testing.T) {
 	src := "function g(a: i32, b: i32 = 2): i32 {\n  return a + b;\n}\nfunction main(): i32 {\n  return g(1) + g(10, 20);\n}\n"
 	res := mustLower(t, "dr1.ts", src)
@@ -885,39 +906,21 @@ func TestLowerArrowCaptureSharedWalk(t *testing.T) {
 }
 
 func TestLowerAccessorRefuse(t *testing.T) {
-	// Classes carrying unread getters lower; reads refuse precisely.
+	// Classes carrying unread getters lower; reads inline the body.
 	cls := "class C {\n  v: i32;\n  get g(): i32 { return this.v; }\n}\nfunction main(): i32 {\n  const c = new C();\n  return 1;\n}\n"
 	res := mustLower(t, "ac1.ts", cls)
 	_ = res
-	// Getter reads refuse with the accessor diagnostic (not generic).
+	// Getter reads inline (was: precise refusal).
 	rd := "class C {\n  v: i32;\n  get g(): i32 { return this.v; }\n}\nfunction main(): i32 {\n  const c = new C();\n  return c.g;\n}\n"
-	r := Lower("ac2.ts", rd)
-	if !r.Refused {
-		t.Fatalf("expected getter refusal, got:\n%s", r.SAI)
+	res = mustLower(t, "ac2.ts", rd)
+	if !strings.Contains(res.SAI, "L_m_end") {
+		t.Errorf("missing inlined getter body:\n%s", res.SAI)
 	}
-	hit := false
-	for _, d := range r.Diagnostics {
-		if strings.Contains(d.Error(), "getter") {
-			hit = true
-		}
-	}
-	if !hit {
-		t.Errorf("want getter diagnostic, got %v", r.Diagnostics)
-	}
-	// Setter writes refuse precisely.
-	wr := "class C {\n  v: i32;\n  set s(x: i32) { }\n}\nfunction main(): i32 {\n  const c = new C();\n  c.s = 1;\n  return 1;\n}\n"
-	r = Lower("ac3.ts", wr)
-	if !r.Refused {
-		t.Fatalf("expected setter refusal, got:\n%s", r.SAI)
-	}
-	hit = false
-	for _, d := range r.Diagnostics {
-		if strings.Contains(d.Error(), "setter") {
-			hit = true
-		}
-	}
-	if !hit {
-		t.Errorf("want setter diagnostic, got %v", r.Diagnostics)
+	// Setter writes inline (was: precise refusal).
+	wr := "class C {\n  v: i32;\n  set s(x: i32) { this.v = x; }\n}\nfunction main(): i32 {\n  const c = new C();\n  c.s = 1;\n  return 1;\n}\n"
+	res = mustLower(t, "ac3.ts", wr)
+	if !strings.Contains(res.SAI, "L_m_end") {
+		t.Errorf("missing inlined setter body:\n%s", res.SAI)
 	}
 }
 
