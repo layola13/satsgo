@@ -1064,3 +1064,8 @@
   全套件绿、286 sweep 286/286 零回退、形状校验通过；
   真机 `sa check` 过 + `sa run` exit 5 对数。
   JEV blast-radius local_only/needs_regression_tests（回归已补：全套件 + sweep + 形状 + check + run）。
+- ✅ 重载擦除 program 侧补齐（`LowerProgram` 预扫跳无体声明，签名表只取实现体；
+  发射侧复用 `lowerSourceFile` 已有擦除；`.d.ts` 配对声明不受影响）：
+  单测 `TestLowerProgramOverload`（跨文件双签名一实现单定义 + 链接调用）；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  链接产物真机 `sa check` 过 + `sa run` exit 1 与 node 差分一致。

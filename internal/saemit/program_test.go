@@ -31,6 +31,20 @@ func TestLowerProgramCrossFile(t *testing.T) {
 	}
 }
 
+func TestLowerProgramOverload(t *testing.T) {
+	files := map[string]string{
+		"main.ts": "import { add } from \"./util\";\nfunction main(): i32 {\n  return add(1);\n}\n",
+		"util.ts": "export function add(x: string): i32;\nexport function add(x: number): i32;\nexport function add(x: any): i32 {\n  return 1;\n}\n",
+	}
+	res := mustLowerProgram(t, "main.ts", files)
+	if strings.Count(res.SAI, "@util__add(x:") != 1 {
+		t.Errorf("overload signatures must erase to one definition:\n%s", res.SAI)
+	}
+	if !strings.Contains(res.SAI, "call @util__add(1)") {
+		t.Errorf("missing linked call:\n%s", res.SAI)
+	}
+}
+
 func TestLowerProgramUnresolvedDeps(t *testing.T) {
 	files := map[string]string{
 		"main.ts": "import { x } from \"lodash-es\";\nimport { y } from \"./u\";\nfunction main(): i32 { return y(1); }\n",

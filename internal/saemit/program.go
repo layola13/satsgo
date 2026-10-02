@@ -492,6 +492,11 @@ func LowerProgram(entry string, files map[string]string) ProgramResult {
 				if hasDefaultModifier(st) {
 					expOf[p].defLocal = name
 				}
+				// Overload signatures carry no body: export/kind stay, but
+				// arity/ret/defaults come from the implementation.
+				if st.BodyData().Body == nil {
+					continue
+				}
 				// Signature tables share prescanRet so call sites agree with
 				// definitions; the scratch prescan has no tcx yet (legacy
 				// void), the post-swap upgrade below fills checker scalars.
