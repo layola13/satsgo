@@ -1083,3 +1083,11 @@
   `arr.length` 正常而经 `add` 的计算地址 load 全陷；
   复现：`const arr: i32[] = [10,20]; return arr[0];` → trap（期望 10）。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ 静态方法调用（纯语法点，`staticMethods` 表 + 继承拷贝 + 与实例共享
+  `inlineClassMethod` 内核；`Class.m()` 经类名分发，局部/槽遮蔽与 `#` 私有守卫；
+  `this` 置空使实例态诚实拒，可变静态写沿既有 `assignment target` 大声拒）：
+  单测 `TestLowerClassStaticCall`（正形内联 + 元数拒 + 继承 + 未知拒 + this 拒），
+  `TestCheckerClassDispatch/cd6` 旧拒期望更新为静态分发正形；
+  全套件绿、286 sweep 286/286 零回退、形状校验通过；
+  真机 `sa check` 过 + `sa run` exit 42（单文件/跨文件）与 node 差分一致。
+  JEV blast-radius local_only/safe_to_apply 60%。

@@ -4183,6 +4183,18 @@ func (e *emitter) lowerMethodCall(fn *ast.Node, args []string, types []saType, a
 		}
 		// Unknown method: fall through to array/string surfaces, then refuse.
 	}
+	// Static methods dispatch on the class name (no instance; `this`
+	// stays empty inside). Locals and module-state slots shadow the
+	// class binding, and private `#m` stays on the loud path below.
+	if pa.Expression.Kind == ast.KindIdentifier && !strings.HasPrefix(method, "#") &&
+		e.lookupBinding(recv) == nil && e.modStateOf(recv) == nil {
+		if _, ok := e.classDefs[recv]; ok {
+			if v, t, ok := e.lowerClassStaticCall(recv, method, args, argNodes, pos); ok {
+				return v, t, true
+			}
+			// Unknown static: fall through to the loud refusal below.
+		}
+	}
 	// document.createElement/createTextNode lower to the airlock DOM
 	// backend; DOM handles dispatch to sax_dom_* (see dom_proj.go).
 	if recv == "document" && (method == "createElement" || method == "createTextNode") {
@@ -9091,6 +9103,11 @@ type classDef struct {
 	name    string
 	layout  *layout
 	methods map[string]*ast.Node
+	// staticMethods records `static m()` bodies for ClassName.m()
+	// call-site inlining (instance entries never hold them; see
+	// recordClass). `this` stays empty inside: instance state refuses
+	// honestly, other statics route through the same dispatch.
+	staticMethods map[string]*ast.Node
 	ctor    *ast.Node
 	// ctorOwner names the class that declared ctor (a derived class without
 	// its own ctor inherits the base node; super() inside it targets the
@@ -9442,10 +9459,19 @@ func (e *emitter) recordClassNamed(st *ast.Node, forceName string) {
 			def.ctor = m
 		case ast.KindMethodDeclaration:
 			if m.Name() != nil && m.Name().Kind == ast.KindIdentifier {
-				// Static methods never dispatch as instance methods
-				// (same-named statics would shadow/arity-clash the
-				// instance entry; static calls stay loud elsewhere).
+				// Static methods record apart and never dispatch as
+				// instance methods (same-named statics would
+				// shadow/arity-clash the instance entry; static calls
+				// route through lowerClassStaticCall).
 				if hasModifier(m, ast.KindStaticKeyword) {
+					if def.staticMethods == nil {
+						def.staticMethods = map[string]*ast.Node{}
+					}
+					def.staticMethods[m.Name().Text()] = m
+					if def.methodOwner == nil {
+						def.methodOwner = map[string]string{}
+					}
+					def.methodOwner[m.Name().Text()] = name
 					continue
 				}
 				if def.methods == nil {
@@ -9663,6 +9689,38 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	if !ok {
 		return "", tUnknown, false
 	}
+	owner := className
+	if o, ok := def.methodOwner[method]; ok {
+		owner = o
+	}
+	return e.inlineClassMethod(recv, className, owner, method, mn, args, argNodes, pos)
+}
+
+// lowerClassStaticCall inlines `Class.m(args)`: same core, but with no
+// instance `this` stays empty, so instance state refuses honestly inside
+// while other statics route through the same dispatch.
+func (e *emitter) lowerClassStaticCall(className, method string, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	def, ok := e.classDefs[className]
+	if !ok {
+		return "", tUnknown, false
+	}
+	mn, ok := def.staticMethods[method]
+	if !ok {
+		return "", tUnknown, false
+	}
+	owner := className
+	if o, ok := def.methodOwner[method]; ok {
+		owner = o
+	}
+	return e.inlineClassMethod("", className, owner, method, mn, args, argNodes, pos)
+}
+
+// inlineClassMethod is the shared method-inline core for instance and
+// static calls: parameters bind (generic params inherit the argument
+// layout), thisSelf aliases the receiver (empty for statics), and the
+// body joins through a value slot.
+func (e *emitter) inlineClassMethod(thisSelf, className, owner, method string, mn *ast.Node, args []string, argNodes *ast.ElementList, pos *ast.Node) (string, saType, bool) {
+	def := e.classDefs[className]
 	params := mn.Parameters()
 	var anodeList []*ast.Node
 	if argNodes != nil {
@@ -9679,16 +9737,13 @@ func (e *emitter) lowerClassMethodCall(recv, className, method string, args []st
 	scopeBase := len(e.scopes) - 1
 	e.pushScope()
 	savedSelf := e.thisSelf
-	e.thisSelf = recv
+	e.thisSelf = thisSelf
 	savedCls := e.curMethodClass
 	e.curMethodClass = className
 	savedOwner := e.curMethodOwner
 	// Lexical owner for private resolution (inherited members keep the
 	// base owner; unrecorded methods fall back to the receiver class).
-	e.curMethodOwner = className
-	if o, ok := def.methodOwner[method]; ok {
-		e.curMethodOwner = o
-	}
+	e.curMethodOwner = owner
 	// Method bodies resolve bare namespace siblings qualified (the
 	// owner's path, not the call-site prefix).
 	savedNs := e.nsStack

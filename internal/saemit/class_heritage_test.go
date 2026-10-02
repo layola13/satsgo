@@ -204,10 +204,11 @@ func TestCheckerClassDispatch(t *testing.T) {
 	if r := Lower("cd5.ts", nul); !r.Refused {
 		t.Fatalf("expected nullable refusal, got:\n%s", r.SAI)
 	}
-	// Static call position never dispatches as an instance.
+	// Static call position dispatches as a static (never as an instance).
 	staticSrc := "class C {\n  v: i32 = 0;\n  constructor(n: i32) { this.v = n; }\n  static create(n: i32): i32 { return n * 2; }\n  get(): i32 { return this.v + 1; }\n}\nfunction main(): i32 {\n  return C.create(21);\n}\n"
-	if r := Lower("cd6.ts", staticSrc); !r.Refused {
-		t.Fatalf("expected static-call refusal, got:\n%s", r.SAI)
+	res = mustLower(t, "cd6.ts", staticSrc)
+	if !strings.Contains(res.SAI, "L_m_end_") {
+		t.Errorf("want inlined static body, got:\n%s", res.SAI)
 	}
 	// Cross-function reuse without annotation stays loud (stateless:
 	// nothing leaks from the annotated sibling).

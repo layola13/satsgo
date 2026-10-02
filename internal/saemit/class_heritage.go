@@ -148,6 +148,22 @@ func (e *emitter) inheritClass(name, base string, def *classDef, l *layout, st *
 			}
 		}
 	}
+	// Static methods inherit the same way (child overrides).
+	if def.staticMethods == nil {
+		def.staticMethods = map[string]*ast.Node{}
+	}
+	for k, v := range bdef.staticMethods {
+		if _, ok := def.staticMethods[k]; !ok {
+			def.staticMethods[k] = v
+			if _, ok := def.methodOwner[k]; !ok {
+				owner := base
+				if o, ok := bdef.methodOwner[k]; ok {
+					owner = o
+				}
+				def.methodOwner[k] = owner
+			}
+		}
+	}
 	if def.getters == nil {
 		def.getters = map[string]*ast.Node{}
 	}

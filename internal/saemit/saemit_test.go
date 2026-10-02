@@ -138,6 +138,34 @@ function main(): i32 {
 	}
 }
 
+func TestLowerClassStaticCall(t *testing.T) {
+	src := "class B {\n  static add(a: i32, b: i32): i32 {\n    return a + b;\n  }\n}\nfunction main(): i32 {\n  return B.add(20, 22);\n}\n"
+	res := mustLower(t, "st1.ts", src)
+	if strings.Contains(res.SAI, "call @B") {
+		t.Errorf("static call must inline, not call:\n%s", res.SAI)
+	}
+	arity := "class B {\n  static add(a: i32, b: i32): i32 {\n    return a + b;\n  }\n}\nfunction main(): i32 {\n  return B.add(1);\n}\n"
+	if r := Lower("st2.ts", arity); !r.Refused {
+		t.Fatalf("expected static arity refusal, got:\n%s", r.SAI)
+	}
+	inh := "class Base {\n  static one(): i32 {\n    return 1;\n  }\n}\nclass Sub extends Base {\n}\nfunction main(): i32 {\n  return Sub.one();\n}\n"
+	res = mustLower(t, "st3.ts", inh)
+	if !strings.Contains(res.SAI, "L_m_end") {
+		t.Errorf("missing inherited static inline join:\n%s", res.SAI)
+	}
+	if strings.Contains(res.SAI, "call @") {
+		t.Errorf("inherited static call must inline, not call:\n%s", res.SAI)
+	}
+	unk := "class B {\n  static add(a: i32): i32 {\n    return a;\n  }\n}\nfunction main(): i32 {\n  return B.nope(1);\n}\n"
+	if r := Lower("st4.ts", unk); !r.Refused {
+		t.Fatalf("expected unknown-static refusal, got:\n%s", r.SAI)
+	}
+	thisUse := "class B {\n  v: i32 = 0;\n  static f(): i32 {\n    return this.v;\n  }\n}\nfunction main(): i32 {\n  return B.f();\n}\n"
+	if r := Lower("st5.ts", thisUse); !r.Refused {
+		t.Fatalf("expected this-in-static refusal, got:\n%s", r.SAI)
+	}
+}
+
 func TestLowerOptionalChainGuard(t *testing.T) {
 	src := `interface Box {
   v: i32;
