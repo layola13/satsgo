@@ -124,3 +124,57 @@ func TestTSXDirectInterp(t *testing.T) {
 		t.Fatalf("expected float refusal, got:\n%s", r.SAI)
 	}
 }
+
+func TestTSXDirectClick(t *testing.T) {
+	// onClick with a ctx param lowers to bind_event (ctx=root) plus an
+	// @export handler function; bodies take ctx DOM writes only.
+	src := "function C() {\n  return <div>\n    <button onClick={(root) => root.setAttribute(\"id\", \"hit\")}>go</button>\n  </div>;\n}\n"
+	res := mustLowerDirect(t, "click.tsx", src)
+	for _, want := range []string{
+		"@export onClick_1(root: i64):",
+		"call @sax_dom_bind_event(",
+		"*",
+		"call @sax_dom_set_attr(",
+		"sax_dom_bind_event(node_h: i64, *evt_ptr: ptr",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// textContent write shape.
+	txt := "function C() {\n  return <div>\n    <button onClick={(root) => root.textContent = \"done\"}>go</button>\n  </div>;\n}\n"
+	res = mustLowerDirect(t, "clicktxt.tsx", txt)
+	if !strings.Contains(res.SAI, "call @sax_dom_set_text(") {
+		t.Errorf("missing set_text handler:\n%s", res.SAI)
+	}
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"noparam", "function C() {\n  return <button onClick={() => {}}>x</button>;\n}\n", "exactly its ctx param"},
+		{"setx", "function C() {\n  const [n, setN] = useState(0);\n  return <button onClick={(r) => setN(1)}>x</button>;\n}\n", "only ctx DOM statements"},
+		{"namedref", "function C() {\n  return <button onClick={go}>x</button>;\n}\n", "inline arrow"},
+		{"otherhandler", "function C() {\n  return <button onChange={(r) => r.setAttribute(\"a\", \"b\")}>x</button>;\n}\n", "handlers slice"},
+	}
+	for _, c := range cases {
+		r := LowerTSXDirect("clk_"+c.name+".tsx", c.src)
+		if !r.Refused {
+			t.Errorf("%s: expected refusal, got:\n%s", c.name, r.SAI)
+			continue
+		}
+		found := false
+		for _, d := range r.Diagnostics {
+			if strings.Contains(d.Error(), c.want) {
+				found = true
+			}
+		}
+		if !found {
+			msgs := []string{}
+			for _, d := range r.Diagnostics {
+				msgs = append(msgs, d.Error())
+			}
+			t.Errorf("%s: missing %q, got:\n%s", c.name, c.want, strings.Join(msgs, "\n"))
+		}
+	}
+}

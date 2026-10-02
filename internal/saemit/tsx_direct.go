@@ -57,6 +57,30 @@ type tsxDirect struct {
 	strConsts map[string]string
 	intConsts map[string]string
 	setters   map[string]bool
+	// handlers accumulates onClick handlers (emitted as @export fns
+	// after the builder); binds pairs element handles with handlers
+	// for bind_event emission once the root handle is known; constRefs
+	// dedupes starred string consts (bind_event takes *name refs).
+	handlers   []directHandler
+	binds      []directBind
+	handlerSeq int
+	constRefs  map[string]string
+}
+
+// directHandler is one onClick handler: an @export function taking the
+// component root handle as ctx (airlock calls exports[name](ctx)). No
+// ffi wrapper: there is no react ctx struct to unpack and handler bodies
+// cannot read events in this slice.
+type directHandler struct {
+	funcName string
+	ctxName  string
+	arrow    *ast.Node
+	pos      *ast.Node
+}
+
+type directBind struct {
+	elem    string
+	handler int
 }
 
 // airlockExtern declares the used airlock imports with the exact runtime
@@ -67,6 +91,15 @@ var airlockExtern = map[string]string{
 	"sax_dom_create_text":  "@extern sax_dom_create_text(text_ptr: ptr, text_len: u64) -> i64",
 	"sax_dom_append_child": "@extern sax_dom_append_child(parent_h: i64, child_h: i64)",
 	"sax_dom_set_attr":     "@extern sax_dom_set_attr(node_h: i64, key_ptr: ptr, key_len: u64, val_ptr: ptr, val_len: u64)",
+	// bind_event uses the canonical starred/i64 form verbatim (react
+	// build output): capability prefixes are enforced, temps do not
+	// satisfy starred params.
+	"sax_dom_bind_event": "@extern sax_dom_bind_event(node_h: i64, *evt_ptr: ptr, evt_len: i64, *handler_ptr: ptr, handler_len: i64, ctx: ptr) -> void",
+	// set_text/remove_attr take temp args (like the other direct calls),
+	// so their decls stay unstarred; bind_event above is the only
+	// starred-const call shape (probed: mixing styles verifies clean).
+	"sax_dom_set_text": "@extern sax_dom_set_text(node_h: i64, text_ptr: ptr, text_len: u64)",
+	"sax_dom_remove_attr": "@extern sax_dom_remove_attr(node_h: i64, key_ptr: ptr, key_len: u64)",
 }
 
 func (x *tsxDirect) useExtern(sym string) {
@@ -78,6 +111,28 @@ func (x *tsxDirect) useExtern(sym string) {
 	}
 	x.used[sym] = true
 	fmt.Fprintf(&x.e.header, "%s\n", airlockExtern[sym])
+}
+
+// strConstRef emits a shared utf8 const and returns its starred name
+// plus byte length (bind_event takes *name refs, not temps).
+func (x *tsxDirect) strConstRef(text string) (string, int) {
+	if x.constRefs == nil {
+		x.constRefs = map[string]string{}
+	}
+	if n, ok := x.constRefs[text]; ok {
+		return n, len(text)
+	}
+	e := x.e
+	e.tmp++
+	name := fmt.Sprintf("str_const_%d", e.tmp)
+	escaped := strings.ReplaceAll(text, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+	escaped = strings.ReplaceAll(escaped, "\n", "\\n")
+	escaped = strings.ReplaceAll(escaped, "\r", "\\r")
+	escaped = strings.ReplaceAll(escaped, "\t", "\\t")
+	fmt.Fprintf(&e.header, "@const %s = utf8:\"%s\\0\"\n", name, escaped)
+	x.constRefs[text] = name
+	return name, len(text)
 }
 
 func (x *tsxDirect) refuse(n *ast.Node, format string, args ...any) {
@@ -109,6 +164,9 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.strConsts = map[string]string{}
 	x.intConsts = map[string]string{}
 	x.setters = map[string]bool{}
+	x.handlers = nil
+	x.binds = nil
+	x.handlerSeq = 0
 	psig := ""
 	if len(fn.Parameters()) > 0 {
 		var ok bool
@@ -155,9 +213,52 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	if !ok {
 		return false
 	}
+	// Event bindings go out once the root handle is known (ctx=root
+	// convention: handlers receive the component root).
+	for _, b := range x.binds {
+		ecName, ecLen := x.strConstRef("click")
+		hcName, hcLen := x.strConstRef(x.handlers[b.handler].funcName)
+		x.e.emit("call @sax_dom_bind_event(%s, *%s, %d, *%s, %d, %s)", b.elem, ecName, ecLen, hcName, hcLen, root)
+		x.useExtern("sax_dom_bind_event")
+	}
 	x.e.releaseAllOwnedExcept(root)
 	x.e.emit("return %s", root)
 	x.e.terminated = true
+	x.e.popScope()
+	if !x.emitHandlers() {
+		return false
+	}
+	return true
+}
+
+// emitHandlers lowers recorded onClick handlers as @export functions
+// taking the component root as ctx (the airlock calls
+// exports[name](ctx)). No ffi wrapper: there is no react ctx struct to
+// unpack and handler bodies cannot read events in this slice.
+func (x *tsxDirect) emitHandlers() bool {
+	e := x.e
+	for _, hd := range x.handlers {
+		e.emitRaw("@export %s(%s: i64):", hd.funcName, hd.ctxName)
+		e.emitRaw("L_ENTRY:")
+		e.pushScope()
+		e.terminated = false
+		e.declareOwned(hd.ctxName)
+		if e.domVars == nil {
+			e.domVars = map[string]bool{}
+		}
+		e.domVars[hd.ctxName] = true
+		// Body statements lower below; empty bodies were refused at
+		// collection time.
+		if !x.lowerHandlerBody(hd) {
+			return false
+		}
+		if !e.terminated {
+			e.releaseAllOwned()
+			e.emit("return")
+			e.terminated = true
+		}
+		e.popScope()
+	}
 	return true
 }
 
@@ -365,6 +466,203 @@ func (x *tsxDirect) interpText(ident string, n *ast.Node) (string, bool) {
 	return t, true
 }
 
+// lowerClickAttr records an onClick={(ctx) => ...} handler for bind_event
+// emission (ctx=root convention). The arrow takes exactly one identifier
+// param (bound to the component root at bind time); its body is a block
+// with at least one statement, or a single call expression treated as
+// one statement. Reports whether the attribute was consumed.
+func (x *tsxDirect) lowerClickAttr(h string, a *ast.Node, at *ast.JsxAttribute) bool {
+	if at.Initializer == nil || at.Initializer.Kind != ast.KindJsxExpression {
+		x.refuse(a, "onClick needs an inline arrow in the handlers slice")
+		return false
+	}
+	ex := at.Initializer.AsJsxExpression().Expression
+	if ex == nil || ex.Kind != ast.KindArrowFunction {
+		x.refuse(a, "onClick needs an inline arrow in the handlers slice")
+		return false
+	}
+	params := ex.Parameters()
+	if len(params) != 1 {
+		x.refuse(a, "onClick arrow takes exactly its ctx param in the handlers slice")
+		return false
+	}
+	ctxName, ok := bindingNameText(params[0].AsNode())
+	if !ok {
+		x.refuse(a, "onClick ctx param must be a plain identifier")
+		return false
+	}
+	body := ex.AsArrowFunction().Body
+	if body == nil {
+		x.refuse(a, "onClick arrow has no body")
+		return false
+	}
+	var stmts []*ast.Node
+	if body.Kind != ast.KindBlock {
+		// Expression bodies map onto one handler statement (calls and
+		// ctx.textContent writes only; see lowerHandlerBody).
+		if body.Kind != ast.KindCallExpression && body.Kind != ast.KindBinaryExpression {
+			x.refuse(a, "onClick body must be a block of ctx DOM statements")
+			return false
+		}
+		stmts = []*ast.Node{body}
+	} else {
+		stmts = body.Statements()
+	}
+	if len(stmts) == 0 {
+		x.refuse(a, "empty onClick handler has no direct shape")
+		return false
+	}
+	x.handlerSeq++
+	x.handlers = append(x.handlers, directHandler{
+		funcName: fmt.Sprintf("onClick_%d", x.handlerSeq),
+		ctxName:  ctxName,
+		arrow:    ex,
+		pos:      a,
+	})
+	x.binds = append(x.binds, directBind{elem: h, handler: len(x.handlers) - 1})
+	return true
+}
+
+// lowerHandlerBody lowers one recorded handler body: each statement must
+// be a DOM write on the ctx param (setAttribute / textContent= /
+// removeAttribute). setX and every other shape refuse loudly (no state
+// slots exist in the direct path).
+func (x *tsxDirect) lowerHandlerBody(hd directHandler) bool {
+	body := hd.arrow.AsArrowFunction().Body
+	var stmts []*ast.Node
+	if body.Kind == ast.KindBlock {
+		stmts = body.Statements()
+	} else {
+		stmts = []*ast.Node{body}
+	}
+	for _, st := range stmts {
+		// Bare expression bodies (arrow expression form) lower as one
+		// statement of the same shape.
+		if st.Kind == ast.KindCallExpression {
+			if !x.lowerHandlerCall(hd, st) {
+				return false
+			}
+			continue
+		}
+		if st.Kind == ast.KindBinaryExpression {
+			if !x.lowerHandlerAssign(hd, st) {
+				return false
+			}
+			continue
+		}
+		if st.Kind != ast.KindExpressionStatement {
+			x.refuse(st, "only ctx DOM statements lower in direct handlers")
+			return false
+		}
+		es := st.AsExpressionStatement().Expression
+		switch es.Kind {
+		case ast.KindCallExpression:
+			if !x.lowerHandlerCall(hd, es) {
+				return false
+			}
+		case ast.KindBinaryExpression:
+			if !x.lowerHandlerAssign(hd, es) {
+				return false
+			}
+		default:
+			x.refuse(st, "only ctx DOM statements lower in direct handlers")
+			return false
+		}
+	}
+	return true
+}
+
+// lowerHandlerAssign lowers `ctx.textContent = "lit"` writes through the
+// shared text setter. Anything else refuses loudly.
+func (x *tsxDirect) lowerHandlerAssign(hd directHandler, es *ast.Node) bool {
+	e := x.e
+	bin := es.AsBinaryExpression()
+	if bin.OperatorToken.Kind != ast.KindEqualsToken {
+		x.refuse(es, "only ctx DOM statements lower in direct handlers")
+		return false
+	}
+	if bin.Left == nil || bin.Left.Kind != ast.KindPropertyAccessExpression {
+		x.refuse(es, "only ctx DOM statements lower in direct handlers")
+		return false
+	}
+	pa := bin.Left.AsPropertyAccessExpression()
+	if pa.Expression.Kind != ast.KindIdentifier || pa.Expression.Text() != hd.ctxName {
+		x.refuse(es, "only ctx DOM statements lower in direct handlers")
+		return false
+	}
+	if pa.Name().Text() != "textContent" {
+		x.refuse(es, "only ctx.textContent writes lower in direct handlers")
+		return false
+	}
+	if bin.Right == nil || bin.Right.Kind != ast.KindStringLiteral {
+		x.refuse(es, "ctx.textContent needs a string literal in the direct slice")
+		return false
+	}
+	s, ok := stringLiteralText(bin.Right)
+	if !ok {
+		x.refuse(es, "ctx.textContent value is not lowerable")
+		return false
+	}
+	vs := e.lowerStringLiteral(s)
+	// Route through the shared text setter (validates + emits).
+	if !e.lowerDomStore(hd.ctxName, "textContent", vs, tString, es) {
+		return false
+	}
+	x.useExtern("sax_dom_set_text")
+	return true
+}
+
+// lowerHandlerCall lowers one ctx method call statement
+// (ctx.setAttribute / ctx.removeAttribute with string literals).
+func (x *tsxDirect) lowerHandlerCall(hd directHandler, call *ast.Node) bool {
+	e := x.e
+	ce := call.AsCallExpression()
+	if ce.Expression.Kind != ast.KindPropertyAccessExpression {
+		x.refuse(call, "only ctx DOM statements lower in direct handlers")
+		return false
+	}
+	pa := ce.Expression.AsPropertyAccessExpression()
+	if pa.Expression.Kind != ast.KindIdentifier || pa.Expression.Text() != hd.ctxName {
+		x.refuse(call, "only ctx DOM statements lower in direct handlers")
+		return false
+	}
+	method := pa.Name().Text()
+	args := []string{}
+	if ce.Arguments != nil {
+		for _, a := range ce.Arguments.Nodes {
+			if a.Kind != ast.KindStringLiteral {
+				x.refuse(a, "handler DOM calls take string literals in the direct slice")
+				return false
+			}
+			s, ok := stringLiteralText(a)
+			if !ok {
+				x.refuse(a, "handler DOM argument is not lowerable")
+				return false
+			}
+			args = append(args, e.lowerStringLiteral(s))
+		}
+	}
+	types := make([]saType, len(args))
+	for i := range args {
+		types[i] = tString
+	}
+	switch method {
+	case "setAttribute", "removeAttribute":
+		if _, _, claimed := e.lowerDomMethod(hd.ctxName, method, args, types, call); !claimed {
+			x.refuse(call, "handler DOM call %s rejected", method)
+			return false
+		}
+		x.useExtern("sax_dom_set_attr")
+		if method == "removeAttribute" {
+			x.useExtern("sax_dom_remove_attr")
+		}
+		return true
+	default:
+		x.refuse(call, "handler DOM call %s is not in the direct slice (setAttribute/removeAttribute/textContent only)", method)
+		return false
+	}
+}
+
 // lowerNode lowers one JSX node to a DOM handle temp.
 func (x *tsxDirect) lowerNode(n *ast.Node) (string, bool) {
 	switch n.Kind {
@@ -441,6 +739,15 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 			}
 			at := a.AsJsxAttribute()
 			aname := at.Name().Text()
+			// onClick lowers to a bind_event call (ctx=root convention);
+			// all other onXxx need later slices.
+			if aname == "onClick" {
+				if x.lowerClickAttr(h, a, at) {
+					return false
+				}
+				done = false
+				return true
+			}
 			if len(aname) > 2 && aname[0] == 'o' && aname[1] == 'n' && 'A' <= aname[2] && aname[2] <= 'Z' {
 				x.refuse(a, "event handler %s needs the handlers slice", aname)
 				done = false

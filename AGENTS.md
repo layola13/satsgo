@@ -964,6 +964,15 @@
   float 仍拒（缺 ftoa 精度策略）。`int.sai` 经 `sa check` + 形状过。
   途中修 `true` 节点无 `Text()` 恐慌。`Lower()` 零改 → 286 零影响。
   JEV blast-radius local_only/safe_to_apply。
+- ✅ 路二 onClick 直调刀（ctx=root 惯例，`bind_event` + `@export` handler）：
+  `onClick={(ctx) => …}` 体仅 ctx DOM 写（setAttribute/removeAttribute/
+  textContent=），经 `bind_event` 绑 root（handler 名 `*const` 引用，
+  `CapabilityMismatch` 边界已探明：starred 声明必须配 starred 实参）；
+  无 ffi wrapper（无 react ctx 结构可解，事件读取不在本刀）。
+  setX/余形一律大声拒。单测正形 + textContent + 4 拒形；
+  `click.sai` 经 `sa check` 独立通过 + 形状过（形状工具 SIG 认 `@export`）。
+  `Lower()` 零改 → 286 零影响；全套件绿。
+  JEV blast-radius local_only/safe_to_apply 75%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；

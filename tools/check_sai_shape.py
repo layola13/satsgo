@@ -15,7 +15,7 @@ Exit 1 on any violation.
 import re
 import sys
 
-SIG = re.compile(r"^@([A-Za-z_][\w]*)\(([^)]*)\)(\s*->\s*(\w+))?:\s*$")
+SIG = re.compile(r"^@(?:export\s+)?([A-Za-z_][\w]*)\(([^)]*)\)(\s*->\s*(\w+))?:\s*$")
 LBL = re.compile(r"^([A-Za-z_][\w]*):\s*$")
 BR = re.compile(r"^br\s+(\S+)\s+->\s*(\S+)\s*,\s*(\S+)\s*$")
 JMP = re.compile(r"^jmp\s+(\S+)\s*$")
