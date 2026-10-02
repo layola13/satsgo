@@ -248,14 +248,25 @@ func TestTSXDirectCompose(t *testing.T) {
 }
 
 func TestTSXDirectSlot(t *testing.T) {
-	// <Slot /> outlet: callee takes a trailing slot param fed by the
-	// caller's single child; outlet appends it in position.
+	// <Slot /> outlets: callee takes trailing slot_N params fed
+	// positionally by the caller's kids (exact-N, in order).
 	src := "function Box() {\n  return <section>\n    <Slot />\n  </section>;\n}\nfunction Card() {\n  return <div>\n    <Box><b>hi</b></Box>\n  </div>;\n}\n"
 	res := mustLowerDirect(t, "slot.tsx", src)
 	for _, want := range []string{
-		"@render_Box(slot: i64) -> i64:",
+		"@render_Box(slot_1: i64) -> i64:",
 		"call @render_Box(",
 		"call @sax_dom_append_child(",
+	} {
+		if !strings.Contains(res.SAI, want) {
+			t.Errorf("missing %q:\n%s", want, res.SAI)
+		}
+	}
+	// Two outlets take two kids positionally.
+	two := "function Layout() {\n  return <section>\n    <header>\n      <Slot />\n    </header>\n    <footer>\n      <Slot />\n    </footer>\n  </section>;\n}\nfunction Page() {\n  return <div>\n    <Layout><b>top</b><i>bot</i></Layout>\n  </div>;\n}\n"
+	res = mustLowerDirect(t, "slot2.tsx", two)
+	for _, want := range []string{
+		"@render_Layout(slot_1: i64, slot_2: i64) -> i64:",
+		"call @render_Layout(",
 	} {
 		if !strings.Contains(res.SAI, want) {
 			t.Errorf("missing %q:\n%s", want, res.SAI)
@@ -266,9 +277,9 @@ func TestTSXDirectSlot(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"twokids", "function B() {\n  return <section>\n    <Slot />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>a<b />b</B>\n  </div>;\n}\n", "exactly one child"},
+		{"twokids", "function B() {\n  return <section>\n    <Slot />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>a<b />b</B>\n  </div>;\n}\n", "exactly 1 children"},
 		{"nooutlet", "function B() {\n  return <span>x</span>;\n}\nfunction C() {\n  return <div>\n    <B>kid</B>\n  </div>;\n}\n", "no <Slot /> outlet"},
-		{"twooutlets", "function B() {\n  return <section>\n    <Slot />\n    <Slot />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>x</B>\n  </div>;\n}\n", "single <Slot /> outlet"},
+		{"onekidoftwo", "function B() {\n  return <section>\n    <Slot />\n    <Slot />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>x</B>\n  </div>;\n}\n", "exactly 2 children"},
 		{"slotroot", "function B() {\n  return <Slot />;\n}\n", "cannot be the render root"},
 		{"slotattrs", "function B() {\n  return <section>\n    <Slot id=\"x\" />\n  </section>;\n}\nfunction C() {\n  return <div>\n    <B>y</B>\n  </div>;\n}\n", "bare <Slot /> only"},
 	}

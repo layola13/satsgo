@@ -69,13 +69,13 @@ type tsxDirect struct {
 	// compProps records every same-file component's declared prop names
 	// in order (pre-pass), so parents pass positionally by callee order.
 	compProps map[string][]string
-	// compSlots marks components declaring a bare <Slot /> outlet
-	// (pre-pass). slotParam/slotSeen track the outlet being lowered:
-	// the callee takes one extra `slot: i64` param fed by the caller's
-	// single child.
-	compSlots map[string]bool
-	slotParam string
-	slotSeen  bool
+	// compSlots counts bare <Slot /> outlets per component (pre-pass).
+	// Callees take that many trailing slot_N params fed positionally by
+	// the caller's kids (exact-N, in order). slotTotal/slotNext track
+	// the outlet count and the next outlet index during lowering.
+	compSlots map[string]int
+	slotTotal int
+	slotNext  int
 }
 
 // directHandler is one onClick handler: an @export function taking the
@@ -155,7 +155,7 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 	// parents pass positionally by callee order (lenient: shape errors
 	// refuse precisely during body lowering).
 	x.compProps = map[string][]string{}
-	x.compSlots = map[string]bool{}
+	x.compSlots = map[string]int{}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
 			continue
@@ -165,9 +165,7 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 		}
 		name := st.Name().Text()
 		x.compProps[name] = directPropNames(st)
-		if hasDirectSlot(st) {
-			x.compSlots[name] = true
-		}
+		x.compSlots[name] = countDirectSlots(st)
 	}
 	for _, st := range sf.AsSourceFile().Statements.Nodes {
 		if st.Kind != ast.KindFunctionDeclaration {
@@ -184,59 +182,59 @@ func (x *tsxDirect) lowerSourceFile(sf *ast.SourceFile) {
 	}
 }
 
-// hasDirectSlot reports whether a component body contains a <Slot />
-// element anywhere (lenient presence for the composition pre-pass;
-// multiplicity and bareness validate during lowering).
-func hasDirectSlot(fn *ast.Node) bool {
+// countDirectSlots counts <Slot /> elements in a component body
+// (lenient presence for the composition pre-pass; bareness and
+// multiplicity validate during lowering).
+func countDirectSlots(fn *ast.Node) int {
 	body := fn.BodyData().Body
 	if body == nil {
-		return false
+		return 0
 	}
-	var walk func(n *ast.Node) bool
-	walk = func(n *ast.Node) bool {
+	var walk func(n *ast.Node) int
+	walk = func(n *ast.Node) int {
 		switch n.Kind {
 		case ast.KindJsxElement:
 			el := n.AsJsxElement()
+			count := 0
 			if isSlotRef(el.OpeningElement) {
-				return true
+				count++
 			}
 			if el.Children != nil {
 				for _, c := range el.Children.Nodes {
-					if walk(c) {
-						return true
-					}
+					count += walk(c)
 				}
 			}
-			return false
+			return count
 		case ast.KindJsxSelfClosingElement:
-			return isSlotRef(n)
+			if isSlotRef(n) {
+				return 1
+			}
+			return 0
 		case ast.KindJsxFragment:
 			fr := n.AsJsxFragment()
+			count := 0
 			if fr.Children != nil {
 				for _, c := range fr.Children.Nodes {
-					if walk(c) {
-						return true
-					}
+					count += walk(c)
 				}
 			}
-			return false
+			return count
 		case ast.KindJsxExpression:
-			return false
+			return 0
 		case ast.KindJsxText:
-			return false
+			return 0
 		}
-		return false
+		return 0
 	}
+	total := 0
 	for _, st := range body.Statements() {
 		if st.Kind == ast.KindReturnStatement {
 			if rs := st.AsReturnStatement(); rs.Expression != nil {
-				if walk(rs.Expression) {
-					return true
-				}
+				total += walk(rs.Expression)
 			}
 		}
 	}
-	return false
+	return total
 }
 
 // isSlotRef reports whether open is a <Slot ...> tag reference
@@ -305,8 +303,8 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.handlers = nil
 	x.binds = nil
 	x.handlerSeq = 0
-	x.slotParam = ""
-	x.slotSeen = false
+	x.slotTotal = 0
+	x.slotNext = 0
 	psig := ""
 	if len(fn.Parameters()) > 0 {
 		var ok bool
@@ -314,19 +312,21 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 		if !ok {
 			return false
 		}
-		if _, dup := x.params["slot"]; dup {
-			x.refuse(fn, "prop slot is reserved for the <Slot /> outlet param")
+		if isSlotName(x.params) {
+			x.refuse(fn, "prop slot is reserved for the <Slot /> outlet params")
 			return false
 		}
 	}
-	// Components declaring a <Slot /> outlet take one extra trailing
-	// `slot: i64` param fed by the caller's single child.
-	if x.compSlots[name] {
-		if psig != "" {
-			psig += ", "
+	// Components declaring N <Slot /> outlets take N extra trailing
+	// `slot_1..slot_N: i64` params fed positionally by the caller's kids.
+	if n := x.compSlots[name]; n > 0 {
+		for i := 1; i <= n; i++ {
+			if psig != "" {
+				psig += ", "
+			}
+			psig += fmt.Sprintf("slot_%d: i64", i)
 		}
-		psig += "slot: i64"
-		x.slotParam = "slot"
+		x.slotTotal = n
 	}
 	body := fn.BodyData().Body
 	if body == nil {
@@ -358,19 +358,20 @@ func (x *tsxDirect) lowerComponent(name string, fn *ast.Node) bool {
 	x.e.pushScope()
 	x.e.terminated = false
 	// String params are callee-owned (same convention as normal
-	// functions: the end-of-body release drops them); the slot param
-	// travels the same way.
+	// functions: the end-of-body release drops them); the slot params
+	// travel the same way.
 	for pname := range x.params {
 		x.e.declareOwned(pname)
 	}
-	if x.slotParam != "" {
-		x.e.declareOwned(x.slotParam)
-		// The slot param is a caller-built DOM handle (like any node
-		// temp), so outlet appends accept it.
+	for i := 1; i <= x.slotTotal; i++ {
+		pname := fmt.Sprintf("slot_%d", i)
+		x.e.declareOwned(pname)
+		// Slot params are caller-built DOM handles (like any node
+		// temp), so outlet appends accept them.
 		if x.e.domVars == nil {
 			x.e.domVars = map[string]bool{}
 		}
-		x.e.domVars[x.slotParam] = true
+		x.e.domVars[pname] = true
 	}
 	root, ok := x.lowerNode(ret.Expression)
 	if !ok {
@@ -884,6 +885,29 @@ func (x *tsxDirect) lowerHandlerCall(hd directHandler, call *ast.Node) bool {
 	}
 }
 
+// isSlotName reports whether nm collides with outlet params (slot,
+// slot_1..slot_N).
+func isSlotName(params map[string]bool) bool {
+	for pname := range params {
+		if pname == "slot" {
+			return true
+		}
+		if len(pname) > 5 && pname[:5] == "slot_" {
+			digits := true
+			for _, c := range pname[5:] {
+				if c < '0' || c > '9' {
+					digits = false
+					break
+				}
+			}
+			if digits {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isBareSlot reports whether c is a bare <Slot /> (no attributes, no
 // children).
 func isBareSlot(c *ast.Node) bool {
@@ -933,16 +957,17 @@ func (x *tsxDirect) lowerNode(n *ast.Node) (string, bool) {
 
 // lowerCustomElement lowers <Tag .../> to a direct @render_Tag call
 // with props passed positionally by callee declaration order
-// (exact-match: every declared prop exactly once). A callee declaring a
-// <Slot /> outlet takes exactly one child, appended as the trailing
-// `slot` argument; callees without one take none. onX on components is
-// a prop, and handlers are not strings, so both refuse here.
+// (exact-match: every declared prop exactly once). A callee declaring N
+// <Slot /> outlets takes exactly N children, appended as the trailing
+// slot_1..slot_N arguments in order; callees without one take none. onX
+// on components is a prop, and handlers are not strings, so both refuse
+// here.
 func (x *tsxDirect) lowerCustomElement(tag string, open, attrs *ast.Node, children []*ast.Node, pos *ast.Node) (string, bool) {
 	e := x.e
 	kids := directNonWhitespace(children)
-	if x.compSlots[tag] {
-		if len(kids) != 1 {
-			x.refuse(pos, "component <%s> declares <Slot />: pass exactly one child in the direct slice", tag)
+	if n := x.compSlots[tag]; n > 0 {
+		if len(kids) != n {
+			x.refuse(pos, "component <%s> declares %d <Slot /> outlet(s): pass exactly %d children in the direct slice", tag, n, n)
 			return "", false
 		}
 	} else if len(kids) != 0 {
@@ -1046,12 +1071,14 @@ func (x *tsxDirect) lowerCustomElement(tag string, open, attrs *ast.Node, childr
 		}
 	}
 	t := e.freshTmp()
-	if x.compSlots[tag] {
-		kh, ok := x.lowerKidNode(kids[0])
-		if !ok {
-			return "", false
+	if x.compSlots[tag] > 0 {
+		for _, k := range kids {
+			kh, ok := x.lowerKidNode(k)
+			if !ok {
+				return "", false
+			}
+			args = append(args, kh)
 		}
-		args = append(args, kh)
 	}
 	e.emit("%s = call @render_%s(%s)", t, tag, strings.Join(args, ", "))
 	e.ownTemp(t)
@@ -1279,23 +1306,24 @@ func (x *tsxDirect) lowerElement(n *ast.Node) (string, bool) {
 		}
 	}
 	for _, c := range children {
-		// <Slot /> appends the caller's kid at the outlet position (at
-		// most one outlet per component; bare only).
+		// <Slot /> appends the caller's kid at the outlet position, in
+		// outlet order (slot_1..slot_N). Bareness validates here.
 		if isSlotKid(c) {
-			if x.slotParam == "" {
+			if x.slotTotal == 0 {
 				x.refuse(c, "Slot outlet without a declared <Slot /> is impossible (internal)")
-				return "", false
-			}
-			if x.slotSeen {
-				x.refuse(c, "single <Slot /> outlet in the direct slice (second outlet)")
 				return "", false
 			}
 			if !isBareSlot(c) {
 				x.refuse(c, "Slot takes no children or attributes (bare <Slot /> only)")
 				return "", false
 			}
-			x.slotSeen = true
-			if _, _, claimed := e.lowerDomMethod(h, "appendChild", []string{x.slotParam}, nil, c); !claimed {
+			x.slotNext++
+			if x.slotNext > x.slotTotal {
+				x.refuse(c, "more <Slot /> outlets than pre-passed (internal)")
+				return "", false
+			}
+			pname := fmt.Sprintf("slot_%d", x.slotNext)
+			if _, _, claimed := e.lowerDomMethod(h, "appendChild", []string{pname}, nil, c); !claimed {
 				x.refuse(c, "appendChild rejected slot node")
 				return "", false
 			}

@@ -998,6 +998,12 @@
   `slot.sai` 经 `sa check` 独立通过 + 形状过。
   `Lower()` 零改 → 286 零影响；全套件绿（`count=1`）。
   JEV blast-radius local_only/safe_to_apply 80%。
+- ✅ 路二多出口 Slot 刀（N 出口↔N 尾参，按序 exact-N）：
+  `compSlots` 改计数，签名统一 `slot_1..slot_N`（单出口为 N=1 特例）；
+  出口按出现序 append 对应参；调用方 kids 数必等于 N（空白跳过）。
+  单测双出口正形 + 数量失配拒；`slots.sai` 经 `sa check` 独立通过 +
+  形状过。`Lower()` 零改 → 286 零影响；全套件绿（`count=1`）。
+  JEV blast-radius local_only/safe_to_apply 79%。
 - ✅ npm B 通道收缩判定落地（todo/03#6，program + d.ts 配对口径）：
   `lodash-es@4.17.21` chunk 子树 23 链接 0 通过（0 未决），`date-fns@2.30.0`
   addDays 子树 2 链接 0 通过（+11 未决：`@babel/runtime/*` + 包内互操作）；
