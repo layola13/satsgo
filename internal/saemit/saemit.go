@@ -3230,11 +3230,22 @@ func (e *emitter) lowerBinary(n *ast.Node) (string, saType) {
 		if floats {
 			e.emit("%s = fdiv %s, %s", t, l, r)
 		} else {
+			// 字面量除零编译期拒（`1/0` 原生 SIGFPE，JS 得 Infinity；
+			// 变量除数沿旧门，f64 除法 IEEE 无崩沿旧路；与 tsgosa R3-49 同形）。
+			if bin.Right != nil && bin.Right.Kind == ast.KindNumericLiteral && bin.Right.Text() == "0" {
+				e.refuse(n, "division by zero (literal zero divisor traps; JS yields Infinity)")
+				return "0", tUnknown
+			}
 			e.emit("%s = div %s, %s", t, l, r)
 		}
 	case ast.KindPercentToken:
 		if floats {
 			e.refuse(n, "float %% lowers to no SA-ASM instruction (there is no frem); refuse loudly")
+			return "0", tUnknown
+		}
+		// 字面量零取余同除零拒（`1%0` 同样陷阱；与上除法臂同形）。
+		if bin.Right != nil && bin.Right.Kind == ast.KindNumericLiteral && bin.Right.Text() == "0" {
+			e.refuse(n, "division by zero (literal zero divisor traps; JS yields Infinity)")
 			return "0", tUnknown
 		}
 		e.emit("%s = srem %s, %s", t, l, r)

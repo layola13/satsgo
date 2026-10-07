@@ -51,6 +51,8 @@
   `deno.sai`/`bun.sai` 同理（`Deno.*`/`Bun.*` 命名空间）。投影表需加 Backend 维度
   （sa_std vs node/deno/bun），`@import` 指向插件 `.sai`，u32 状态码 + slot-alloc/load
   调用形状与现有 fallible-trio 一致。deno/bun 暂无 exported-symbols 清单，补投影时需先索取。
+- 2026-10-07 薄口对齐：字面量零除数编译期拒（`lowerBinary` `/`、`%` 整数臂，右为数字面量
+  `0` 即拒，与 tsgosa R3-49 同谓词同文案；变量除数/f64 沿旧路；`go test ./internal/saemit/` 绿）。
 
 ### Phase 1：Program 多文件链接（进行中，见 todo/01_program_link.md）
 
